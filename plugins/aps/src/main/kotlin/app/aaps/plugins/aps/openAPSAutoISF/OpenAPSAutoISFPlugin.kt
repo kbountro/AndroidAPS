@@ -1,3 +1,7 @@
+// kbountro: Changes: 
+// 1. bg_ISF interpolate polygon.
+// 2. bg_ISF is multiplied universally with pp and accel weights
+
 package app.aaps.plugins.aps.openAPSAutoISF
 
 import android.content.Context
@@ -806,6 +810,27 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
         var acce_weight = 1.0
         val bg_off = target_bg + 10.0 - glucose_status.glucose                      // move from central BG=100 to target+10 as virtual BG'=100
 
+        
+        // kbountro: bg_ISF is now multiplied universally with the pp and accel
+        val bg_ISF = 1 + interpolate(100 - bg_off)
+        consoleError.add("bg_ISF adaptation is ${round(bg_ISF, 2)}")
+        autoIsfValues.bgIsf = bg_ISF
+        var liftISF: Double
+        val final_ISF: Double
+        //if (bg_ISF < 1.0) {
+        //    liftISF = min(bg_ISF, acce_ISF)
+        //    if (acce_ISF > 1.0) {
+        //        liftISF = bg_ISF * acce_ISF                                 // bg_ISF could become > 1 now
+        //        consoleError.add("bg_ISF adaptation lifted to ${round(liftISF, 2)} as bg accelerates already")
+        //    }
+        //    final_ISF = withinISFlimits(liftISF, autoISF_min, maxISFReduction, sensitivityRatio, exerciseModeActive, resistanceModeActive, stepActivityDetected, stepInactivityDetected)
+        //    return min(720.0, round(sens / final_ISF, 1))         // observe ISF maximum of 720(?)
+        //} else if (bg_ISF > 1.0) {
+        //    sens_modified = true
+        //if (bg_ISF != 1.0) {
+        //    sens_modified = true
+        //}
+
         // calculate acce_ISF from bg acceleration and adapt ISF accordingly
         val fit_corr: Double = glucose_status.corrSqu
         val bg_acce: Double = glucose_status.bgAcceleration
@@ -847,29 +872,18 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
                 }
             }
             acce_ISF = 1.0 + bg_acce * cap_weight * acce_weight * fit_share
-            consoleError.add("acce_ISF adaptation is ${round(acce_ISF, 2)}")
+            if (bg_ISF != 1.0) { 
+                consoleError.add("acce_ISF adaptation is ${round(acce_ISF, 2)}, scaled to ${round(bg_ISF*acce_ISF, 2)} due to bg_ISF")
+                acce_ISF = acce_ISF*bg_ISF
+            } else {
+                consoleError.add("acce_ISF adaptation is ${round(acce_ISF, 2)}")
+            }
             if (acce_ISF != 1.0) {
                 sens_modified = true
             }
         }
         autoIsfValues.acceIsf = acce_ISF
 
-        val bg_ISF = 1 + interpolate(100 - bg_off)
-        consoleError.add("bg_ISF adaptation is ${round(bg_ISF, 2)}")
-        autoIsfValues.bgIsf = bg_ISF
-        var liftISF: Double
-        val final_ISF: Double
-        if (bg_ISF < 1.0) {
-            liftISF = min(bg_ISF, acce_ISF)
-            if (acce_ISF > 1.0) {
-                liftISF = bg_ISF * acce_ISF                                 // bg_ISF could become > 1 now
-                consoleError.add("bg_ISF adaptation lifted to ${round(liftISF, 2)} as bg accelerates already")
-            }
-            final_ISF = withinISFlimits(liftISF, autoISF_min, maxISFReduction, sensitivityRatio, exerciseModeActive, resistanceModeActive, stepActivityDetected, stepInactivityDetected)
-            return min(720.0, round(sens / final_ISF, 1))         // observe ISF maximum of 720(?)
-        } else if (bg_ISF > 1.0) {
-            sens_modified = true
-        }
 
         val bg_delta = glucose_status.delta
         val deltaType = "pp"
@@ -884,7 +898,12 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
 
             else                             -> {
                 pp_ISF = 1.0 + max(0.0, bg_delta * pp_ISF_weight)
-                consoleError.add("pp_ISF adaptation is ${round(pp_ISF, 2)}")
+                if (bg_ISF != 1.0) { 
+                    consoleError.add("pp_ISF adaptation is ${round(pp_ISF, 2)}, scaled to {round(bg_ISF*pp_ISF, 2)} due to bg_ISF")
+                    pp_ISF = pp_ISF*bg_ISF
+                } else {
+                    consoleError.add("pp_ISF adaptation is ${round(pp_ISF, 2)}")
+                }
                 if (pp_ISF != 1.0) {
                     sens_modified = true
                 }
@@ -931,9 +950,13 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
     }
 
     fun interpolate(xdata: Double): Double {   // interpolate ISF behaviour based on polygons defining nonlinear functions defined by value pairs for ...
+        // kbountro: Changed polygon according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
+        // kbountro: Guessed extrapolation of the above study from 200mg/dl to 300mg/dl, 10% -> 20% insulin effectiveness
         //  ...             <----------------------  glucose  ---------------------->
-        val polyX = arrayOf(50.0, 60.0, 80.0, 90.0, 100.0, 110.0, 150.0, 180.0, 200.0)
-        val polyY = arrayOf(-0.5, -0.5, -0.3, -0.2, 0.0, 0.0, 0.5, 0.7, 0.7)
+        //val polyX = arrayOf(50.0, 60.0, 80.0, 90.0, 100.0, 110.0, 150.0, 180.0, 200.0)
+        //val polyY = arrayOf(-0.5, -0.5, -0.3, -0.2, 0.0, 0.0, 0.5, 0.7, 0.7)
+        val polyX = arrayOf(50.0, 60.0, 70.0, 80.0, 90.0, 150.0, 200.0, 300.0)
+        val polyY = arrayOf(-0.57, -0.28, -0.16, -0.06, 0.0, 0.0, 0.11, 0.25)
         val polymax: Int = polyX.size - 1
         var step = polyX[0]
         var sVal = polyY[0]
