@@ -179,12 +179,15 @@ function loop_smb(microBolusAllowed, profile, iob_data, useIobTh, iobThEffective
     return "AAPS";                                                      // leave it to standard AAPS
 }
 
+// kbountro: Changed polygon according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
+// kbountro: Guessed extrapolation of the above study from 200mg/dl to 300mg/dl, 10% -> 20% insulin effectiveness
 function interpolate(xdata, profile)    //, type)
 {   // interpolate ISF behaviour based on polygons defining nonlinear functions defined by value pairs for ...
     //  ...      <---------------  glucose  ------------------->
-    var polyX = [  50,   60,   80,   90, 100, 110, 150, 180, 200];    // later, hand it over
-    var polyY = [-0.5, -0.5, -0.3, -0.2, 0.0, 0.0, 0.5, 0.7, 0.7];    // later, hand it over
-
+    //var polyX = [  50,   60,   80,   90, 100, 110, 150, 180, 200];    // later, hand it over
+    //var polyY = [-0.5, -0.5, -0.3, -0.2, 0.0, 0.0, 0.5, 0.7, 0.7];    // later, hand it over
+    var polyX = [50, 60, 70, 80, 90, 150, 200, 300];
+    var polyY = [-0.57, -0.28, -0.16, -0.06, 0.0, 0.0, 0.11, 0.25];
     var polymax = polyX.length-1;
     var step = polyX[0];
     var sVal = polyY[0];
@@ -381,12 +384,18 @@ autosens_data, sensitivityRatio, loop_wanted_smb, high_temptarget_raises_sensiti
         sens_modified = true;
         console.error("dura_ISF adaptation is", round(dura_ISF,2), "because ISF", round(sens,1), "did not do it for", round(dura05,1),"m");
     }
+
+    // kbountro: dura_ISF is now multiplied universally with other weights
     if ( sens_modified ) {
-        liftISF = Math.max(dura_ISF, bg_ISF, acce_ISF, pp_ISF);
+        liftISF = Math.max(bg_ISF, acce_ISF, pp_ISF);
         if ( acce_ISF < 1 ) {                                                                           // 13.JAN.2022 brakes on for otherwise stronger or stable ISF
             console.error("strongest autoISF factor", round(liftISF,2), "weakened to", round(liftISF*acce_ISF,2), "as bg decelerates already");
             liftISF = liftISF * acce_ISF;                                                               // brakes on for otherwise stronger or stable ISF
-        }                                                                                               // brakes on for otherwise stronger or stable ISF
+        }      
+        if ( dura_ISF > 1 ) {
+            console.error("strongest autoISF factor", round(liftISF,2), "lifted to", round(liftISF*dura_ISF,2), "to fight resistance");
+            liftISF = liftISF * dura_ISF;
+        }
         final_ISF = withinISFlimits(liftISF, profile.autoISF_min, maxISFReduction, sensitivityRatio, origin_sens, profile, high_temptarget_raises_sensitivity, target_bg, normalTarget);
         return round(profile.sens / final_ISF, 1);
     }
