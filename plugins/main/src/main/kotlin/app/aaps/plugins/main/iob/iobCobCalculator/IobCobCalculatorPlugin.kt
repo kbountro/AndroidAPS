@@ -522,22 +522,42 @@ class IobCobCalculatorPlugin @Inject constructor(
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
         assert(divisor > 0)
 
-        val boluses = persistenceLayer.getBolusesFromTime(toTime - range(), true).blockingGet()
+        // Fetch boluses and SORT chronologically (oldest to newest)
+        val rawBoluses = persistenceLayer.getBolusesFromTime(toTime - range(), true).blockingGet()
+        val sortedBoluses = rawBoluses.filter { it.isValid && it.timestamp < toTime }.sortedBy { it.timestamp }
 
-        boluses.forEach { t ->
-            if (t.isValid && t.timestamp < toTime) {
-                val tIOB = t.iobCalc(activePlugin, toTime, dia)
-                total.iob += tIOB.iobContrib
-                total.activity += tIOB.activityContrib
-                if (t.amount > 0 && t.timestamp > total.lastBolusTime) total.lastBolusTime = t.timestamp
-                if (t.type != BS.Type.SMB) {
-                    // instead of dividing the DIA that only worked on the bilinear curves,
-                    // multiply the time the treatment is seen active.
-                    val timeSinceTreatment = toTime - t.timestamp
-                    val snoozeTime = t.timestamp + (timeSinceTreatment * divisor).toLong()
-                    val bIOB = t.iobCalc(activePlugin, snoozeTime, dia)
-                    total.bolussnooze += bIOB.iobContrib
-                }
+        // Structure to remember the background IOB tied to each historical bolus
+        class ProcessedBolus(val bolus: BS, val backgroundIob: Double)
+        val processedBoluses = mutableListOf<ProcessedBolus>()
+
+        for (bolus in sortedBoluses) {
+            // A. Calculate how much PHYSICAL IOB (PK) was active at the exact moment THIS bolus was given
+            var currentBackgroundIob = 0.0
+            for (prev in processedBoluses) {
+                // IMPORTANT: usePkCurve = true to get the unabsorbed fluid pool, not the delayed action
+                val prevTailingIob = prev.bolus.iobCalc(activePlugin, bolus.timestamp, dia, prev.backgroundIob, usePkCurve = true)
+                currentBackgroundIob += prevTailingIob.iobContrib
+            }
+
+            processedBoluses.add(ProcessedBolus(bolus, currentBackgroundIob))
+
+            // B. Calculate this bolus's actual glucose-lowering contribution to 'toTime'
+            // IMPORTANT: usePkCurve = false (we want the PD action here)
+            val tIOB = bolus.iobCalc(activePlugin, toTime, dia, currentBackgroundIob, usePkCurve = false)
+
+            total.iob += tIOB.iobContrib
+            total.activity += tIOB.activityContrib
+
+            if (bolus.amount > 0 && bolus.timestamp > total.lastBolusTime) {
+                total.lastBolusTime = bolus.timestamp
+            }
+
+            if (bolus.type != BS.Type.SMB) {
+                val timeSinceTreatment = toTime - bolus.timestamp
+                val snoozeTime = bolus.timestamp + (timeSinceTreatment * divisor).toLong()
+                // Snooze is also based on PD action
+                val bIOB = bolus.iobCalc(activePlugin, snoozeTime, dia, currentBackgroundIob, usePkCurve = false)
+                total.bolussnooze += bIOB.iobContrib
             }
         }
 

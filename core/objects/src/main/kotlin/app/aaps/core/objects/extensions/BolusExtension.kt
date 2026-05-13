@@ -5,8 +5,8 @@ import app.aaps.core.data.model.BS
 import app.aaps.core.interfaces.insulin.Insulin
 import app.aaps.core.interfaces.plugin.ActivePlugin
 
-fun BS.iobCalc(activePlugin: ActivePlugin, time: Long, dia: Double): Iob {
+fun BS.iobCalc(activePlugin: ActivePlugin, time: Long, dia: Double, backgroundIob: Double = 0.0, usePkCurve: Boolean = false): Iob {
     if (!isValid || type == BS.Type.PRIMING) return Iob()
     val insulinInterface: Insulin = activePlugin.activeInsulin
-    return insulinInterface.iobCalcForTreatment(this, time, dia)
+    return insulinInterface.iobCalcForTreatment(this, time, dia, backgroundIob, usePkCurve)
 }

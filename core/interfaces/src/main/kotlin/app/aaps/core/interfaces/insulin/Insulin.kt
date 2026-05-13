@@ -31,7 +31,7 @@ interface Insulin : ConfigExportImport {
     val dia: Double
     val peak: Int
 
-    fun iobCalcForTreatment(bolus: BS, time: Long, dia: Double): Iob
+    fun iobCalcForTreatment(bolus: BS, time: Long, dia: Double, backgroundIob: Double = 0.0, usePkCurve: Boolean = false): Iob
 
     val iCfg: ICfg
 }
