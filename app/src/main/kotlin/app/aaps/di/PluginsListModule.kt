@@ -76,7 +76,6 @@ import dagger.multibindings.IntKey
 import dagger.multibindings.IntoMap
 import info.nightscout.pump.combov2.ComboV2Plugin
 import app.aaps.plugins.insulin.InsulinLyumjevU100PDPlugin
-import app.aaps.plugins.insulin.InsulinLyumjevU200PDPlugin
 import javax.inject.Qualifier
 
 @Suppress("unused")
