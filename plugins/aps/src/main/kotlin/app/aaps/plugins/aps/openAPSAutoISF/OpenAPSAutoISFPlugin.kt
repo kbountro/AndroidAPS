@@ -682,8 +682,8 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
 
         if ( !activityDetection ) {
             consoleLog.add("Activity monitor disabled in settings")
-        } else if ( isTempTarget ) {
-            consoleLog.add("Activity monitor disabled: tempTarget")
+        } else if ( isTempTarget && target_bg > 99 ) {
+            consoleLog.add("Activity monitor disabled: tempTarget above 99")
         } else if ( !phoneMoved ) {
             consoleLog.add("Activity monitor disabled: Phone seems not to be carried for the last 15m")
         } else {
@@ -934,7 +934,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
                 liftISF = liftISF * acce_ISF
             }
             if (dura_ISF > 1.0) {
-                consoleError.add("autoISF factor ${round(liftISF, 2)} lifted to ${round(liftISF * dura_ISF, 2)} to fight resistance")
+                consoleError.add("lifted to ${round(liftISF * dura_ISF, 2)} to fight resistance")
                 liftISF = liftISF * dura_ISF
             }
             final_ISF = withinISFlimits(liftISF, autoISF_min, maxISFReduction, sensitivityRatio, exerciseModeActive, resistanceModeActive, stepActivityDetected, stepInactivityDetected)
