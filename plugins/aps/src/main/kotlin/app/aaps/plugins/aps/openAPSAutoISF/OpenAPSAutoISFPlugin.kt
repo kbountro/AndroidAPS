@@ -907,7 +907,8 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
             // kbountro: New lower bound according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
             //avg05 <= target_bg -> {
             avg05 <= 150 -> {
-                consoleError.add("dura_ISF by-passed; avg. glucose $avg05 below target $target_bg")
+                //consoleError.add("dura_ISF by-passed; avg. glucose $avg05 below target $target_bg")
+                consoleError.add("dura_ISF by-passed; avg. glucose $avg05 <= 150")
             }
 
             // kbountro: New duraISF scaling according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
