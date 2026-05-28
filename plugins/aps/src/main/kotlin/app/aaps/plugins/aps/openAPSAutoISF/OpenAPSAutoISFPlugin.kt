@@ -904,15 +904,20 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
                 consoleError.add("dura_ISF by-passed; bg is only $dura05 m at level $avg05")
             }
 
-            avg05 <= target_bg -> {
+            // kbountro: New lower bound according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
+            //avg05 <= target_bg -> {
+            avg05 <= 150 -> {
                 consoleError.add("dura_ISF by-passed; avg. glucose $avg05 below target $target_bg")
             }
 
+            // kbountro: New duraISF scaling according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
             else               -> {
                 // fight the resistance at high levels
                 val dura05Weight = dura05 / 60
-                val avg05Weight = weightISF / target_bg
-                dura_ISF += dura05Weight * avg05Weight * (avg05 - target_bg)
+                //val avg05Weight = weightISF / target_bg
+                //dura_ISF += dura05Weight * avg05Weight * (avg05 - target_bg)
+                val avg05Weight = weightISF
+                dura_ISF += dura05Weight * avg05Weight * interpolate(avg05)
                 sens_modified = true
                 consoleError.add("dura_ISF adaptation is ${round(dura_ISF, 2)} because ISF ${round(sens, 1)} did not do it for ${round(dura05, 1)}m")
             }
