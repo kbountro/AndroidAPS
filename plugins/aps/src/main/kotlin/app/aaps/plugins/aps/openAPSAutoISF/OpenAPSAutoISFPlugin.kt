@@ -810,6 +810,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
         var acce_weight = 1.0
         val bg_off = target_bg + 10.0 - glucose_status.glucose                      // move from central BG=100 to target+10 as virtual BG'=100
 
+
         // calculate acce_ISF from bg acceleration and adapt ISF accordingly
         val fit_corr: Double = glucose_status.corrSqu
         val bg_acce: Double = glucose_status.bgAcceleration
@@ -858,7 +859,14 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
         }
         autoIsfValues.acceIsf = acce_ISF
 
-        val bg_ISF = 1 + interpolate(100 - bg_off)
+        // kbountro: bgISF depends solely on glucose
+        //val bg_ISF = 1 + interpolate(100 - bg_off)
+        var bg_ISF = interpolate(glucose_status.glucose)
+        bg_ISF = if (glucose_status.glucose > 90) {
+            1 + bg_ISF * higher_ISFrange_weight
+        } else {
+            1 + bg_ISF * lower_ISFrange_weight
+        }
         consoleError.add("bg_ISF adaptation is ${round(bg_ISF, 2)}")
         autoIsfValues.bgIsf = bg_ISF
         var liftISF: Double
@@ -948,6 +956,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
 
     // kbountro: Changed polygon according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
     // kbountro: Guessed extrapolation of the above study from 200mg/dl to 300mg/dl, 10% -> 20% insulin effectiveness
+    // kbountro: Moved bgISF weights out of the interpolate function
     fun interpolate(xdata: Double): Double {   // interpolate ISF behaviour based on polygons defining nonlinear functions defined by value pairs for ...
         //  ...             <----------------------  glucose  ---------------------->
         //val polyX = arrayOf(50.0, 60.0, 80.0, 90.0, 100.0, 110.0, 150.0, 180.0, 200.0)
@@ -1008,11 +1017,13 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
                 lowLabl = step
             }
         }
+        /*
         newVal = if (xdata > 100) {
             newVal * higher_ISFrange_weight
         } else {
             newVal * lower_ISFrange_weight
         }
+        */
         return newVal
     }
 
