@@ -508,9 +508,8 @@ class IobCobCalculatorPlugin @Inject constructor(
 
     /**
      * Calculate IobTotal from boluses and extended to provided timestamp.
-     * NOTE: Only isValid == true boluses are included
-     * NOTE: if faking by TBR by extended boluses is enabled, extended boluses are not included
-     *  and are calculated towards temporary basals
+     * Integrates a biophysical Subcutaneous (SC) tracking model to dynamically stretch
+     * empirical Tsunami PK/PD curves based on literal tissue saturation.
      *
      * @param toTime timestamp in milliseconds
      * @return calculated iob
@@ -526,24 +525,83 @@ class IobCobCalculatorPlugin @Inject constructor(
         val rawBoluses = persistenceLayer.getBolusesFromTime(toTime - range(), true).blockingGet()
         val sortedBoluses = rawBoluses.filter { it.isValid && it.timestamp < toTime }.sortedBy { it.timestamp }
 
-        // Structure to remember the background IOB tied to each historical bolus
-        class ProcessedBolus(val bolus: BS, val backgroundIob: Double)
+        // Structure to remember the biophysical state locked to each historical bolus
+        class ProcessedBolus(
+            val bolus: BS,
+            val scNextForTsunami: Double, // The physical volume we feed to Tsunami
+            val assignedTau: Double       // The local absorption sluggishness assigned to this dose
+        )
         val processedBoluses = mutableListOf<ProcessedBolus>()
 
+        // Tsunami Constants
+        val insulinID = activePlugin.activeInsulin.id.value
+        val a0 = 61.33
+        val a1 = 12.27
+        val b1 = 0.05185
+
         for (bolus in sortedBoluses) {
-            // A. Calculate how much PHYSICAL IOB (PK) was active at the exact moment THIS bolus was given
-            var currentBackgroundIob = 0.0
+            val tNow = bolus.timestamp
+
+            // ---------------------------------------------------------
+            // 1 & 2. SYSTEMIC STATE: Calculate t_p of the current PK IOB ONLY
+            // ---------------------------------------------------------
+            var currentPkIob = 0.0
             for (prev in processedBoluses) {
-                // IMPORTANT: usePkCurve = true to get the unabsorbed fluid pool, not the delayed action
-                val prevTailingIob = prev.bolus.iobCalc(activePlugin, bolus.timestamp, dia, prev.backgroundIob, usePkCurve = true)
-                currentBackgroundIob += prevTailingIob.iobContrib
+                // usePkCurve = true gets the active serum insulin at tNow, shifted by 47% via the plugin.
+                // We pass the historical scNext so the curve is stretched exactly as it was when injected.
+                val prevTailingPk = prev.bolus.iobCalc(activePlugin, tNow, dia, prev.scNextForTsunami, usePkCurve = true)
+                currentPkIob += prevTailingPk.iobContrib
             }
 
-            processedBoluses.add(ProcessedBolus(bolus, currentBackgroundIob))
+            // Calculate systemic t_p using ONLY the active serum insulin.
+            // The new bolus has not physically reached the serum yet.
+            val systemicTp = if (insulinID == 205) {
+                (a0 + a1 * 2 * currentPkIob) / (1 + b1 * 2 * currentPkIob)
+            } else {
+                (a0 + a1 * currentPkIob) / (1 + b1 * currentPkIob)
+            }
 
-            // B. Calculate this bolus's actual glucose-lowering contribution to 'toTime'
-            // IMPORTANT: usePkCurve = false (we want the PD action here)
-            val tIOB = bolus.iobCalc(activePlugin, toTime, dia, currentBackgroundIob, usePkCurve = false)
+
+            // ---------------------------------------------------------
+            // 3. SLUGGISHNESS: Compute the current tau based on systemic t_p
+            // ---------------------------------------------------------
+            // Using the O(1) linear regression of the transcendental root
+            val currentTau = max(1.0, (0.85 * systemicTp) - 6.0)
+
+
+            // ---------------------------------------------------------
+            // 4. PHYSICAL STATE: Calculate SC_prev using the SC model and tau_i
+            // ---------------------------------------------------------
+            var scPrev = 0.0
+            for (prev in processedBoluses) {
+                // Convert AndroidAPS timestamps (ms) to minutes for the SC math
+                val timeElapsedMins = (tNow - prev.bolus.timestamp) / 60000.0
+
+                if (timeElapsedMins > 0) {
+                    // Physical Model: SC(t) = D * (1 + t/tau_i) * e^(-t/tau_i)
+                    // We strictly use prev.assignedTau to preserve historical causality
+                    val sc = prev.bolus.amount * (1.0 + (timeElapsedMins / prev.assignedTau)) * Math.exp(-timeElapsedMins / prev.assignedTau)
+                    scPrev += sc
+                }
+            }
+
+
+            // ---------------------------------------------------------
+            // 5. THE COLLISION: Sum the new SC_next
+            // ---------------------------------------------------------
+            val scNext = bolus.amount + scPrev
+
+
+            // Lock the state for future loop iterations
+            processedBoluses.add(ProcessedBolus(bolus, scNext, currentTau))
+
+
+            // ---------------------------------------------------------
+            // 6. FORWARD PREDICTION: Feed SC_next into Tsunami
+            // ---------------------------------------------------------
+            // Calculate this bolus's actual glucose-lowering contribution to 'toTime'
+            // CRITICAL: usePkCurve = false, and we pass scNext so InsulinOrefBasePlugin safely stretches the PD!
+            val tIOB = bolus.iobCalc(activePlugin, toTime, dia, scNext, usePkCurve = false)
 
             total.iob += tIOB.iobContrib
             total.activity += tIOB.activityContrib
@@ -555,8 +613,9 @@ class IobCobCalculatorPlugin @Inject constructor(
             if (bolus.type != BS.Type.SMB) {
                 val timeSinceTreatment = toTime - bolus.timestamp
                 val snoozeTime = bolus.timestamp + (timeSinceTreatment * divisor).toLong()
-                // Snooze is also based on PD action
-                val bIOB = bolus.iobCalc(activePlugin, snoozeTime, dia, currentBackgroundIob, usePkCurve = false)
+
+                // Snooze is also based on PD action and the physical SC load
+                val bIOB = bolus.iobCalc(activePlugin, snoozeTime, dia, scNext, usePkCurve = false)
                 total.bolussnooze += bIOB.iobContrib
             }
         }
