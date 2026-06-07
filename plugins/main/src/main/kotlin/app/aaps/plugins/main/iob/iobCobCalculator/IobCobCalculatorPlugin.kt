@@ -507,116 +507,80 @@ class IobCobCalculatorPlugin @Inject constructor(
     override fun calculateIobFromBolus(): IobTotal = calculateIobFromBolusToTime(dateUtil.now())
 
     /**
-     * Calculate IobTotal from boluses and extended to provided timestamp.
-     * Integrates a biophysical Subcutaneous (SC) tracking model to dynamically stretch
-     * empirical Tsunami PK/PD curves based on literal tissue saturation.
-     *
-     * @param toTime timestamp in milliseconds
-     * @return calculated iob
+     * UNIFIED STATEFUL CALCULATION
+     * Calculates IOB using a unified timeline of Boluses and TBR chunks to accurately 
+     * track Subcutaneous (SC) tissue saturation for the Tsunami model.
      */
     private fun calculateIobFromBolusToTime(toTime: Long): IobTotal {
         val total = IobTotal(toTime)
         val profile = profileFunction.getProfile() ?: return total
         val dia = profile.dia
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
-        assert(divisor > 0)
 
-        // Fetch boluses and SORT chronologically (oldest to newest)
-        val rawBoluses = persistenceLayer.getBolusesFromTime(toTime - range(), true).blockingGet()
-        val sortedBoluses = rawBoluses.filter { it.isValid && it.timestamp < toTime }.sortedBy { it.timestamp }
+        // 1. Build the Unified Timeline of every physical insulin drop
+        val unifiedTimeline = buildUnifiedDoseTimeline(toTime - range(), toTime)
+        
+        // State trackers
+        val doseHistory = ArrayList<TrackedDose>(unifiedTimeline.size)
+        val customInsulinPlugin = activePlugin.activeInsulin as? app.aaps.plugins.insulin.InsulinOrefBasePlugin
+        val isU200 = activePlugin.activeInsulin.id.value == 205
 
-        // Structure to remember the biophysical state locked to each historical bolus
-        class ProcessedBolus(
-            val bolus: BS,
-            val scNextForTsunami: Double, // The physical volume we feed to Tsunami
-            val assignedTau: Double       // The local absorption sluggishness assigned to this dose
-        )
-        val processedBoluses = mutableListOf<ProcessedBolus>()
+        // We calculate active serum insulin continuously to find the systemic Tp
+        var activeSerumInsulin = 0.0
 
-        // Tsunami Constants
-        val insulinID = activePlugin.activeInsulin.id.value
-        val a0 = 61.33
-        val a1 = 12.27
-        val b1 = 0.05185
+        for (dose in unifiedTimeline) {
+            val tNow = dose.timestamp
 
-        for (bolus in sortedBoluses) {
-            val tNow = bolus.timestamp
-
-            // ---------------------------------------------------------
-            // 1 & 2. SYSTEMIC STATE: Calculate t_p of the current PK IOB ONLY
-            // ---------------------------------------------------------
-            var currentPkIob = 0.0
-            for (prev in processedBoluses) {
-                // usePkCurve = true gets the active serum insulin at tNow, shifted by 47% via the plugin.
-                // We pass the historical scNext so the curve is stretched exactly as it was when injected.
-                val prevTailingPk = prev.bolus.iobCalc(activePlugin, tNow, dia, prev.scNextForTsunami, usePkCurve = true)
-                currentPkIob += prevTailingPk.iobContrib
+            // A. Update Active Serum Insulin for the Systemic Peak calculation
+            if (dose.isBolus && dose.originalBolus != null) {
+                activeSerumInsulin += dose.originalBolus.iobCalc(activePlugin, tNow, dia).iobContrib
             }
 
-            // Calculate systemic t_p using ONLY the active serum insulin.
-            // The new bolus has not physically reached the serum yet.
-            val systemicTp = if (insulinID == 205) {
-                (a0 + a1 * 2 * currentPkIob) / (1 + b1 * 2 * currentPkIob)
-            } else {
-                (a0 + a1 * currentPkIob) / (1 + b1 * currentPkIob)
+            // B. Get physiological Tau from the Math Engine
+            val systemicTp = app.aaps.plugins.insulin.math.CompartmentModel.calculateSystemicPeak(activeSerumInsulin, isU200)
+            val currentTau = app.aaps.plugins.insulin.math.CompartmentModel.calculateTau(systemicTp)
+
+            // C. Calculate current accumulated SC Mass from ALL past doses (Boluses + TBRs)
+            var scMass = 0.0
+            for (prev in doseHistory) {
+                val timeElapsedMins = (tNow - prev.timestamp) / 60000.0
+                scMass += app.aaps.plugins.insulin.math.CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
             }
 
+            val totalScMassForCurve = scMass + dose.absoluteAmount
+            
+            // Lock state into history
+            doseHistory.add(TrackedDose(tNow, dose.absoluteAmount, currentTau))
 
-            // ---------------------------------------------------------
-            // 3. SLUGGISHNESS: Compute the current tau based on systemic t_p
-            // ---------------------------------------------------------
-            // Using the O(1) linear regression of the transcendental root
-            val currentTau = max(1.0, (0.85 * systemicTp) - 6.0)
-
-
-            // ---------------------------------------------------------
-            // 4. PHYSICAL STATE: Calculate SC_prev using the SC model and tau_i
-            // ---------------------------------------------------------
-            var scPrev = 0.0
-            for (prev in processedBoluses) {
-                // Convert AndroidAPS timestamps (ms) to minutes for the SC math
-                val timeElapsedMins = (tNow - prev.bolus.timestamp) / 60000.0
-
-                if (timeElapsedMins > 0) {
-                    // Physical Model: SC(t) = D * (1 + t/tau_i) * e^(-t/tau_i)
-                    // We strictly use prev.assignedTau to preserve historical causality
-                    val sc = prev.bolus.amount * (1.0 + (timeElapsedMins / prev.assignedTau)) * Math.exp(-timeElapsedMins / prev.assignedTau)
-                    scPrev += sc
+            // D. ONLY calculate AndroidAPS standard IOB for the actual Boluses
+            // AndroidAPS handles Basal IOB in a separate Net Calculation elsewhere.
+            if (dose.isBolus && dose.originalBolus != null) {
+                if (customInsulinPlugin != null) {
+                    val tIOB = customInsulinPlugin.iobCalcWithState(dose.originalBolus, toTime, totalScMassForCurve)
+                    total.iob += tIOB.iobContrib
+                    total.activity += tIOB.activityContrib
+                } else {
+                    val tIOB = dose.originalBolus.iobCalc(activePlugin, toTime, dia)
+                    total.iob += tIOB.iobContrib
+                    total.activity += tIOB.activityContrib
                 }
-            }
 
+                if (dose.absoluteAmount > 0 && dose.timestamp > total.lastBolusTime) {
+                    total.lastBolusTime = dose.timestamp
+                }
 
-            // ---------------------------------------------------------
-            // 5. THE COLLISION: Sum the new SC_next
-            // ---------------------------------------------------------
-            val scNext = bolus.amount + scPrev
+                if (dose.originalBolus.type != BS.Type.SMB) {
+                    val timeSinceTreatment = toTime - dose.timestamp
+                    val snoozeTime = dose.timestamp + (timeSinceTreatment * divisor).toLong()
 
-
-            // Lock the state for future loop iterations
-            processedBoluses.add(ProcessedBolus(bolus, scNext, currentTau))
-
-
-            // ---------------------------------------------------------
-            // 6. FORWARD PREDICTION: Feed SC_next into Tsunami
-            // ---------------------------------------------------------
-            // Calculate this bolus's actual glucose-lowering contribution to 'toTime'
-            // CRITICAL: usePkCurve = false, and we pass scNext so InsulinOrefBasePlugin safely stretches the PD!
-            val tIOB = bolus.iobCalc(activePlugin, toTime, dia, scNext, usePkCurve = false)
-
-            total.iob += tIOB.iobContrib
-            total.activity += tIOB.activityContrib
-
-            if (bolus.amount > 0 && bolus.timestamp > total.lastBolusTime) {
-                total.lastBolusTime = bolus.timestamp
-            }
-
-            if (bolus.type != BS.Type.SMB) {
-                val timeSinceTreatment = toTime - bolus.timestamp
-                val snoozeTime = bolus.timestamp + (timeSinceTreatment * divisor).toLong()
-
-                // Snooze is also based on PD action and the physical SC load
-                val bIOB = bolus.iobCalc(activePlugin, snoozeTime, dia, scNext, usePkCurve = false)
-                total.bolussnooze += bIOB.iobContrib
+                    if (customInsulinPlugin != null) {
+                        val bIOB = customInsulinPlugin.iobCalcWithState(dose.originalBolus, snoozeTime, totalScMassForCurve)
+                        total.bolussnooze += bIOB.iobContrib
+                    } else {
+                        val bIOB = dose.originalBolus.iobCalc(activePlugin, snoozeTime, dia)
+                        total.bolussnooze += bIOB.iobContrib
+                    }
+                }
             }
         }
 
@@ -675,80 +639,223 @@ class IobCobCalculatorPlugin @Inject constructor(
 
     override fun calculateIobToTimeFromTempBasalsIncludingConvertedExtended(toTime: Long): IobTotal {
         val total = IobTotal(toTime)
-        val now = dateUtil.now()
-        val pumpInterface = activePlugin.activePump
+        val profile = profileFunction.getProfile() ?: return total
+        val dia = profile.dia
 
-        val temporaryBasals = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(toTime - range(), toTime, true)
-        for (pos in temporaryBasals.indices) {
-            val t = temporaryBasals[pos]
-            if (t.timestamp > toTime) continue
-            val profile = profileFunction.getProfile(t.timestamp) ?: continue
-            if (t.end > now) t.duration = now - t.timestamp
-            val calc = t.iobCalc(toTime, profile, activePlugin.activeInsulin)
-            //log.debug("BasalIOB " + new Date(time) + " >>> " + calc.basalIob);
-            total.plus(calc)
-        }
-        if (pumpInterface.isFakingTempsByExtendedBoluses) {
-            val totalExt = IobTotal(toTime)
-            val extendedBoluses = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(toTime - range(), toTime, true)
-            for (pos in extendedBoluses.indices) {
-                val e = extendedBoluses[pos]
-                if (e.timestamp > toTime) continue
-                val profile = profileFunction.getProfile(e.timestamp) ?: continue
-                if (e.end > now) {
-                    val newDuration = now - e.timestamp
-                    e.amount *= newDuration.toDouble() / e.duration
-                    e.duration = newDuration
-                }
-                val calc = e.iobCalc(toTime, profile, activePlugin.activeInsulin)
-                totalExt.plus(calc)
+        // 1. Get the Unified Timeline (This contains ALL Absolute physical saturation)
+        val unifiedTimeline = buildUnifiedDoseTimeline(toTime - range(), toTime)
+        
+        val doseHistory = ArrayList<TrackedDose>(unifiedTimeline.size)
+        val customInsulinPlugin = activePlugin.activeInsulin as? app.aaps.plugins.insulin.InsulinOrefBasePlugin
+        val isU200 = activePlugin.activeInsulin.id.value == 205
+
+        var activeSerumInsulin = 0.0
+
+        for (dose in unifiedTimeline) {
+            val tNow = dose.timestamp
+
+            // A. Update Active Serum Insulin for systemic Tp
+            if (dose.isBolus && dose.originalBolus != null) {
+                activeSerumInsulin += dose.originalBolus.iobCalc(activePlugin, tNow, dia).iobContrib
             }
-            // Convert to basal iob
+
+            // B. Get Tau from the Math Engine
+            val systemicTp = app.aaps.plugins.insulin.math.CompartmentModel.calculateSystemicPeak(activeSerumInsulin, isU200)
+            val currentTau = app.aaps.plugins.insulin.math.CompartmentModel.calculateTau(systemicTp)
+
+            // C. Calculate SC Mass (Using the ABSOLUTE physical dose!)
+            var scMass = 0.0
+            for (prev in doseHistory) {
+                val timeElapsedMins = (tNow - prev.timestamp) / 60000.0
+                scMass += app.aaps.plugins.insulin.math.CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
+            }
+            val totalScMassForCurve = scMass + dose.absoluteAmount
+            
+            // Lock state into history
+            doseHistory.add(TrackedDose(tNow, dose.absoluteAmount, currentTau))
+
+            // D. ONLY calculate Basal IOB for the Non-Bolus chunks
+            if (!dose.isBolus) {
+                // Find the profile rate to determine the NET difference
+                val profileBasalRate = profile.getBasal(tNow)
+                val profileBasalChunk = profileBasalRate * (5.0 / 60.0) // Convert U/hr to 5-min U
+                val netAmount = dose.absoluteAmount - profileBasalChunk
+
+                if (netAmount != 0.0) {
+                    // Create a Dummy Bolus to feed into our Stateful IOB calculator
+                    val dummyNetBolus = BS(timestamp = tNow, amount = netAmount, type = BS.Type.NORMAL, isBasalInsulin = true)
+
+                    if (customInsulinPlugin != null) {
+                        // Calculate with the heavily delayed SC curve!
+                        val tIOB = customInsulinPlugin.iobCalcWithState(dummyNetBolus, toTime, totalScMassForCurve)
+                        total.basaliob += tIOB.iobContrib
+                        total.activity += tIOB.activityContrib
+                        total.netbasalinsulin += netAmount
+                    } else {
+                        // Fallback to vanilla
+                        val tIOB = dummyNetBolus.iobCalc(activePlugin, toTime, dia)
+                        total.basaliob += tIOB.iobContrib
+                        total.activity += tIOB.activityContrib
+                        total.netbasalinsulin += netAmount
+                    }
+                }
+            }
+        }
+        
+        // Map total IOB to basal IOB to match AndroidAPS return expectations
+        total.iob = total.basaliob
+
+        // Handle the rare case where pumps fake TBRs using Extended Boluses
+        val pumpInterface = activePlugin.activePump
+        if (pumpInterface.isFakingTempsByExtendedBoluses) {
+            val totalExt = calculateIobToTimeFromExtendedBoluses(toTime)
             totalExt.basaliob = totalExt.iob
             totalExt.iob = 0.0
             totalExt.netbasalinsulin = totalExt.extendedBolusInsulin
             totalExt.hightempinsulin = totalExt.extendedBolusInsulin
             total.plus(totalExt)
         }
+
         return total
     }
 
     private fun getCalculationToTimeTempBasals(toTime: Long, lastAutosensResult: AutosensResult, exerciseMode: Boolean, halfBasalExerciseTarget: Double, isTempTarget: Boolean): IobTotal {
         val total = IobTotal(toTime)
-        val pumpInterface = activePlugin.activePump
-        val now = dateUtil.now()
-        val temporaryBasals = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(toTime - range(), toTime, true)
-        for (pos in temporaryBasals.indices) {
-            val t = temporaryBasals[pos]
-            if (t.timestamp > toTime) continue
-            val profile = profileFunction.getProfile(t.timestamp) ?: continue
-            if (t.end > now) t.duration = now - t.timestamp
-            val calc = t.iobCalc(toTime, profile, lastAutosensResult, exerciseMode, halfBasalExerciseTarget, isTempTarget, activePlugin.activeInsulin)
-            //log.debug("BasalIOB " + new Date(time) + " >>> " + calc.basalIob);
-            total.plus(calc)
-        }
-        if (pumpInterface.isFakingTempsByExtendedBoluses) {
-            val totalExt = IobTotal(toTime)
-            val extendedBoluses = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(toTime - range(), toTime, true)
-            for (pos in extendedBoluses.indices) {
-                val e = extendedBoluses[pos]
-                if (e.timestamp > toTime) continue
-                val profile = profileFunction.getProfile(e.timestamp) ?: continue
-                if (e.end > now) {
-                    val newDuration = now - e.timestamp
-                    e.amount *= newDuration.toDouble() / e.duration
-                    e.duration = newDuration
-                }
-                val calc = e.iobCalc(toTime, profile, lastAutosensResult, exerciseMode, halfBasalExerciseTarget, isTempTarget, activePlugin.activeInsulin)
-                totalExt.plus(calc)
+        val profile = profileFunction.getProfile() ?: return total
+        val dia = profile.dia
+
+        // 1. Get the Unified Timeline (This contains ALL Absolute physical saturation)
+        val unifiedTimeline = buildUnifiedDoseTimeline(toTime - range(), toTime)
+        
+        val doseHistory = ArrayList<TrackedDose>(unifiedTimeline.size)
+        val customInsulinPlugin = activePlugin.activeInsulin as? app.aaps.plugins.insulin.InsulinOrefBasePlugin
+        val isU200 = activePlugin.activeInsulin.id.value == 205
+
+        var activeSerumInsulin = 0.0
+
+        // --- OPTION A: The Math Hack ---
+        // Extract the ratio from the Autosens result. 
+        val effectiveRatio = lastAutosensResult.ratio
+
+        for (dose in unifiedTimeline) {
+            val tNow = dose.timestamp
+
+            // A. Update Active Serum Insulin for systemic Tp
+            if (dose.isBolus && dose.originalBolus != null) {
+                activeSerumInsulin += dose.originalBolus.iobCalc(activePlugin, tNow, dia).iobContrib
             }
-            // Convert to basal iob
+
+            // B. Get Tau from the Math Engine
+            val systemicTp = app.aaps.plugins.insulin.math.CompartmentModel.calculateSystemicPeak(activeSerumInsulin, isU200)
+            val currentTau = app.aaps.plugins.insulin.math.CompartmentModel.calculateTau(systemicTp)
+
+            // C. Calculate SC Mass (Using the ABSOLUTE physical dose!)
+            var scMass = 0.0
+            for (prev in doseHistory) {
+                val timeElapsedMins = (tNow - prev.timestamp) / 60000.0
+                scMass += app.aaps.plugins.insulin.math.CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
+            }
+            val totalScMassForCurve = scMass + dose.absoluteAmount
+            
+            // Lock state into history
+            doseHistory.add(TrackedDose(tNow, dose.absoluteAmount, currentTau))
+
+            // D. ONLY calculate Basal IOB for the Non-Bolus chunks
+            if (!dose.isBolus) {
+                // Find the profile rate to determine the NET difference
+                val profileBasalRate = profile.getBasal(tNow)
+                val profileBasalChunk = profileBasalRate * (5.0 / 60.0) // Convert U/hr to 5-min U
+                val netAmount = dose.absoluteAmount - profileBasalChunk
+
+                if (netAmount != 0.0) {
+                    // --- OPTION A: Apply the Sensitivity Ratio to the Net Amount ---
+                    val autosensAdjustedNetAmount = netAmount * effectiveRatio
+
+                    // Create a Dummy Bolus to feed into our Stateful IOB calculator
+                    val dummyNetBolus = BS(timestamp = tNow, amount = autosensAdjustedNetAmount, type = BS.Type.NORMAL, isBasalInsulin = true)
+
+                    if (customInsulinPlugin != null) {
+                        // Calculate with the heavily delayed SC curve!
+                        val tIOB = customInsulinPlugin.iobCalcWithState(dummyNetBolus, toTime, totalScMassForCurve)
+                        total.basaliob += tIOB.iobContrib
+                        total.activity += tIOB.activityContrib
+                        total.netbasalinsulin += autosensAdjustedNetAmount // Track the adjusted amount
+                    } else {
+                        // Fallback to vanilla
+                        val tIOB = dummyNetBolus.iobCalc(activePlugin, toTime, dia)
+                        total.basaliob += tIOB.iobContrib
+                        total.activity += tIOB.activityContrib
+                        total.netbasalinsulin += autosensAdjustedNetAmount
+                    }
+                }
+            }
+        }
+        
+        // Map total IOB to basal IOB to match AndroidAPS return expectations
+        total.iob = total.basaliob
+
+        // Handle the rare case where pumps fake TBRs using Extended Boluses
+        val pumpInterface = activePlugin.activePump
+        if (pumpInterface.isFakingTempsByExtendedBoluses) {
+            val totalExt = calculateIobToTimeFromExtendedBoluses(toTime)
             totalExt.basaliob = totalExt.iob
             totalExt.iob = 0.0
             totalExt.netbasalinsulin = totalExt.extendedBolusInsulin
             totalExt.hightempinsulin = totalExt.extendedBolusInsulin
             total.plus(totalExt)
         }
+
         return total
     }
+    
+    private fun buildUnifiedDoseTimeline(fromTime: Long, toTime: Long): List<PhysicalDose> {
+        val timeline = mutableListOf<PhysicalDose>()
+        
+        // 1. Add all standard Boluses & SMBs
+        val boluses = persistenceLayer.getBolusesFromTime(fromTime, true).blockingGet()
+        boluses.filter { it.isValid && it.timestamp < toTime }.forEach { b ->
+            timeline.add(PhysicalDose(b.timestamp, b.amount, isBolus = true, originalBolus = b))
+        }
+
+        // 2. Add TBRs and Base Basals (Discretized into 5-min chunks)
+        // We step through the timeframe in 5-minute intervals
+        var currentTime = fromTime
+        while (currentTime < toTime) {
+            val profile = profileFunction.getProfile(currentTime)
+            if (profile != null) {
+                // Get the absolute basal running at this exact minute (includes TBRs!)
+                val basalData = getBasalData(profile, currentTime)
+                val currentAbsoluteRate = basalData.tempBasalAbsolute
+                
+                // Convert an hourly rate (U/hr) into a 5-minute volume (U)
+                val chunkVolume = currentAbsoluteRate * (5.0 / 60.0)
+                
+                if (chunkVolume > 0) {
+                    timeline.add(PhysicalDose(currentTime, chunkVolume, isBolus = false))
+                }
+            }
+            currentTime += 5 * 60 * 1000L // Step forward 5 minutes
+        }
+
+        // 3. Sort everything chronologically! 
+        // This is the magic step. Boluses and Basal chunks are perfectly interleaved.
+        return timeline.sortedBy { it.timestamp }
+    }
+
+    // --- STATEFUL COMPARTMENT MODEL TRACKING ---
+    
+    // Represents a physical drop of insulin entering the SC compartment
+    private data class PhysicalDose(
+        val timestamp: Long,
+        val absoluteAmount: Double, 
+        val isBolus: Boolean,       
+        val originalBolus: BS? = null 
+    )
+
+    // Remembers the assigned absorption sluggishness (tau) for historical doses
+    private data class TrackedDose(
+        val timestamp: Long, 
+        val amount: Double, 
+        val assignedTau: Double
+    )
 }

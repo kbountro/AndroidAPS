@@ -127,35 +127,61 @@ abstract class InsulinOrefBasePlugin(
         return result
     }
 
-    fun pdModelIobCalculation(bolus: BS, insulinID: Int, t: Double, backgroundIob: Double, usePkCurve: Boolean): Iob {
-        val a0 = 61.33
-        val a1 = 12.27
-        val b1 = 0.05185
-
-        // 1. THE STACKING EFFECT: Calculate precise peak using the TOTAL active insulin pool
-        val effectiveDose = bolus.amount + backgroundIob
-
-        var tp: Double = if (insulinID == 205) {
-            (a0 + a1 * 2 * effectiveDose) / (1 + b1 * 2 * effectiveDose)
-        } else {
-            (a0 + a1 * effectiveDose) / (1 + b1 * effectiveDose)
-        }
-
-        // 2. PK HEURISTIC SHIFT: If evaluating the physical pool, shift the peak to 47%
-        if (usePkCurve) {
-            tp *= 0.47
-        }
-
-        val tpModel = tp.pow(2.0) * 2
+    /**
+     * STATEFUL IOB CALCULATION
+     * This is the custom entry point for the custom IobCobCalculator.
+     * It accepts the physical scMass to dynamically delay the Tsunami curve.
+     */
+    fun iobCalcWithState(bolus: BS, time: Long, scMass: Double): Iob {
+        val insulinInterface = activePlugin.activeInsulin
+        val insulinID = insulinInterface.id.value 
         val result = Iob()
+        
+        if (bolus.amount != 0.0) {
+            val bolusTime = bolus.timestamp
+            val t = (time - bolusTime) / 1000.0 / 60.0
+            
+            // If it's a Tsunami insulin (105 or 205), route it through the Compartment Model
+            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205)) { 
+                val isU200 = (insulinID == 205)
+                val pdResult = pdModelIobCalculation(bolus.amount, scMass, isU200, t)
+                result.iobContrib = pdResult.iobContrib
+                result.activityContrib = pdResult.activityContrib
+            } else { 
+                // Fallback to the standard vanilla AndroidAPS bilinear curve
+                val td = dia * 60 
+                val tp = peak.toDouble()
+                if (t < td) {
+                    val tau = tp * (1 - tp / td) / (1 - 2 * tp / td)
+                    val a = 2 * tau / td
+                    val s = 1 / (1 - a + (1 + a) * exp(-td / tau))
+                    result.activityContrib = bolus.amount * (s / tau.pow(2.0)) * t * (1 - t / td) * exp(-t / tau)
+                    result.iobContrib = bolus.amount * (1 - s * (1 - a) * ((t.pow(2.0) / (tau * td * (1 - a)) - t / tau - 1) * exp(-t / tau) + 1))
+                }
+            }
+        }
+        return result
+    }
 
-        // 3. ACTIVITY MULTIPLIER: Use ONLY bolus.amount so we don't duplicate insulin
-        result.activityContrib = (2 * bolus.amount / tpModel) * t * exp(-t.pow(2.0) / tpModel)
+    fun pdModelIobCalculation(bolusAmount: Double, scMass: Double, isU200: Boolean, t: Double): Iob {
+        // 1. Get the dynamic peak time from our new CompartmentModel!
+        // We feed it the accumulated scMass, NOT just the isolated bolus.
+        val tpModelRaw = CompartmentModel.calculateSystemicPeak(scMass, isU200)
+        
+        // 2. Transform the peak time for the equation (as per original logic)
+        val tpModel = tpModelRaw.pow(2.0) * 2 
+        
+        val result = Iob()
+        
+        // 3. Calculate Activity 
+        // NOTE: We use the literal bolusAmount for the amplitude, 
+        // but the scMass-derived tpModel for the delayed curve shape!
+        result.activityContrib = (2 * bolusAmount / tpModel) * t * exp(-t.pow(2.0) / tpModel)
 
-        val lowerLimit = t
-        val upperLimit = 9.0 * 60.0
-
-        result.iobContrib = bolus.amount * (exp(-lowerLimit.pow(2.0) / tpModel) - exp(-upperLimit.pow(2.0) / tpModel))
+        // 4. Calculate IOB (Integrated Activity)
+        val lowerLimit = t 
+        val upperLimit = 8.0 * 60 
+        result.iobContrib = bolusAmount * (exp(-lowerLimit.pow(2.0)/tpModel) - exp(-upperLimit.pow(2.0)/tpModel))
 
         return result
     }
