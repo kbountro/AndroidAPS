@@ -33,5 +33,15 @@ interface Insulin : ConfigExportImport {
 
     fun iobCalcForTreatment(bolus: BS, time: Long, dia: Double, backgroundIob: Double = 0.0, usePkCurve: Boolean = false): Iob
 
+    /**
+     * STATEFUL IOB CALCULATION
+     * Accepts physical scMass to dynamically delay curves (e.g., Tsunami model).
+     * By default, it falls back to the standard stateless calculation so
+     * non-stateful insulin models don't crash.
+     */
+    fun iobCalcWithState(bolus: BS, time: Long, scMass: Double): Iob {
+        return iobCalcForTreatment(bolus, time, dia)
+    }
+
     val iCfg: ICfg
 }
