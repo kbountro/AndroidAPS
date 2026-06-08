@@ -514,8 +514,6 @@ class IobCobCalculatorPlugin @Inject constructor(
      */
     private fun calculateIobFromBolusToTime(toTime: Long): IobTotal {
         val total = IobTotal(toTime)
-        val profile = profileFunction.getProfile() ?: return total
-        val dia = profile.dia
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
         // 1. Build the Unified Timeline of every physical insulin drop
@@ -525,34 +523,27 @@ class IobCobCalculatorPlugin @Inject constructor(
         val doseHistory = ArrayList<TrackedDose>(unifiedTimeline.size)
         val isU200 = activePlugin.activeInsulin.id.value == 205
 
-        // We calculate active serum insulin continuously to find the systemic Tp
-        var activeSerumInsulin = 0.0
-
         for (dose in unifiedTimeline) {
             val tNow = dose.timestamp
 
-            // A. Update Active Serum Insulin for the Systemic Peak calculation
-            if (dose.isBolus && dose.originalBolus != null) {
-                activeSerumInsulin += dose.originalBolus.iobCalc(activePlugin, tNow, dia).iobContrib
-            }
-
-            // B. Get physiological Tau from the Math Engine
-            val systemicTp = CompartmentModel.calculateSystemicPeak(activeSerumInsulin, isU200)
-            val currentTau = CompartmentModel.calculateTau(systemicTp)
-
-            // C. Calculate current accumulated SC Mass from ALL past doses (Boluses + TBRs)
-            var scMass = 0.0
+            // 1. Calculate historical SC Mass FIRST
+            var historicalScMass = 0.0
             for (prev in doseHistory) {
                 val timeElapsedMins = (tNow - prev.timestamp) / 60000.0
-                scMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
+                historicalScMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
             }
 
-            val totalScMassForCurve = scMass + dose.absoluteAmount
-            
+            // 2. The total physical liquid in the tissue right now
+            val totalScMassForCurve = historicalScMass + dose.absoluteAmount
+
+            // 3. Drive the Tsunami peak/delay based purely on the physical SC mass!
+            val systemicTp = CompartmentModel.calculateSystemicPeak(totalScMassForCurve, isU200)
+            val currentTau = CompartmentModel.calculateTau(systemicTp)
+
             // Lock state into history
             doseHistory.add(TrackedDose(tNow, dose.absoluteAmount, currentTau))
 
-            // D. ONLY calculate AndroidAPS standard IOB for the actual Boluses
+            // 4. ONLY calculate AndroidAPS standard IOB for the actual Boluses
             // AndroidAPS handles Basal IOB in a separate Net Calculation elsewhere.
             if (dose.isBolus && dose.originalBolus != null) {
                 val tIOB = activePlugin.activeInsulin.iobCalcWithState(dose.originalBolus, toTime, totalScMassForCurve)
@@ -581,19 +572,73 @@ class IobCobCalculatorPlugin @Inject constructor(
         val total = IobTotal(toTime)
         val now = dateUtil.now()
         val pumpInterface = activePlugin.activePump
+
         if (!pumpInterface.isFakingTempsByExtendedBoluses) {
             val extendedBoluses = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(toTime - range(), toTime, true)
+
+            // --- TSUNAMI STATE TRACKERS ---
+            val doseHistory = ArrayList<TrackedDose>()
+            val isU200 = activePlugin.activeInsulin.id.value == 205
+
             for (pos in extendedBoluses.indices) {
                 val e = extendedBoluses[pos]
                 if (e.timestamp > toTime) continue
+
+                // Adjust duration if it's currently running
                 if (e.end > now) {
                     val newDuration = now - e.timestamp
                     e.amount *= newDuration.toDouble() / e.duration
                     e.duration = newDuration
                 }
-                val profile = profileFunction.getProfile(e.timestamp) ?: return total
-                val calc = e.iobCalc(toTime, profile, activePlugin.activeInsulin)
-                total.plus(calc)
+
+                // Discretize the Extended Bolus into 5-minute physical chunks
+                val durationMins = e.duration / (60 * 1000.0)
+                if (durationMins <= 0) continue
+
+                val ratePerMin = e.amount / durationMins
+                val aboutFiveMinIntervals = kotlin.math.ceil(durationMins / 5.0).toInt()
+                val spacingMins = durationMins / aboutFiveMinIntervals
+                val chunkVolume = ratePerMin * spacingMins
+
+                for (j in 0 until aboutFiveMinIntervals) {
+                    // Find middle of the chunk
+                    val chunkTime = (e.timestamp + j * spacingMins * 60 * 1000 + 0.5 * spacingMins * 60 * 1000).toLong()
+                    if (chunkTime > toTime) continue
+
+                    // 1. Calculate historical SC Mass from previous EB chunks
+                    var historicalScMass = 0.0
+                    for (prev in doseHistory) {
+                        val timeElapsedMins = (chunkTime - prev.timestamp) / 60000.0
+                        if (timeElapsedMins > 0) {
+                            historicalScMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
+                        }
+                    }
+
+                    // 2. The total physical liquid in the tissue right now
+                    val totalScMassForCurve = historicalScMass + chunkVolume
+
+                    // 3. Drive the Tsunami peak/delay based purely on the physical SC mass!
+                    val systemicTp = CompartmentModel.calculateSystemicPeak(totalScMassForCurve, isU200)
+                    val currentTau = CompartmentModel.calculateTau(systemicTp)
+
+                    // 4. Lock state into history
+                    doseHistory.add(TrackedDose(chunkTime, chunkVolume, currentTau))
+
+                    // 5. Calculate Tsunami IOB for this theoretical chunk
+                    val dummyBolus = BS(
+                        timestamp = chunkTime,
+                        amount = chunkVolume,
+                        type = BS.Type.NORMAL,
+                        isBasalInsulin = false
+                    )
+
+                    // Route through our custom stateful calculator!
+                    val tIOB = activePlugin.activeInsulin.iobCalcWithState(dummyBolus, toTime, totalScMassForCurve)
+
+                    total.iob += tIOB.iobContrib
+                    total.activity += tIOB.activityContrib
+                    total.extendedBolusInsulin += chunkVolume
+                }
             }
         }
         return total
@@ -602,22 +647,53 @@ class IobCobCalculatorPlugin @Inject constructor(
     override fun calculateAbsoluteIobFromBaseBasals(toTime: Long): IobTotal {
         val total = IobTotal(toTime)
         var i = toTime - range()
+
+        // --- TSUNAMI STATE TRACKERS ---
+        val doseHistory = ArrayList<TrackedDose>()
+        val isU200 = activePlugin.activeInsulin.id.value == 205
+
         while (i < toTime) {
             val profile = profileFunction.getProfile(i)
             if (profile == null) {
                 i += T.mins(5).msecs()
                 continue
             }
+
             val running = profile.getBasal(i)
-            val bolus = BS(
-                timestamp = i,
-                amount = running * 5.0 / 60.0,
-                type = BS.Type.NORMAL,
-                isBasalInsulin = true
-            )
-            val iob = bolus.iobCalc(activePlugin, toTime, profile.dia)
-            total.basaliob += iob.iobContrib
-            total.activity += iob.activityContrib
+            val chunkVolume = running * 5.0 / 60.0 // Convert U/hr to 5-min U
+
+            if (chunkVolume > 0) {
+                // 1. Calculate theoretical historical SC Mass
+                var historicalScMass = 0.0
+                for (prev in doseHistory) {
+                    val timeElapsedMins = (i - prev.timestamp) / 60000.0
+                    historicalScMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
+                }
+
+                // 2. The total theoretical liquid in the tissue right now
+                val totalScMassForCurve = historicalScMass + chunkVolume
+
+                // 3. Drive the Tsunami peak/delay based purely on the physical SC mass!
+                val systemicTp = CompartmentModel.calculateSystemicPeak(totalScMassForCurve, isU200)
+                val currentTau = CompartmentModel.calculateTau(systemicTp)
+
+                // 4. Lock state into history
+                doseHistory.add(TrackedDose(i, chunkVolume, currentTau))
+
+                // 5. Calculate Tsunami IOB for this theoretical chunk
+                val dummyBolus = BS(
+                    timestamp = i,
+                    amount = chunkVolume,
+                    type = BS.Type.NORMAL,
+                    isBasalInsulin = true
+                )
+
+                // Route through our custom stateful calculator instead of the vanilla one!
+                val tIOB = activePlugin.activeInsulin.iobCalcWithState(dummyBolus, toTime, totalScMassForCurve)
+
+                total.basaliob += tIOB.iobContrib
+                total.activity += tIOB.activityContrib
+            }
             i += T.mins(5).msecs()
         }
         return total
@@ -629,7 +705,6 @@ class IobCobCalculatorPlugin @Inject constructor(
     override fun calculateIobToTimeFromTempBasalsIncludingConvertedExtended(toTime: Long): IobTotal {
         val total = IobTotal(toTime)
         val profile = profileFunction.getProfile() ?: return total
-        val dia = profile.dia
 
         // 1. Get the Unified Timeline (This contains ALL Absolute physical saturation)
         val unifiedTimeline = buildUnifiedDoseTimeline(toTime - range(), toTime)
@@ -637,32 +712,27 @@ class IobCobCalculatorPlugin @Inject constructor(
         val doseHistory = ArrayList<TrackedDose>(unifiedTimeline.size)
         val isU200 = activePlugin.activeInsulin.id.value == 205
 
-        var activeSerumInsulin = 0.0
-
         for (dose in unifiedTimeline) {
             val tNow = dose.timestamp
 
-            // A. Update Active Serum Insulin for systemic Tp
-            if (dose.isBolus && dose.originalBolus != null) {
-                activeSerumInsulin += dose.originalBolus.iobCalc(activePlugin, tNow, dia).iobContrib
-            }
-
-            // B. Get Tau from the Math Engine
-            val systemicTp = CompartmentModel.calculateSystemicPeak(activeSerumInsulin, isU200)
-            val currentTau = CompartmentModel.calculateTau(systemicTp)
-
-            // C. Calculate SC Mass (Using the ABSOLUTE physical dose!)
-            var scMass = 0.0
+            // 1. Calculate historical SC Mass FIRST
+            var historicalScMass = 0.0
             for (prev in doseHistory) {
                 val timeElapsedMins = (tNow - prev.timestamp) / 60000.0
-                scMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
+                historicalScMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
             }
-            val totalScMassForCurve = scMass + dose.absoluteAmount
+
+            // 2. The total physical liquid in the tissue right now
+            val totalScMassForCurve = historicalScMass + dose.absoluteAmount
+
+            // 3. Drive the Tsunami peak/delay based purely on the physical SC mass!
+            val systemicTp = CompartmentModel.calculateSystemicPeak(totalScMassForCurve, isU200)
+            val currentTau = CompartmentModel.calculateTau(systemicTp)
             
             // Lock state into history
             doseHistory.add(TrackedDose(tNow, dose.absoluteAmount, currentTau))
 
-            // D. ONLY calculate Basal IOB for the Non-Bolus chunks
+            // 4. ONLY calculate Basal IOB for the Non-Bolus chunks
             if (!dose.isBolus) {
                 // Find the profile rate to determine the NET difference
                 val profileBasalRate = profile.getBasal(tNow)
@@ -701,7 +771,6 @@ class IobCobCalculatorPlugin @Inject constructor(
     private fun getCalculationToTimeTempBasals(toTime: Long, lastAutosensResult: AutosensResult, exerciseMode: Boolean, halfBasalExerciseTarget: Double, isTempTarget: Boolean): IobTotal {
         val total = IobTotal(toTime)
         val profile = profileFunction.getProfile() ?: return total
-        val dia = profile.dia
 
         // --- AUTHENTIC OPENAPS SENSITIVITY & EXERCISE MATH ---
         var sensitivityRatio = lastAutosensResult.ratio
@@ -720,32 +789,27 @@ class IobCobCalculatorPlugin @Inject constructor(
         val doseHistory = ArrayList<TrackedDose>(unifiedTimeline.size)
         val isU200 = activePlugin.activeInsulin.id.value == 205
 
-        var activeSerumInsulin = 0.0
-
         for (dose in unifiedTimeline) {
             val tNow = dose.timestamp
 
-            // A. Update Active Serum Insulin for systemic Tp
-            if (dose.isBolus && dose.originalBolus != null) {
-                activeSerumInsulin += dose.originalBolus.iobCalc(activePlugin, tNow, dia).iobContrib
-            }
-
-            // B. Get Tau from the Math Engine
-            val systemicTp = CompartmentModel.calculateSystemicPeak(activeSerumInsulin, isU200)
-            val currentTau = CompartmentModel.calculateTau(systemicTp)
-
-            // C. Calculate SC Mass (Using the ABSOLUTE physical dose!)
-            var scMass = 0.0
+            // 1. Calculate historical SC Mass FIRST
+            var historicalScMass = 0.0
             for (prev in doseHistory) {
                 val timeElapsedMins = (tNow - prev.timestamp) / 60000.0
-                scMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
+                historicalScMass += CompartmentModel.calculateSubcutaneousMass(prev.amount, timeElapsedMins, prev.assignedTau)
             }
-            val totalScMassForCurve = scMass + dose.absoluteAmount
+
+            // 2. The total physical liquid in the tissue right now
+            val totalScMassForCurve = historicalScMass + dose.absoluteAmount
+
+            // 3. Drive the Tsunami peak/delay based purely on the physical SC mass!
+            val systemicTp = CompartmentModel.calculateSystemicPeak(totalScMassForCurve, isU200)
+            val currentTau = CompartmentModel.calculateTau(systemicTp)
 
             // Lock state into history
             doseHistory.add(TrackedDose(tNow, dose.absoluteAmount, currentTau))
 
-            // D. ONLY calculate Basal IOB for the Non-Bolus chunks
+            // 4. ONLY calculate Basal IOB for the Non-Bolus chunks
             if (!dose.isBolus) {
                 // Find the profile rate to determine the NET difference
                 var basalRate = profile.getBasal(tNow)

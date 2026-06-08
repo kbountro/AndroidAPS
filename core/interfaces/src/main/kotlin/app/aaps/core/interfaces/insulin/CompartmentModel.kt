@@ -38,7 +38,7 @@ object CompartmentModel {
      */
     fun calculateTau(systemicTp: Double): Double {
         // Shift the Tsunami parameter to the true observable serum peak (PK)
-        val pkPeak = 0.47 * systemicTp
+        val pkPeak = 0.41 * systemicTp
 
         // O(1) Cubic Polynomial substitution replacing the transcendental root
         return C0 + (C1 * pkPeak) + (C2 * pkPeak * pkPeak) + (C3 * pkPeak * pkPeak * pkPeak)
