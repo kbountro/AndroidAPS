@@ -22,26 +22,49 @@ object CompartmentModel {
 
     /**
      * Step 1: Calculate the expected systemic peak time (t_p) based on the Tsunami model.
-     * * @param currentActiveInsulin The current PK IOB circulating in the serum.
+     * The Tsunami delay is caused by the "Depot Effect" — larger physical volumes of fluid 
+     * pooling in the subcutaneous fat take longer to dissociate and absorb.
+     * * @param currentScMass The total physical volume of unabsorbed insulin sitting in the SC tissue.
      * @param isU200 True if the active insulin is U200 (e.g., Lyumjev 200, ID 205).
-     * @return The raw Tsunami peak time in minutes.
+     * @return The mechanistic PK peak time in minutes.
      */
-    fun calculateSystemicPeak(currentActiveInsulin: Double, isU200: Boolean): Double {
-        val effectiveInsulin = if (isU200) currentActiveInsulin * 2 else currentActiveInsulin
-        return (A0 + A1 * effectiveInsulin) / (1 + B1 * effectiveInsulin)
+    fun calculateSystemicPeak(currentScMass: Double, isU200: Boolean): Double {
+        val effectiveMass = if (isU200) currentScMass * 2.0 else currentScMass
+        
+        // 0.41 strictly scales the empirical Tsunami PD peak down to the mechanistic PK peak
+        return 0.41 * (A0 + A1 * effectiveMass) / (1.0 + B1 * effectiveMass)
     }
 
     /**
-     * Step 2: Calculates the true Subcutaneous absorption time constant (tau).
-     * * @param systemicTp The raw Tsunami peak time (from Step 1).
-     * @return The physiological tau in minutes.
+     * Numerically solves the bi-exponential compartment equation for SC Absorption Tau.
      */
-    fun calculateTau(systemicTp: Double): Double {
-        // Shift the Tsunami parameter to the true observable serum peak (PK)
-        val pkPeak = 0.41 * systemicTp
+    fun computeScTau(targetTp: Double): Double {
+        val tauE = 63.48 // Hepatic Clearance (44-min half-life)
+        
+        // Safety bounds for SC absorption in minutes
+        var low = 1.0
+        var high = 300.0
+        var mid = 150.0
 
-        // O(1) Cubic Polynomial substitution replacing the transcendental root
-        return C0 + (C1 * pkPeak) + (C2 * pkPeak * pkPeak) + (C3 * pkPeak * pkPeak * pkPeak)
+        // 15 iterations guarantees accuracy to ~0.01 minutes
+        for (i in 0 until 15) {
+            mid = (low + high) / 2.0
+            
+            // L'Hopital's limit prevents division by zero if tauA exactly matches tauE
+            val currentTp = if (kotlin.math.abs(mid - tauE) < 0.1) {
+                mid 
+            } else {
+                (mid * tauE / (tauE - mid)) * kotlin.math.ln(tauE / mid)
+            }
+
+            // Binary path logic
+            if (currentTp > targetTp) {
+                high = mid
+            } else {
+                low = mid
+            }
+        }
+        return mid
     }
 
     /**
