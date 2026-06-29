@@ -20,7 +20,6 @@ import app.aaps.core.interfaces.utils.HardLimits
 import javax.inject.Inject
 import kotlin.math.exp
 import kotlin.math.pow
-import app.aaps.core.interfaces.insulin.CompartmentModel
 
 /**
  * Created by adrian on 13.08.2017.
@@ -128,42 +127,6 @@ abstract class InsulinOrefBasePlugin(
         return result
     }
 
-    /**
-     * STATEFUL IOB CALCULATION
-     * This is the custom entry point for the custom IobCobCalculator.
-     * It accepts the physical scMass to dynamically delay the Tsunami curve.
-     */
-    override fun iobCalcWithState(bolus: BS, time: Long, scMass: Double): Iob {
-        val insulinInterface = activePlugin.activeInsulin
-        val insulinID = insulinInterface.id.value 
-        val result = Iob()
-        
-        if (bolus.amount != 0.0) {
-            val bolusTime = bolus.timestamp
-            val t = (time - bolusTime) / 1000.0 / 60.0
-            
-            // If it's a Tsunami insulin (105 or 205), route it through the Compartment Model
-            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205)) {
-                val isU200 = (insulinID == 205)
-                val pdResult = statefulPdModelIobCalculation(bolus.amount, scMass, isU200, t)
-                result.iobContrib = pdResult.iobContrib
-                result.activityContrib = pdResult.activityContrib
-            } else { 
-                // Fallback to the standard vanilla AndroidAPS bilinear curve
-                val td = dia * 60 
-                val tp = peak.toDouble()
-                if (t < td) {
-                    val tau = tp * (1 - tp / td) / (1 - 2 * tp / td)
-                    val a = 2 * tau / td
-                    val s = 1 / (1 - a + (1 + a) * exp(-td / tau))
-                    result.activityContrib = bolus.amount * (s / tau.pow(2.0)) * t * (1 - t / td) * exp(-t / tau)
-                    result.iobContrib = bolus.amount * (1 - s * (1 - a) * ((t.pow(2.0) / (tau * td * (1 - a)) - t / tau - 1) * exp(-t / tau) + 1))
-                }
-            }
-        }
-        return result
-    }
-
     fun pdModelIobCalculation(bolus: BS, insulinID: Int, t: Double): Iob {
         //MP Model for estimation of PD-based peak time: (a0 + a1*X)/(1+b1*X), where X = bolus size
         val a0 = 61.33 //MP Units = min
@@ -201,25 +164,6 @@ abstract class InsulinOrefBasePlugin(
         return result
     }
 
-    fun statefulPdModelIobCalculation(bolusAmount: Double, scMass: Double, isU200: Boolean, t: Double): app.aaps.core.data.iob.Iob {
-        // 1. Get the dynamic peak time from our new CompartmentModel
-        val tpModelRaw = app.aaps.core.interfaces.insulin.CompartmentModel.calculateSystemicPeak(scMass, isU200)
-
-        // 2. Transform the peak time for the equation
-        val tpModel = tpModelRaw.pow(2.0) * 2
-
-        val result = app.aaps.core.data.iob.Iob()
-
-        // 3. Calculate Activity
-        result.activityContrib = (2 * bolusAmount / tpModel) * t * exp(-t.pow(2.0) / tpModel)
-
-        // 4. Calculate IOB (Integrated Activity)
-        val lowerLimit = t
-        val upperLimit = 8.0 * 60
-        result.iobContrib = bolusAmount * (exp(-lowerLimit.pow(2.0)/tpModel) - exp(-upperLimit.pow(2.0)/tpModel))
-
-        return result
-    }
 
     override val iCfg: ICfg
         get() = ICfg(friendlyName, (dia * 1000.0 * 3600.0).toLong(), T.mins(peak.toLong()).msecs())

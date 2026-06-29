@@ -19,6 +19,7 @@ import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.overview.OverviewData
+
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.plugin.PluginDescription
@@ -34,6 +35,7 @@ import app.aaps.core.interfaces.rx.events.EventEffectiveProfileSwitchChanged
 import app.aaps.core.interfaces.rx.events.EventNewBG
 import app.aaps.core.interfaces.rx.events.EventNewHistoryData
 import app.aaps.core.interfaces.rx.events.EventPreferenceChange
+
 import app.aaps.core.interfaces.rx.events.EventRunningModeChange
 import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.utils.DateUtil
@@ -53,6 +55,8 @@ import app.aaps.core.objects.extensions.plus
 import app.aaps.core.objects.extensions.round
 import app.aaps.plugins.main.R
 import app.aaps.plugins.main.iob.iobCobCalculator.data.AutosensDataStoreObject
+import app.aaps.core.interfaces.insulin.CompartmentModel
+
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
 import java.util.concurrent.Executors
@@ -63,7 +67,10 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.max
 import kotlin.math.min
-import app.aaps.core.interfaces.insulin.CompartmentModel
+import kotlin.math.exp
+import kotlin.math.ln
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 @Singleton
 class IobCobCalculatorPlugin @Inject constructor(
@@ -92,7 +99,6 @@ class IobCobCalculatorPlugin @Inject constructor(
 ), IobCobCalculator {
 
     private val disposable = CompositeDisposable()
-
     private var iobTable = LongSparseArray<IobTotal>() // oldest at index 0
     private var basalDataTable = LongSparseArray<BasalData>() // oldest at index 0
 
@@ -103,21 +109,16 @@ class IobCobCalculatorPlugin @Inject constructor(
 
     override fun onStart() {
         super.onStart()
-        // EventConfigBuilderChange
         disposable += rxBus
             .toObservable(EventConfigBuilderChange::class.java)
             .observeOn(aapsSchedulers.io)
-            .subscribe({ event ->
-                           resetDataAndRunCalculation("onEventConfigBuilderChange", event)
-                       }, fabricPrivacy::logException)
-        // EventEffectiveProfileSwitchChanged
+            .subscribe({ event -> resetDataAndRunCalculation("onEventConfigBuilderChange", event) }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventEffectiveProfileSwitchChanged::class.java)
             .observeOn(aapsSchedulers.io)
-            .subscribe({ event ->
-                           newHistoryData(event.startDate, false, event)
-                       }, fabricPrivacy::logException)
-        // EventPreferenceChange
+            .subscribe({ event -> newHistoryData(event.startDate, false, event) }, fabricPrivacy::logException)
+
         disposable += rxBus
             .toObservable(EventPreferenceChange::class.java)
             .observeOn(aapsSchedulers.io)
@@ -144,7 +145,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                                rxBus.send(EventNewHistoryData(0, false))
                            }
                        }, fabricPrivacy::logException)
-        // EventNewHistoryData
+
         disposable += rxBus
             .toObservable(EventNewHistoryData::class.java)
             .observeOn(aapsSchedulers.io)
@@ -240,13 +241,12 @@ class IobCobCalculatorPlugin @Inject constructor(
         val time = ads.roundUpTime(toTime)
         val cacheHit = iobTable[time]
         if (time < now && cacheHit != null) {
-            //og.debug(">>> calculateFromTreatmentsAndTemps Cache hit " + new Date(time).toLocaleString());
             return cacheHit
-        } // else log.debug(">>> calculateFromTreatmentsAndTemps Cache miss " + new Date(time).toLocaleString());
+        }
         val bolusIob = calculateIobFromBolusToTime(time).round()
         val basalIob = calculateIobToTimeFromTempBasalsIncludingConvertedExtended(time).round()
-        // OpenAPSSMB only
-        // Add expected zero temp basal for next 240 minutes
+
+        // OpenAPSSMB expectation
         val basalIobWithZeroTemp = basalIob.copy()
         val t = TB(
             timestamp = now + 60 * 1000L,
@@ -273,8 +273,8 @@ class IobCobCalculatorPlugin @Inject constructor(
         val now = dateUtil.now()
         val bolusIob = calculateIobFromBolusToTime(time).round()
         val basalIob = getCalculationToTimeTempBasals(time, lastAutosensResult, exerciseMode, halfBasalExerciseTarget, isTempTarget).round()
-        // OpenAPSSMB only
-        // Add expected zero temp basal for next 240 minutes
+
+        // OpenAPSSMB expectation
         val basalIobWithZeroTemp = basalIob.copy()
         val t = TB(
             timestamp = now + 60 * 1000L,
@@ -299,7 +299,6 @@ class IobCobCalculatorPlugin @Inject constructor(
         val time = ads.roundUpTime(fromTime)
         var retVal = basalDataTable[time]
         if (retVal == null) {
-            //log.debug(">>> getBasalData Cache miss " + new Date(time).toLocaleString());
             retVal = BasalData()
             val tb = processedTbrEbData.getTempBasalIncludingConvertedExtended(time)
             retVal.basal = profile.getBasal(time)
@@ -315,7 +314,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                     basalDataTable.append(time, retVal)
                 }
             }
-        } //else log.debug(">>> getBasalData Cache hit " +  new Date(time).toLocaleString());
+        }
         return retVal
     }
 
@@ -324,8 +323,7 @@ class IobCobCalculatorPlugin @Inject constructor(
             aapsLogger.debug(LTag.AUTOSENS, "AUTOSENSDATA is waiting for calculation thread: $reason")
             try {
                 thread?.join(5000)
-            } catch (_: InterruptedException) { // ignore
-            }
+            } catch (_: InterruptedException) { }
             aapsLogger.debug(LTag.AUTOSENS, "AUTOSENSDATA finished waiting for calculation thread: $reason")
         }
         return ads.getLastAutosensData(reason, aapsLogger, dateUtil)
@@ -348,7 +346,6 @@ class IobCobCalculatorPlugin @Inject constructor(
             }
             timestamp = autosensData.time
         }
-        // Future carbs
         carbs.forEach { carb -> if (carb.timestamp > now) futureCarbs += carb.amount }
         return CobInfo(timestamp, displayCob, futureCarbs)
     }
@@ -378,7 +375,6 @@ class IobCobCalculatorPlugin @Inject constructor(
     }
 
     override fun calculateIobArrayInDia(profile: Profile): Array<IobTotal> {
-        // predict IOB out to DIA plus 30m
         var time = System.currentTimeMillis()
         time = ads.roundUpTime(time)
         val len = ((profile.dia * 60 + 30) / 5).toInt()
@@ -392,7 +388,6 @@ class IobCobCalculatorPlugin @Inject constructor(
     }
 
     override fun calculateIobArrayForSMB(lastAutosensResult: AutosensResult, exerciseMode: Boolean, halfBasalExerciseTarget: Double, isTempTarget: Boolean): Array<IobTotal> {
-        // predict IOB out to DIA plus 30m
         val now = dateUtil.now()
         val len = 4 * 60 / 5
         val array = Array(len) { IobTotal(0) }
@@ -415,20 +410,15 @@ class IobCobCalculatorPlugin @Inject constructor(
         return sb.toString()
     }
 
-    // Limit rate of EventNewHistoryData
     private var historyWorker: ScheduledExecutorService? = null
     private var scheduledHistoryPost: ScheduledFuture<*>? = null
     private var scheduledEvent: EventNewHistoryData? = null
 
     @Synchronized
     private fun scheduleHistoryDataChange(event: EventNewHistoryData) {
-        // if there is nothing scheduled or asking reload deeper to the past
         if (scheduledEvent == null || event.oldDataTimestamp < (scheduledEvent?.oldDataTimestamp ?: 0L)) {
-            // cancel waiting task to prevent sending multiple posts
             scheduledHistoryPost?.cancel(false)
-            // prepare task for execution in 1 sec
             scheduledEvent?.let {
-                // set reload bg data if was not set
                 event.reloadBgData = event.reloadBgData || it.reloadBgData
             }
             scheduledEvent = event
@@ -448,11 +438,8 @@ class IobCobCalculatorPlugin @Inject constructor(
                 }, 5L, TimeUnit.SECONDS
             )
         } else {
-            // asked reload is newer -> adjust params only
             scheduledEvent?.let {
-                // set reload bg data if was not set
                 if (!it.reloadBgData) it.reloadBgData = event.reloadBgData
-                // set Glucose value if newer
                 event.newestGlucoseValueTimestamp?.let { timestamp ->
                     if (timestamp > (it.newestGlucoseValueTimestamp ?: 0L)) it.newestGlucoseValueTimestamp = timestamp
                 }
@@ -460,18 +447,13 @@ class IobCobCalculatorPlugin @Inject constructor(
         }
     }
 
-    // When historical data is changed (coming from NS etc) finished calculations after this date must be invalidated
     private fun newHistoryData(oldDataTimestamp: Long, bgDataReload: Boolean, event: Event) {
-        //log.debug("Locking onNewHistoryData");
         calculationWorkflow.stopCalculation(CalculationWorkflow.MAIN_CALCULATION, "onEventNewHistoryData")
         synchronized(dataLock) {
-
-            // clear up 5 min back for proper COB calculation
             val time = oldDataTimestamp - 5 * 60 * 1000L
             aapsLogger.debug(LTag.AUTOSENS, "Invalidating cached data to: " + dateUtil.dateAndTimeAndSecondsString(time))
             for (index in iobTable.size() - 1 downTo 0) {
                 if (iobTable.keyAt(index) > time) {
-                    aapsLogger.debug(LTag.AUTOSENS, "Removing from iobTable: " + dateUtil.dateAndTimeAndSecondsString(iobTable.keyAt(index)))
                     iobTable.removeAt(index)
                 } else {
                     break
@@ -479,7 +461,6 @@ class IobCobCalculatorPlugin @Inject constructor(
             }
             for (index in basalDataTable.size() - 1 downTo 0) {
                 if (basalDataTable.keyAt(index) > time) {
-                    aapsLogger.debug(LTag.AUTOSENS, "Removing from basalDataTable: " + dateUtil.dateAndTimeAndSecondsString(basalDataTable.keyAt(index)))
                     basalDataTable.removeAt(index)
                 } else {
                     break
@@ -496,45 +477,30 @@ class IobCobCalculatorPlugin @Inject constructor(
             bgDataReload = bgDataReload,
             cause = event
         )
-        //log.debug("Releasing onNewHistoryData");
     }
 
-    /**
-     *  Time range to the past for IOB calculation
-     *  @return milliseconds
-     */
-    private fun range(): Long = ((profileFunction.getProfile()?.dia ?: Constants.defaultDIA) * 60 * 60 * 1000).toLong()
-
     override fun calculateIobFromBolus(): IobTotal = calculateIobFromBolusToTime(dateUtil.now())
-
-    override fun calculateIobFromBolus(): IobTotal = calculateIobFromBolusToTime(dateUtil.now())
-
-    // --- 1. AAPS OVERRIDE ROUTERS --- 
-    // These seamlessly route standard AAPS calls to our centralized physics solver.
 
     private fun calculateIobFromBolusToTime(toTime: Long): IobTotal {
-        return runMasterEulerSolver(toTime, 1.0).bolusTotal
-    }
-
-    private fun calculateIobToTimeFromExtendedBoluses(toTime: Long): IobTotal {
-        return runMasterEulerSolver(toTime, 1.0).extBolusTotal
+        val res = runMasterEulerSolver(toTime, 1.0)
+        val pumpInterface = activePlugin.activePump
+        return if (!pumpInterface.isFakingTempsByExtendedBoluses) {
+            IobTotal.combine(res.bolusTotal, res.extBolusTotal)
+        } else {
+            res.bolusTotal
+        }
     }
 
     override fun calculateAbsoluteIobFromBaseBasals(toTime: Long): IobTotal {
-        return runMasterEulerSolver(toTime, 1.0).basalAbsoluteTotal
+        // Maps exclusively to the true theoretical baseline profile IOB
+        return runMasterEulerSolver(toTime, 1.0).profileBaselineTotal
     }
 
     override fun calculateIobFromTempBasalsIncludingConvertedExtended(): IobTotal =
         calculateIobToTimeFromTempBasalsIncludingConvertedExtended(dateUtil.now())
 
     override fun calculateIobToTimeFromTempBasalsIncludingConvertedExtended(toTime: Long): IobTotal {
-        val res = runMasterEulerSolver(toTime, 1.0)
-        
-        val pumpInterface = activePlugin.activePump
-        if (pumpInterface.isFakingTempsByExtendedBoluses) {
-            res.basalNetTotal.plus(res.extBolusTotal) // Fold EB into Basal Net for faked temps
-        }
-        return res.basalNetTotal
+        return runMasterEulerSolver(toTime, 1.0).basalNetTotal
     }
 
     private fun getCalculationToTimeTempBasals(toTime: Long, lastAutosensResult: AutosensResult, exerciseMode: Boolean, halfBasalExerciseTarget: Double, isTempTarget: Boolean): IobTotal {
@@ -548,149 +514,277 @@ class IobCobCalculatorPlugin @Inject constructor(
             sensitivityRatio = c / (c + profile.getTargetMgdl() - normalTarget)
         }
 
-        val res = runMasterEulerSolver(toTime, sensitivityRatio)
-        
-        val pumpInterface = activePlugin.activePump
-        if (pumpInterface.isFakingTempsByExtendedBoluses) {
-            res.basalNetAutoTotal.plus(res.extBolusTotal)
-        }
-        return res.basalNetAutoTotal
+        return runMasterEulerSolver(toTime, sensitivityRatio).basalNetAutoTotal
     }
 
-    // --- 2. THE MASTER EULER SOLVER ---
-
-    private var eulerCache: MasterEulerState? = null
-
+    // =========================================================================
+    // THE MASTER EULER SOLVER (THE "TRAFFIC JAM" ENGINE)
+    // 1. One-Way Capped Time-Warp (Prevents upward Activity spikes).
+    // 2. Dual SC Puddles (Separates physical accumulation from theoretical baseline).
+    // 3. No-Tail Subtraction (Guarantees injected mass is strictly preserved).
+    // 4. Accurate AMA Snooze tracking mapping to original AAPS standard.
+    // =========================================================================
     private fun runMasterEulerSolver(toTime: Long, sensitivityRatio: Double): EulerResult {
-        val diaMs = 8 * 60 * 60 * 1000L 
-        var startTime = toTime - diaMs
-        
-        // State Initialization
-        var scBolus = 0.0; var scExtBolus = 0.0; var scBasalAbs = 0.0; var scBasalNet = 0.0; var scBasalNetAuto = 0.0
-        var serumBolus = 0.0; var serumExtBolus = 0.0; var serumBasalAbs = 0.0; var serumBasalNet = 0.0; var serumBasalNetAuto = 0.0
-        var actBolus = 0.0; var actExtBolus = 0.0; var actBasalAbs = 0.0; var actBasalNet = 0.0; var actBasalNetAuto = 0.0
-        var currentTau = 50.0 
+        val diaMs = 8 * 60 * 60 * 1000L
+        val startTime = toTime - diaMs
+        val isU200 = activePlugin.activeInsulin.id.value == 205
 
-        val currentDbModified = persistenceLayer.lastTreatmentModificationTime()
+        // EFFICIENCY FIX: Fetch heavy DB records strictly ONCE per calculation and pass them down
+        val boluses = persistenceLayer.getBolusesFromTime(startTime, true).blockingGet()
+        val pumpInterface = activePlugin.activePump
+        val isFakingTemps = pumpInterface.isFakingTempsByExtendedBoluses
 
-        // Cache Hit Evaluation
-        if (eulerCache != null && 
-            eulerCache!!.timestamp >= startTime && 
-            eulerCache!!.timestamp <= toTime &&    
-            eulerCache!!.dbLastModified == currentDbModified &&
-            kotlin.math.abs(eulerCache!!.autosensRatio - sensitivityRatio) < 0.001
-        ) {
-            val c = eulerCache!!
-            startTime = c.timestamp
-            scBolus = c.scBolus; scExtBolus = c.scExtBolus; scBasalAbs = c.scBasalAbs; scBasalNet = c.scBasalNet; scBasalNetAuto = c.scBasalNetAuto
-            serumBolus = c.serumBolus; serumExtBolus = c.serumExtBolus; serumBasalAbs = c.serumBasalAbs; serumBasalNet = c.serumBasalNet; serumBasalNetAuto = c.serumBasalNetAuto
-            currentTau = c.currentTau
+        val timeline = buildUnifiedEulerTimeline(startTime, toTime, sensitivityRatio, boluses, isFakingTemps)
+
+        val upperLimit = 8.0 * 60.0 // 8 hours hard cap
+        val maxWarpWindow = 4.0 * 60.0 // 4 hours maximum time-warp constraint
+
+        // AMA Bolus Snooze
+        var bSnooze = 0.0
+        var lastBolusTime = 0L
+        val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
+
+        for (b in boluses) {
+            if (b.isValid && b.timestamp <= toTime) {
+                if (b.amount > 0 && b.timestamp > lastBolusTime) {
+                    lastBolusTime = b.timestamp
+                }
+                if (b.type != BS.Type.SMB) {
+                    val timeSinceTreatment = toTime - b.timestamp
+                    val snoozeTime = b.timestamp + (timeSinceTreatment * divisor).toLong()
+                    val tSnoozeElapsed = (toTime - snoozeTime) / 60000.0
+
+                    if (tSnoozeElapsed in 0.0..upperLimit) {
+                        val snoozePeak = CompartmentModel.calculateSystemicPeak(b.amount, isU200)
+
+                        // EFFICIENCY FIX: Replaced expensive Math.pow(x, 2) with pure multiplication
+                        val pDiv = snoozePeak / 0.41
+                        val snoozeTpModelPD = 2.0 * (pDiv * pDiv)
+                        val tSq = tSnoozeElapsed * tSnoozeElapsed
+                        val snoozeIobContrib = exp(-tSq / snoozeTpModelPD)
+                        bSnooze += b.amount * snoozeIobContrib
+                    }
+                }
+            }
         }
 
-        val tauE = 63.48 // Hepatic Clearance (44-min half-life)
-        val isU200 = activePlugin.activeInsulin.id.value == 205
-        val timeline = buildUnifiedEulerTimeline(startTime, toTime, sensitivityRatio)
+        // EFFICIENCY FIX: Pre-allocate capacity to prevent GC memory resizing churn
+        val capacity = ((toTime - startTime) / 300000L).toInt() + 20
+        val activeCurves = ArrayList<TsunamiCurve>(capacity * 2)
+
+        // 1. The Physical Reality Puddle
+        var globalPhysicalSC = 0.0
+        var globalTauSC = 50.0
+
+        // 2. The Theoretical Baseline Puddle
+        var globalTheoreticalSC = 0.0
+        var globalTauTheoreticalSC = 50.0
+
         var lastTime = startTime
 
         for (dose in timeline) {
-            val tNow = dose.timestamp
-            if (tNow <= startTime) continue 
+            val dtMins = (dose.timestamp - lastTime) / 60000.0
 
-            val deltaMins = (tNow - lastTime) / 60000.0
-            if (deltaMins > 0) {
-                val scDecay = kotlin.math.exp(-deltaMins / currentTau)
-                val serumDecay = kotlin.math.exp(-deltaMins / tauE)
+            if (dtMins > 0) {
+                globalPhysicalSC *= exp(-dtMins / globalTauSC)
+                globalTheoreticalSC *= exp(-dtMins / globalTauTheoreticalSC)
+            }
+            lastTime = dose.timestamp
 
-                // Parallel Absorb
-                val aBolus = scBolus * (1.0 - scDecay); scBolus *= scDecay
-                val aExt = scExtBolus * (1.0 - scDecay); scExtBolus *= scDecay
-                val aBasalAbs = scBasalAbs * (1.0 - scDecay); scBasalAbs *= scDecay
-                val aBasalNet = scBasalNet * (1.0 - scDecay); scBasalNet *= scDecay
-                val aBasalNetAuto = scBasalNetAuto * (1.0 - scDecay); scBasalNetAuto *= scDecay
+            // ======================================================
+            // A. UPDATE PHYSICAL REALITY (Bolus + TBRs)
+            // ======================================================
+            val physicalInjected = dose.bolusAmt + dose.extBolusAmt + dose.basalAbsAmt
+            if (physicalInjected > 0.0) {
+                globalPhysicalSC += physicalInjected
 
-                // Parallel Serum Clear
-                val cBolus = serumBolus * (1.0 - serumDecay); serumBolus = (serumBolus * serumDecay) + aBolus; actBolus = cBolus / deltaMins
-                val cExt = serumExtBolus * (1.0 - serumDecay); serumExtBolus = (serumExtBolus * serumDecay) + aExt; actExtBolus = cExt / deltaMins
-                val cBasalAbs = serumBasalAbs * (1.0 - serumDecay); serumBasalAbs = (serumBasalAbs * serumDecay) + aBasalAbs; actBasalAbs = cBasalAbs / deltaMins
-                val cBasalNet = serumBasalNet * (1.0 - serumDecay); serumBasalNet = (serumBasalNet * serumDecay) + aBasalNet; actBasalNet = cBasalNet / deltaMins
-                val cBasalNetAuto = serumBasalNetAuto * (1.0 - serumDecay); serumBasalNetAuto = (serumBasalNetAuto * serumDecay) + aBasalNetAuto; actBasalNetAuto = cBasalNetAuto / deltaMins
+                val pkPeak = CompartmentModel.calculateSystemicPeak(globalPhysicalSC, isU200)
+                val pDiv = pkPeak / 0.41
+                val newTpModelPD = 2.0 * (pDiv * pDiv)
+                globalTauSC = computeScTau(pkPeak)
+
+                // The One-Way Valve (Physical Only)
+                for (curve in activeCurves) {
+                    if (!curve.isPhysical) continue
+
+                    val tElapsedOld = (dose.timestamp - curve.timestamp) / 60000.0
+
+                    if (tElapsedOld > 0 && tElapsedOld <= maxWarpWindow && curve.tpModelPD > 0.0) {
+                        if (newTpModelPD > curve.tpModelPD) {
+                            val tElapsedNew = tElapsedOld * sqrt(newTpModelPD / curve.tpModelPD)
+                            curve.timestamp = dose.timestamp - (tElapsedNew * 60000.0).toLong()
+                            curve.tpModelPD = newTpModelPD
+                        }
+                    }
+                }
+
+                activeCurves.add(TsunamiCurve(
+                    timestamp = dose.timestamp,
+                    bolusAmt = dose.bolusAmt,
+                    extBolusAmt = dose.extBolusAmt,
+                    basalAbsAmt = dose.basalAbsAmt,
+                    profileBasalAmt = 0.0,
+                    autoProfileBasalAmt = 0.0,
+                    tpModelPD = newTpModelPD,
+                    isPhysical = true
+                ))
             }
 
-            // Parallel Additions
-            scBolus += dose.bolusAmt
-            scExtBolus += dose.extBolusAmt
-            scBasalAbs += dose.basalAbsAmt
-            scBasalNet += dose.basalNetAmt
-            scBasalNetAuto += dose.basalNetAutoAmt
-            lastTime = tNow
+            // ======================================================
+            // B. UPDATE THEORETICAL BASELINE (Scheduled Profile)
+            // ======================================================
+            if (dose.profileBasalAmt > 0.0 || dose.autoProfileBasalAmt > 0.0) {
+                // The profile builds its own independent, steady-state puddle
+                globalTheoreticalSC += dose.profileBasalAmt
 
-            // Physics Update (Driven strictly by TOTAL absolute pool volume)
-            val totalSc = scBolus + scExtBolus + scBasalAbs
-            val pkPeak = CompartmentModel.calculateSystemicPeak(totalSc, isU200)
-            currentTau = CompartmentModel.computeScTau(pkPeak) 
+                val theoPeak = CompartmentModel.calculateSystemicPeak(globalTheoreticalSC, isU200)
+                val tDiv = theoPeak / 0.41
+                val theoTpModelPD = 2.0 * (tDiv * tDiv)
+                globalTauTheoreticalSC = computeScTau(theoPeak)
+
+                // The One-Way Valve (Theoretical Only)
+                for (curve in activeCurves) {
+                    if (curve.isPhysical) continue
+
+                    val tElapsedOld = (dose.timestamp - curve.timestamp) / 60000.0
+
+                    if (tElapsedOld > 0 && tElapsedOld <= maxWarpWindow && curve.tpModelPD > 0.0) {
+                        if (theoTpModelPD > curve.tpModelPD) {
+                            val tElapsedNew = tElapsedOld * sqrt(theoTpModelPD / curve.tpModelPD)
+                            curve.timestamp = dose.timestamp - (tElapsedNew * 60000.0).toLong()
+                            curve.tpModelPD = theoTpModelPD
+                        }
+                    }
+                }
+
+                activeCurves.add(TsunamiCurve(
+                    timestamp = dose.timestamp,
+                    bolusAmt = 0.0, extBolusAmt = 0.0, basalAbsAmt = 0.0,
+                    profileBasalAmt = dose.profileBasalAmt,
+                    autoProfileBasalAmt = dose.autoProfileBasalAmt,
+                    tpModelPD = theoTpModelPD,
+                    isPhysical = false
+                ))
+            }
         }
 
-        // Final Time Gap Check to Present Moment
-        val finalDeltaMins = (toTime - lastTime) / 60000.0
-        if (finalDeltaMins > 0) {
-            val scDecay = kotlin.math.exp(-finalDeltaMins / currentTau)
-            val serumDecay = kotlin.math.exp(-finalDeltaMins / tauE)
+        // ==========================================================
+        // FINAL AGGREGATION
+        // ==========================================================
+        var bIob = 0.0; var bAct = 0.0; var eIob = 0.0; var eAct = 0.0
+        var baIob = 0.0; var baAct = 0.0; var pIob = 0.0; var pAct = 0.0; var apIob = 0.0; var apAct = 0.0
 
-            val aBolus = scBolus * (1.0 - scDecay); scBolus *= scDecay
-            val aExt = scExtBolus * (1.0 - scDecay); scExtBolus *= scDecay
-            val aBasalAbs = scBasalAbs * (1.0 - scDecay); scBasalAbs *= scDecay
-            val aBasalNet = scBasalNet * (1.0 - scDecay); scBasalNet *= scDecay
-            val aBasalNetAuto = scBasalNetAuto * (1.0 - scDecay); scBasalNetAuto *= scDecay
+        for (curve in activeCurves) {
+            val t = (toTime - curve.timestamp) / 60000.0
+            if (t !in 0.0..upperLimit) continue
 
-            val cBolus = serumBolus * (1.0 - serumDecay); serumBolus = (serumBolus * serumDecay) + aBolus; actBolus = cBolus / finalDeltaMins
-            val cExt = serumExtBolus * (1.0 - serumDecay); serumExtBolus = (serumExtBolus * serumDecay) + aExt; actExtBolus = cExt / finalDeltaMins
-            val cBasalAbs = serumBasalAbs * (1.0 - serumDecay); serumBasalAbs = (serumBasalAbs * serumDecay) + aBasalAbs; actBasalAbs = cBasalAbs / finalDeltaMins
-            val cBasalNet = serumBasalNet * (1.0 - serumDecay); serumBasalNet = (serumBasalNet * serumDecay) + aBasalNet; actBasalNet = cBasalNet / finalDeltaMins
-            val cBasalNetAuto = serumBasalNetAuto * (1.0 - serumDecay); serumBasalNetAuto = (serumBasalNetAuto * serumDecay) + aBasalNetAuto; actBasalNetAuto = cBasalNetAuto / finalDeltaMins
-            lastTime = toTime
+            // EFFICIENCY FIX: Reused `exp` evaluation for both safeIobContrib and activity
+            val tSq = t * t
+            val safeIobContrib = exp(-tSq / curve.tpModelPD)
+            val activity = (2.0 / curve.tpModelPD) * t * safeIobContrib
+
+            // EFFICIENCY FIX: CPU Branch Skipping to prevent multiplying empty zeros
+            if (curve.bolusAmt > 0.0) { bIob += curve.bolusAmt * safeIobContrib; bAct += curve.bolusAmt * activity }
+            if (curve.extBolusAmt > 0.0) { eIob += curve.extBolusAmt * safeIobContrib; eAct += curve.extBolusAmt * activity }
+
+            if (curve.basalAbsAmt > 0.0) { baIob += curve.basalAbsAmt * safeIobContrib; baAct += curve.basalAbsAmt * activity }
+            if (curve.profileBasalAmt > 0.0) { pIob += curve.profileBasalAmt * safeIobContrib; pAct += curve.profileBasalAmt * activity }
+            if (curve.autoProfileBasalAmt > 0.0) { apIob += curve.autoProfileBasalAmt * safeIobContrib; apAct += curve.autoProfileBasalAmt * activity }
         }
 
-        // Cache Preservation
-        if (kotlin.math.abs(dateUtil.now() - toTime) < 5 * 60000L) {
-            eulerCache = MasterEulerState(lastTime, scBolus, scExtBolus, scBasalAbs, scBasalNet, scBasalNetAuto, serumBolus, serumExtBolus, serumBasalAbs, serumBasalNet, serumBasalNetAuto, currentTau, currentDbModified, sensitivityRatio)
-        }
-
-        // Object Mapping for AAPS Returns
-        fun mapToTotal(iobVal: Double, actVal: Double, mapToNetBasal: Boolean = false, mapToHighTemp: Boolean = false): IobTotal {
-            val t = IobTotal(toTime)
-            t.iob = iobVal
-            t.activity = actVal
-            t.basaliob = if (mapToNetBasal) iobVal else 0.0
-            t.netbasalinsulin = if (mapToNetBasal) iobVal else 0.0
-            t.extendedBolusInsulin = if (mapToHighTemp) iobVal else 0.0
-            t.hightempinsulin = if (mapToHighTemp) iobVal else 0.0
-            return t
-        }
+        val bnIob = baIob - pIob
+        val bnAct = baAct - pAct
+        val bnaIob = baIob - apIob
+        val bnaAct = baAct - apAct
 
         return EulerResult(
-            bolusTotal = mapToTotal(serumBolus, actBolus),
-            extBolusTotal = mapToTotal(serumExtBolus, actExtBolus, mapToNetBasal = true, mapToHighTemp = true),
-            basalAbsoluteTotal = mapToTotal(serumBasalAbs, actBasalAbs, mapToNetBasal = true),
-            basalNetTotal = mapToTotal(serumBasalNet, actBasalNet, mapToNetBasal = true),
-            basalNetAutoTotal = mapToTotal(serumBasalNetAuto, actBasalNetAuto, mapToNetBasal = true)
+            bolusTotal = mapToTotal(bIob, bAct, "bolus", lastBolusTime, bSnooze),
+            extBolusTotal = mapToTotal(eIob, eAct, "extBolus"),
+            profileBaselineTotal = mapToTotal(pIob, pAct, "profile"),
+            basalNetTotal = mapToTotal(bnIob, bnAct, "netBasal"),
+            basalNetAutoTotal = mapToTotal(bnaIob, bnaAct, "netBasal")
         )
     }
 
-    private fun buildUnifiedEulerTimeline(fromTime: Long, toTime: Long, sensitivityRatio: Double): List<EulerDose> {
-        val timelineMap = mutableMapOf<Long, EulerDose>()
-        fun getOrCreate(t: Long) = timelineMap.getOrPut(t) { EulerDose(t) }
+    private fun computeScTau(targetTp: Double): Double {
+        val tauE = 63.48 // Hepatic Clearance (44-min half-life)
+        var low = 1.0
+        var high = 300.0
+        var mid = 150.0
 
-        // 1. Boluses
-        persistenceLayer.getBolusesFromTime(fromTime, true).blockingGet()
-            .filter { it.isValid && it.timestamp <= toTime }
-            .forEach { getOrCreate(it.timestamp).bolusAmt += it.amount }
+        repeat(15) {
+            mid = (low + high) / 2.0
 
-        // 2. Extended Boluses
-        val pumpInterface = activePlugin.activePump
-        if (!pumpInterface.isFakingTempsByExtendedBoluses) {
+            val currentTp = if (abs(mid - tauE) < 0.1) {
+                mid
+            } else {
+                (mid * tauE / (tauE - mid)) * ln(tauE / mid)
+            }
+
+            if (currentTp > targetTp) {
+                high = mid
+            } else {
+                low = mid
+            }
+        }
+        return mid
+    }
+
+    private fun mapToTotal(iob: Double, act: Double, type: String, lastBolusTime: Long = 0L, bSnooze: Double = 0.0): IobTotal {
+        val t = IobTotal(0)
+        t.iob = iob; t.activity = act
+        when (type) {
+            "netBasal" -> {
+                t.basaliob = iob; t.netbasalinsulin = iob; t.hightempinsulin = max(0.0, iob)
+            }
+            "extBolus" -> {
+                t.extendedBolusInsulin = iob
+            }
+            "profile" -> {
+                // FIX: Maps exclusively to the baseline basal profile
+                t.basaliob = iob
+            }
+            "bolus" -> {
+                // FIX: Restores missing AMA specific variables
+                t.lastBolusTime = lastBolusTime
+                t.bolussnooze = bSnooze
+            }
+        }
+        return t
+    }
+
+    private fun buildUnifiedEulerTimeline(
+        fromTime: Long,
+        toTime: Long,
+        sensitivityRatio: Double,
+        boluses: List<BS>,
+        isFakingTemps: Boolean
+    ): List<EulerDose> {
+
+        // EFFICIENCY FIX: Pre-allocate initial capacity for exact 8-hour timeline
+        val capacity = ((toTime - fromTime) / 300000L).toInt() + 10
+        val timelineMap = HashMap<Long, EulerDose>(capacity)
+
+        fun getOrCreate(t: Long): EulerDose {
+            var dose = timelineMap[t]
+            if (dose == null) {
+                dose = EulerDose(t)
+                timelineMap[t] = dose
+            }
+            return dose
+        }
+
+        // Iterate over pre-fetched memory list instead of blocking DB hit
+        for (b in boluses) {
+            if (b.isValid && b.timestamp in fromTime..toTime) {
+                getOrCreate(b.timestamp).bolusAmt += b.amount
+            }
+        }
+
+        if (!isFakingTemps) {
             val ebs = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(fromTime, toTime, true)
             val now = dateUtil.now()
-            ebs.forEach { e ->
+            for (e in ebs) {
                 if (e.timestamp <= toTime) {
                     var dur = e.duration
                     var amt = e.amount
@@ -713,24 +807,24 @@ class IobCobCalculatorPlugin @Inject constructor(
             }
         }
 
-        // 3. Basals
         var bTime = fromTime
         while (bTime <= toTime) {
             val profile = profileFunction.getProfile(bTime)
             if (profile != null) {
                 val absoluteRate = getBasalData(profile, bTime).tempBasalAbsolute
                 val absAmt = absoluteRate * (5.0 / 60.0)
-                
+
                 val profileRate = profile.getBasal(bTime)
-                val netAmt = absAmt - (profileRate * 5.0 / 60.0)
-                
+                val profAmt = profileRate * (5.0 / 60.0)
+
                 val autoProfileRate = profileRate * sensitivityRatio
-                val netAutoAmt = absAmt - (autoProfileRate * 5.0 / 60.0)
+                val autoProfAmt = autoProfileRate * (5.0 / 60.0)
 
                 val dose = getOrCreate(bTime)
                 dose.basalAbsAmt += absAmt
-                dose.basalNetAmt += netAmt
-                dose.basalNetAutoAmt += netAutoAmt
+
+                dose.profileBasalAmt += profAmt
+                dose.autoProfileBasalAmt += autoProfAmt
             }
             bTime += 5 * 60000L
         }
@@ -738,29 +832,31 @@ class IobCobCalculatorPlugin @Inject constructor(
         return timelineMap.values.sortedBy { it.timestamp }
     }
 
-    // --- STATE TRACKERS ---
-    
+    private data class TsunamiCurve(
+        var timestamp: Long,
+        val bolusAmt: Double,
+        val extBolusAmt: Double,
+        val basalAbsAmt: Double,
+        val profileBasalAmt: Double,
+        val autoProfileBasalAmt: Double,
+        var tpModelPD: Double,
+        val isPhysical: Boolean
+    )
+
     private data class EulerDose(
         val timestamp: Long,
         var bolusAmt: Double = 0.0,
         var extBolusAmt: Double = 0.0,
         var basalAbsAmt: Double = 0.0,
-        var basalNetAmt: Double = 0.0,
-        var basalNetAutoAmt: Double = 0.0
+        var profileBasalAmt: Double = 0.0,
+        var autoProfileBasalAmt: Double = 0.0
     )
 
     private data class EulerResult(
         val bolusTotal: IobTotal,
         val extBolusTotal: IobTotal,
-        val basalAbsoluteTotal: IobTotal,
+        val profileBaselineTotal: IobTotal,
         val basalNetTotal: IobTotal,
         val basalNetAutoTotal: IobTotal
-    )
-
-    private data class MasterEulerState(
-        val timestamp: Long,
-        val scBolus: Double, val scExtBolus: Double, val scBasalAbs: Double, val scBasalNet: Double, val scBasalNetAuto: Double,
-        val serumBolus: Double, val serumExtBolus: Double, val serumBasalAbs: Double, val serumBasalNet: Double, val serumBasalNetAuto: Double,
-        val currentTau: Double, val dbLastModified: Long, val autosensRatio: Double
     )
 }
