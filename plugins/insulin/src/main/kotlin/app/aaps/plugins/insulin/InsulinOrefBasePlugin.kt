@@ -109,7 +109,7 @@ abstract class InsulinOrefBasePlugin(
             val td = dia * 60
 
             // Hardcoded 8-hour limit for Tsunami
-            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205)) {
+            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205 || insulinID == 106)) {
                 val pdResult = pdModelIobCalculation(bolus, insulinID, t)
                 result.iobContrib = pdResult.iobContrib
                 result.activityContrib = pdResult.activityContrib
