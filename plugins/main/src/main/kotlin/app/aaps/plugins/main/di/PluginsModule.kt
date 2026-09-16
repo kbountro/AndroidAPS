@@ -6,7 +6,7 @@ import app.aaps.core.interfaces.smsCommunicator.SmsCommunicator
 import app.aaps.plugins.main.general.overview.OverviewPlugin
 import app.aaps.plugins.main.general.persistentNotification.DummyService
 import app.aaps.plugins.main.general.smsCommunicator.SmsCommunicatorPlugin
-import app.aaps.plugins.main.iob.iobCobCalculator.IobCobCalculatorPlugin
+import app.aaps.plugins.main.iob.iobCobCalculator.TsunamiAwareIobCobCalculator
 import dagger.Binds
 import dagger.Module
 import dagger.android.ContributesAndroidInjector
@@ -34,6 +34,6 @@ abstract class PluginsModule {
 
         @Binds fun bindOverview(overviewPlugin: OverviewPlugin): Overview
         @Binds fun bindSmsCommunicator(smsCommunicatorPlugin: SmsCommunicatorPlugin): SmsCommunicator
-        @Binds fun bindIobCobCalculator(iobCobCalculatorPlugin: IobCobCalculatorPlugin): IobCobCalculator
+        @Binds fun bindIobCobCalculator(tsunamiAwareIobCobCalculator: TsunamiAwareIobCobCalculator): IobCobCalculator
     }
 }

@@ -15,12 +15,10 @@ import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.aps.MealData
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.db.ProcessedTbrEbData
-import app.aaps.core.interfaces.insulin.TsunamiIobEngine
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.overview.OverviewData
-
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.plugin.PluginDescription
@@ -36,7 +34,6 @@ import app.aaps.core.interfaces.rx.events.EventEffectiveProfileSwitchChanged
 import app.aaps.core.interfaces.rx.events.EventNewBG
 import app.aaps.core.interfaces.rx.events.EventNewHistoryData
 import app.aaps.core.interfaces.rx.events.EventPreferenceChange
-
 import app.aaps.core.interfaces.rx.events.EventRunningModeChange
 import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.utils.DateUtil
@@ -56,7 +53,6 @@ import app.aaps.core.objects.extensions.plus
 import app.aaps.core.objects.extensions.round
 import app.aaps.plugins.main.R
 import app.aaps.plugins.main.iob.iobCobCalculator.data.AutosensDataStoreObject
-
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
 import java.util.concurrent.Executors
@@ -64,6 +60,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
+import javax.inject.Provider
 import javax.inject.Singleton
 import kotlin.math.max
 import kotlin.math.min
@@ -84,7 +81,10 @@ class IobCobCalculatorPlugin @Inject constructor(
     private val calculationWorkflow: CalculationWorkflow,
     private val decimalFormatter: DecimalFormatter,
     private val processedTbrEbData: ProcessedTbrEbData,
-    private val tsunamiIobEngine: TsunamiIobEngine
+    // Resolves to the Tsunami-aware IobCobCalculator (see TsunamiAwareIobCobCalculator) once Dagger
+    // finishes building the graph; null only for the standalone instance HistoryBrowserData builds
+    // directly (bypassing DI), which falls back to using this plugin's own calculations.
+    private val iobCobCalculatorProvider: Provider<IobCobCalculator>? = null
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.GENERAL)
@@ -96,6 +96,7 @@ class IobCobCalculatorPlugin @Inject constructor(
 ), IobCobCalculator {
 
     private val disposable = CompositeDisposable()
+
     private var iobTable = LongSparseArray<IobTotal>() // oldest at index 0
     private var basalDataTable = LongSparseArray<BasalData>() // oldest at index 0
 
@@ -104,18 +105,25 @@ class IobCobCalculatorPlugin @Inject constructor(
     private val dataLock = Any()
     private var thread: Thread? = null
 
+    private fun activeIobCobCalculator(): IobCobCalculator = iobCobCalculatorProvider?.get() ?: this
+
     override fun onStart() {
         super.onStart()
+        // EventConfigBuilderChange
         disposable += rxBus
             .toObservable(EventConfigBuilderChange::class.java)
             .observeOn(aapsSchedulers.io)
-            .subscribe({ event -> resetDataAndRunCalculation("onEventConfigBuilderChange", event) }, fabricPrivacy::logException)
-
+            .subscribe({ event ->
+                           resetDataAndRunCalculation("onEventConfigBuilderChange", event)
+                       }, fabricPrivacy::logException)
+        // EventEffectiveProfileSwitchChanged
         disposable += rxBus
             .toObservable(EventEffectiveProfileSwitchChanged::class.java)
             .observeOn(aapsSchedulers.io)
-            .subscribe({ event -> newHistoryData(event.startDate, false, event) }, fabricPrivacy::logException)
-
+            .subscribe({ event ->
+                           newHistoryData(event.startDate, false, event)
+                       }, fabricPrivacy::logException)
+        // EventPreferenceChange
         disposable += rxBus
             .toObservable(EventPreferenceChange::class.java)
             .observeOn(aapsSchedulers.io)
@@ -138,11 +146,11 @@ class IobCobCalculatorPlugin @Inject constructor(
                            }
                            if (event.isChanged(IntNonKey.RangeToDisplay.key)) {
                                overviewData.initRange()
-                               calculationWorkflow.runOnScaleChanged(this, overviewData)
+                               calculationWorkflow.runOnScaleChanged(activeIobCobCalculator(), overviewData)
                                rxBus.send(EventNewHistoryData(0, false))
                            }
                        }, fabricPrivacy::logException)
-
+        // EventNewHistoryData
         disposable += rxBus
             .toObservable(EventNewHistoryData::class.java)
             .observeOn(aapsSchedulers.io)
@@ -162,7 +170,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                 {
                     calculationWorkflow.runCalculation(
                         CalculationWorkflow.MAIN_CALCULATION,
-                        this,
+                        activeIobCobCalculator(),
                         overviewData,
                         "onEventAppInitialized",
                         System.currentTimeMillis(),
@@ -188,7 +196,7 @@ class IobCobCalculatorPlugin @Inject constructor(
         ads.reset()
         calculationWorkflow.runCalculation(
             job = CalculationWorkflow.MAIN_CALCULATION,
-            iobCobCalculator = this,
+            iobCobCalculator = activeIobCobCalculator(),
             overviewData = overviewData,
             reason = reason,
             end = System.currentTimeMillis(),
@@ -202,7 +210,6 @@ class IobCobCalculatorPlugin @Inject constructor(
             aapsLogger.debug(LTag.AUTOSENS, "Clearing cached data.")
             iobTable = LongSparseArray()
             basalDataTable = LongSparseArray()
-            tsunamiIobEngine.resetCache()
         }
     }
 
@@ -237,45 +244,15 @@ class IobCobCalculatorPlugin @Inject constructor(
     override fun calculateFromTreatmentsAndTemps(toTime: Long, profile: Profile): IobTotal {
         val now = System.currentTimeMillis()
         val time = ads.roundUpTime(toTime)
-
-        if (tsunamiIobEngine.isActive) {
-            val cacheHit = iobTable[time]
-            if (time < now && cacheHit != null) {
-                return cacheHit
-            }
-
-            val normalRes = tsunamiIobEngine.resultAt(time, 1.0)
-            val bolusIob = IobTotal.combine(normalRes.bolusTotal, normalRes.extBolusTotal)
-            val basalIob = normalRes.basalNetTotal
-
-            val basalIobWithZeroTemp = basalIob.copy()
-            val zeroTempStart = now + 60 * 1000L
-            if (zeroTempStart < time) {
-                val zeroRes = tsunamiIobEngine.resultAt(time, 1.0, assumeZeroTempAfter = zeroTempStart)
-                basalIobWithZeroTemp.basaliob = zeroRes.basalNetTotal.basaliob
-                basalIobWithZeroTemp.netbasalinsulin = zeroRes.basalNetTotal.netbasalinsulin
-                basalIobWithZeroTemp.hightempinsulin = zeroRes.basalNetTotal.hightempinsulin
-            }
-
-            basalIobWithZeroTemp.iobWithZeroTemp = IobTotal.combine(bolusIob, basalIobWithZeroTemp).round()
-            val iobTotal = IobTotal.combine(bolusIob, basalIob).round()
-            iobTotal.iobWithZeroTemp = basalIobWithZeroTemp.iobWithZeroTemp
-
-            if (time < now) {
-                synchronized(dataLock) {
-                    iobTable.put(time, iobTotal)
-                }
-            }
-            return iobTotal
-        }
-
         val cacheHit = iobTable[time]
         if (time < now && cacheHit != null) {
+            //og.debug(">>> calculateFromTreatmentsAndTemps Cache hit " + new Date(time).toLocaleString());
             return cacheHit
-        }
+        } // else log.debug(">>> calculateFromTreatmentsAndTemps Cache miss " + new Date(time).toLocaleString());
         val bolusIob = calculateIobFromBolusToTime(time).round()
         val basalIob = calculateIobToTimeFromTempBasalsIncludingConvertedExtended(time).round()
-
+        // OpenAPSSMB only
+        // Add expected zero temp basal for next 240 minutes
         val basalIobWithZeroTemp = basalIob.copy()
         val t = TB(
             timestamp = now + 60 * 1000L,
@@ -299,41 +276,11 @@ class IobCobCalculatorPlugin @Inject constructor(
     }
 
     private fun calculateFromTreatmentsAndTemps(time: Long, lastAutosensResult: AutosensResult, exerciseMode: Boolean, halfBasalExerciseTarget: Double, isTempTarget: Boolean): IobTotal {
-        if (tsunamiIobEngine.isActive) {
-            val profile = profileFunction.getProfile(time) ?: return IobTotal(time)
-            var sensitivityRatio = lastAutosensResult.ratio
-            val normalTarget = Constants.NORMAL_TARGET_MGDL.toDouble()
-
-            if (exerciseMode && isTempTarget && profile.getTargetMgdl() >= normalTarget + 5) {
-                val mgdlHalfBasalExerciseTarget = halfBasalExerciseTarget * if (profile.units.toString() == "mmol/L") app.aaps.core.data.model.GlucoseUnit.MMOLL_TO_MGDL else 1.0
-                val c = mgdlHalfBasalExerciseTarget - normalTarget
-                sensitivityRatio = c / (c + profile.getTargetMgdl() - normalTarget)
-            }
-
-            val normalRes = tsunamiIobEngine.resultAt(time, sensitivityRatio)
-            val bolusIob = IobTotal.combine(normalRes.bolusTotal, normalRes.extBolusTotal)
-            val basalIob = normalRes.basalNetAutoTotal
-
-            val basalIobWithZeroTemp = basalIob.copy()
-            val now = dateUtil.now()
-            val zeroTempStart = now + 60 * 1000L
-            if (zeroTempStart < time) {
-                val zeroRes = tsunamiIobEngine.resultAt(time, sensitivityRatio, assumeZeroTempAfter = zeroTempStart)
-                basalIobWithZeroTemp.basaliob = zeroRes.basalNetAutoTotal.basaliob
-                basalIobWithZeroTemp.netbasalinsulin = zeroRes.basalNetAutoTotal.netbasalinsulin
-                basalIobWithZeroTemp.hightempinsulin = zeroRes.basalNetAutoTotal.hightempinsulin
-            }
-
-            basalIobWithZeroTemp.iobWithZeroTemp = IobTotal.combine(bolusIob, basalIobWithZeroTemp).round()
-            val iobTotal = IobTotal.combine(bolusIob, basalIob).round()
-            iobTotal.iobWithZeroTemp = basalIobWithZeroTemp.iobWithZeroTemp
-            return iobTotal
-        }
-
         val now = dateUtil.now()
         val bolusIob = calculateIobFromBolusToTime(time).round()
         val basalIob = getCalculationToTimeTempBasals(time, lastAutosensResult, exerciseMode, halfBasalExerciseTarget, isTempTarget).round()
-
+        // OpenAPSSMB only
+        // Add expected zero temp basal for next 240 minutes
         val basalIobWithZeroTemp = basalIob.copy()
         val t = TB(
             timestamp = now + 60 * 1000L,
@@ -358,6 +305,7 @@ class IobCobCalculatorPlugin @Inject constructor(
         val time = ads.roundUpTime(fromTime)
         var retVal = basalDataTable[time]
         if (retVal == null) {
+            //log.debug(">>> getBasalData Cache miss " + new Date(time).toLocaleString());
             retVal = BasalData()
             val tb = processedTbrEbData.getTempBasalIncludingConvertedExtended(time)
             retVal.basal = profile.getBasal(time)
@@ -373,7 +321,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                     basalDataTable.append(time, retVal)
                 }
             }
-        }
+        } //else log.debug(">>> getBasalData Cache hit " +  new Date(time).toLocaleString());
         return retVal
     }
 
@@ -382,7 +330,8 @@ class IobCobCalculatorPlugin @Inject constructor(
             aapsLogger.debug(LTag.AUTOSENS, "AUTOSENSDATA is waiting for calculation thread: $reason")
             try {
                 thread?.join(5000)
-            } catch (_: InterruptedException) { }
+            } catch (_: InterruptedException) { // ignore
+            }
             aapsLogger.debug(LTag.AUTOSENS, "AUTOSENSDATA finished waiting for calculation thread: $reason")
         }
         return ads.getLastAutosensData(reason, aapsLogger, dateUtil)
@@ -405,6 +354,7 @@ class IobCobCalculatorPlugin @Inject constructor(
             }
             timestamp = autosensData.time
         }
+        // Future carbs
         carbs.forEach { carb -> if (carb.timestamp > now) futureCarbs += carb.amount }
         return CobInfo(timestamp, displayCob, futureCarbs)
     }
@@ -434,6 +384,7 @@ class IobCobCalculatorPlugin @Inject constructor(
     }
 
     override fun calculateIobArrayInDia(profile: Profile): Array<IobTotal> {
+        // predict IOB out to DIA plus 30m
         var time = System.currentTimeMillis()
         time = ads.roundUpTime(time)
         val len = ((profile.dia * 60 + 30) / 5).toInt()
@@ -447,6 +398,7 @@ class IobCobCalculatorPlugin @Inject constructor(
     }
 
     override fun calculateIobArrayForSMB(lastAutosensResult: AutosensResult, exerciseMode: Boolean, halfBasalExerciseTarget: Double, isTempTarget: Boolean): Array<IobTotal> {
+        // predict IOB out to DIA plus 30m
         val now = dateUtil.now()
         val len = 4 * 60 / 5
         val array = Array(len) { IobTotal(0) }
@@ -469,15 +421,20 @@ class IobCobCalculatorPlugin @Inject constructor(
         return sb.toString()
     }
 
+    // Limit rate of EventNewHistoryData
     private var historyWorker: ScheduledExecutorService? = null
     private var scheduledHistoryPost: ScheduledFuture<*>? = null
     private var scheduledEvent: EventNewHistoryData? = null
 
     @Synchronized
     private fun scheduleHistoryDataChange(event: EventNewHistoryData) {
+        // if there is nothing scheduled or asking reload deeper to the past
         if (scheduledEvent == null || event.oldDataTimestamp < (scheduledEvent?.oldDataTimestamp ?: 0L)) {
+            // cancel waiting task to prevent sending multiple posts
             scheduledHistoryPost?.cancel(false)
+            // prepare task for execution in 1 sec
             scheduledEvent?.let {
+                // set reload bg data if was not set
                 event.reloadBgData = event.reloadBgData || it.reloadBgData
             }
             scheduledEvent = event
@@ -497,8 +454,11 @@ class IobCobCalculatorPlugin @Inject constructor(
                 }, 5L, TimeUnit.SECONDS
             )
         } else {
+            // asked reload is newer -> adjust params only
             scheduledEvent?.let {
+                // set reload bg data if was not set
                 if (!it.reloadBgData) it.reloadBgData = event.reloadBgData
+                // set Glucose value if newer
                 event.newestGlucoseValueTimestamp?.let { timestamp ->
                     if (timestamp > (it.newestGlucoseValueTimestamp ?: 0L)) it.newestGlucoseValueTimestamp = timestamp
                 }
@@ -506,13 +466,18 @@ class IobCobCalculatorPlugin @Inject constructor(
         }
     }
 
+    // When historical data is changed (coming from NS etc) finished calculations after this date must be invalidated
     private fun newHistoryData(oldDataTimestamp: Long, bgDataReload: Boolean, event: Event) {
+        //log.debug("Locking onNewHistoryData");
         calculationWorkflow.stopCalculation(CalculationWorkflow.MAIN_CALCULATION, "onEventNewHistoryData")
         synchronized(dataLock) {
+
+            // clear up 5 min back for proper COB calculation
             val time = oldDataTimestamp - 5 * 60 * 1000L
             aapsLogger.debug(LTag.AUTOSENS, "Invalidating cached data to: " + dateUtil.dateAndTimeAndSecondsString(time))
             for (index in iobTable.size() - 1 downTo 0) {
                 if (iobTable.keyAt(index) > time) {
+                    aapsLogger.debug(LTag.AUTOSENS, "Removing from iobTable: " + dateUtil.dateAndTimeAndSecondsString(iobTable.keyAt(index)))
                     iobTable.removeAt(index)
                 } else {
                     break
@@ -520,32 +485,44 @@ class IobCobCalculatorPlugin @Inject constructor(
             }
             for (index in basalDataTable.size() - 1 downTo 0) {
                 if (basalDataTable.keyAt(index) > time) {
+                    aapsLogger.debug(LTag.AUTOSENS, "Removing from basalDataTable: " + dateUtil.dateAndTimeAndSecondsString(basalDataTable.keyAt(index)))
                     basalDataTable.removeAt(index)
                 } else {
                     break
                 }
             }
-            tsunamiIobEngine.resetCache()
             ads.newHistoryData(time, aapsLogger, dateUtil)
         }
         calculationWorkflow.runCalculation(
             job = CalculationWorkflow.MAIN_CALCULATION,
-            iobCobCalculator = this,
+            iobCobCalculator = activeIobCobCalculator(),
             overviewData = overviewData,
             reason = event.javaClass.simpleName,
             end = System.currentTimeMillis(),
             bgDataReload = bgDataReload,
             cause = event
         )
+        //log.debug("Releasing onNewHistoryData");
     }
 
+    /**
+     *  Time range to the past for IOB calculation
+     *  @return milliseconds
+     */
     private fun range(): Long = ((profileFunction.getProfile()?.dia ?: Constants.defaultDIA) * 60 * 60 * 1000).toLong()
 
     override fun calculateIobFromBolus(): IobTotal = calculateIobFromBolusToTime(dateUtil.now())
 
+    /**
+     * Calculate IobTotal from boluses and extended to provided timestamp.
+     * NOTE: Only isValid == true boluses are included
+     * NOTE: if faking by TBR by extended boluses is enabled, extended boluses are not included
+     *  and are calculated towards temporary basals
+     *
+     * @param toTime timestamp in milliseconds
+     * @return calculated iob
+     */
     private fun calculateIobFromBolusToTime(toTime: Long): IobTotal {
-        if (tsunamiIobEngine.isActive) return tsunamiIobEngine.calculateIobFromBolusToTime(toTime)
-
         val total = IobTotal(toTime)
         val profile = profileFunction.getProfile() ?: return total
         val dia = profile.dia
@@ -561,6 +538,8 @@ class IobCobCalculatorPlugin @Inject constructor(
                 total.activity += tIOB.activityContrib
                 if (t.amount > 0 && t.timestamp > total.lastBolusTime) total.lastBolusTime = t.timestamp
                 if (t.type != BS.Type.SMB) {
+                    // instead of dividing the DIA that only worked on the bilinear curves,
+                    // multiply the time the treatment is seen active.
                     val timeSinceTreatment = toTime - t.timestamp
                     val snoozeTime = t.timestamp + (timeSinceTreatment * divisor).toLong()
                     val bIOB = t.iobCalc(activePlugin, snoozeTime, dia)
@@ -596,8 +575,6 @@ class IobCobCalculatorPlugin @Inject constructor(
     }
 
     override fun calculateAbsoluteIobFromBaseBasals(toTime: Long): IobTotal {
-        if (tsunamiIobEngine.isActive) return tsunamiIobEngine.calculateAbsoluteIobFromBaseBasals(toTime)
-
         val total = IobTotal(toTime)
         var i = toTime - range()
         while (i < toTime) {
@@ -625,8 +602,6 @@ class IobCobCalculatorPlugin @Inject constructor(
         calculateIobToTimeFromTempBasalsIncludingConvertedExtended(dateUtil.now())
 
     override fun calculateIobToTimeFromTempBasalsIncludingConvertedExtended(toTime: Long): IobTotal {
-        if (tsunamiIobEngine.isActive) return tsunamiIobEngine.calculateIobToTimeFromTempBasalsIncludingConvertedExtended(toTime)
-
         val total = IobTotal(toTime)
         val now = dateUtil.now()
         val pumpInterface = activePlugin.activePump
@@ -638,6 +613,7 @@ class IobCobCalculatorPlugin @Inject constructor(
             val profile = profileFunction.getProfile(t.timestamp) ?: continue
             if (t.end > now) t.duration = now - t.timestamp
             val calc = t.iobCalc(toTime, profile, activePlugin.activeInsulin)
+            //log.debug("BasalIOB " + new Date(time) + " >>> " + calc.basalIob);
             total.plus(calc)
         }
         if (pumpInterface.isFakingTempsByExtendedBoluses) {
@@ -655,6 +631,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                 val calc = e.iobCalc(toTime, profile, activePlugin.activeInsulin)
                 totalExt.plus(calc)
             }
+            // Convert to basal iob
             totalExt.basaliob = totalExt.iob
             totalExt.iob = 0.0
             totalExt.netbasalinsulin = totalExt.extendedBolusInsulin
@@ -665,19 +642,6 @@ class IobCobCalculatorPlugin @Inject constructor(
     }
 
     private fun getCalculationToTimeTempBasals(toTime: Long, lastAutosensResult: AutosensResult, exerciseMode: Boolean, halfBasalExerciseTarget: Double, isTempTarget: Boolean): IobTotal {
-        if (tsunamiIobEngine.isActive) {
-            val profile = profileFunction.getProfile(toTime) ?: return IobTotal(toTime)
-            var sensitivityRatio = lastAutosensResult.ratio
-            val normalTarget = Constants.NORMAL_TARGET_MGDL.toDouble()
-
-            if (exerciseMode && isTempTarget && profile.getTargetMgdl() >= normalTarget + 5) {
-                val mgdlHalfBasalExerciseTarget = halfBasalExerciseTarget * if (profile.units.toString() == "mmol/L") app.aaps.core.data.model.GlucoseUnit.MMOLL_TO_MGDL else 1.0
-                val c = mgdlHalfBasalExerciseTarget - normalTarget
-                sensitivityRatio = c / (c + profile.getTargetMgdl() - normalTarget)
-            }
-            return tsunamiIobEngine.calculateNetBasalAuto(toTime, sensitivityRatio)
-        }
-
         val total = IobTotal(toTime)
         val pumpInterface = activePlugin.activePump
         val now = dateUtil.now()
@@ -688,6 +652,7 @@ class IobCobCalculatorPlugin @Inject constructor(
             val profile = profileFunction.getProfile(t.timestamp) ?: continue
             if (t.end > now) t.duration = now - t.timestamp
             val calc = t.iobCalc(toTime, profile, lastAutosensResult, exerciseMode, halfBasalExerciseTarget, isTempTarget, activePlugin.activeInsulin)
+            //log.debug("BasalIOB " + new Date(time) + " >>> " + calc.basalIob);
             total.plus(calc)
         }
         if (pumpInterface.isFakingTempsByExtendedBoluses) {
@@ -705,6 +670,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                 val calc = e.iobCalc(toTime, profile, lastAutosensResult, exerciseMode, halfBasalExerciseTarget, isTempTarget, activePlugin.activeInsulin)
                 totalExt.plus(calc)
             }
+            // Convert to basal iob
             totalExt.basaliob = totalExt.iob
             totalExt.iob = 0.0
             totalExt.netbasalinsulin = totalExt.extendedBolusInsulin
