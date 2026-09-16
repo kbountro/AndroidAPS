@@ -99,13 +99,15 @@ abstract class InsulinOrefBasePlugin(
     override fun iobCalcForTreatment(bolus: BS, time: Long, dia: Double): Iob {
         assert(dia != 0.0)
         assert(peak != 0)
-        val insulinInterface = activePlugin.activeInsulin //MP for Tsunami PD models
-        val insulinID = insulinInterface.id.value //MP for Tsunami PD models
+        val insulinInterface = activePlugin.activeInsulin
+        val insulinID = insulinInterface.id.value
         val result = Iob()
         if (bolus.amount != 0.0) {
             val bolusTime = bolus.timestamp
             val t = (time - bolusTime) / 1000.0 / 60.0
-            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205)) { //MP: use pharmacodynamic model if PD model is selected insulin (ID 105 or 205)
+
+            // Hardcoded 8-hour limit for Tsunami
+            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205 || insulinID == 106)) {
                 val pdResult = pdModelIobCalculation(bolus, insulinID, t)
                 result.iobContrib = pdResult.iobContrib
                 result.activityContrib = pdResult.activityContrib

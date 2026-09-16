@@ -20,4 +20,8 @@
     <string name="lyumjev_U100_PD">Lyumjev U100 (Tsunami)</string>
     <string name="description_insulin_lyumjev_U100_PD">Glucodynamic model for Lyumjev U100 (standard concentration); This model automatically adjusts the duration of insulin action (DIA).</string>
 
+    <!-- NEW: Traffic Jam Model -->
+    <string name="lyumjev_U100_Traffic_Jam">Lyumjev U100 (Tsunami Traffic Jam)</string>
+    <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 8-hour Euler pool to calculate dynamic Subcutaneous accumulation.</string>
+
 </resources>

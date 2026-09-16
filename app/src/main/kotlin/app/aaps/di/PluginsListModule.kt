@@ -76,6 +76,7 @@ import dagger.multibindings.IntKey
 import dagger.multibindings.IntoMap
 import info.nightscout.pump.combov2.ComboV2Plugin
 import app.aaps.plugins.insulin.InsulinLyumjevU100PDPlugin
+import app.aaps.plugins.insulin.InsulinLyumjevU100TrafficJamPlugin
 import javax.inject.Qualifier
 
 @Suppress("unused")
@@ -130,6 +131,13 @@ abstract class PluginsListModule {
     @IntoMap
     @IntKey(43)
     abstract fun bindInsulinLyumjevU100PDPlugin(plugin: InsulinLyumjevU100PDPlugin): PluginBase
+
+    // kbountro: New Traffic Jam Plugin
+    @Binds
+    @AllConfigs
+    @IntoMap
+    @IntKey(44)
+    abstract fun bindInsulinLyumjevU100TrafficJamPlugin(plugin: InsulinLyumjevU100TrafficJamPlugin): PluginBase
 
     @Binds
     @AllConfigs
