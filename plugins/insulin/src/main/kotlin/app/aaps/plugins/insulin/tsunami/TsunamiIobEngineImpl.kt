@@ -44,7 +44,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 ) : TsunamiIobEngine {
 
     private val engineLock = Any()
-    private var eulerCache = HashMap<String, TsunamiIobResult>()
+    private var resultCache = HashMap<String, TsunamiIobResult>()
     private var cacheVersion = 0
 
     override val isActive: Boolean
@@ -52,7 +52,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     override fun resetCache() {
         synchronized(engineLock) {
-            eulerCache.clear()
+            resultCache.clear()
             cacheVersion++
         }
     }
@@ -80,7 +80,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         val key = "${toTime}_${sensitivityRatio}_${assumeZeroTempAfter}"
 
         synchronized(engineLock) {
-            eulerCache[key]?.let { return it.copy() }
+            resultCache[key]?.let { return it.copy() }
         }
 
         val now = dateUtil.now()
@@ -95,27 +95,33 @@ class TsunamiIobEngineImpl @Inject constructor(
         }
 
         val currentVersion = synchronized(engineLock) { cacheVersion }
-        // Pass the exactly requested toTime so the Master Solver guarantees it is generated
-        val resultsMap = runMasterEulerSolver(toTime, startTime, horizon, sensitivityRatio, assumeZeroTempAfter)
+        // Pass the exactly requested toTime so the solver guarantees it is generated
+        val resultsMap = simulateDepotHistory(toTime, startTime, horizon, sensitivityRatio, assumeZeroTempAfter)
 
         synchronized(engineLock) {
             if (currentVersion == cacheVersion) {
                 for ((t, res) in resultsMap) {
                     val k = "${t}_${sensitivityRatio}_${assumeZeroTempAfter}"
-                    eulerCache[k] = res
+                    resultCache[k] = res
                 }
             }
         }
 
         return synchronized(engineLock) {
-            eulerCache[key]?.copy() ?: resultsMap[toTime]?.copy() ?: resultsMap.values.last().copy()
+            resultCache[key]?.copy() ?: resultsMap[toTime]?.copy() ?: resultsMap.values.last().copy()
         }
     }
 
     // =========================================================================
-    // THE MASTER EULER SOLVER (THE "TRAFFIC JAM" ENGINE)
+    // THE TRAFFIC JAM DEPOT SIMULATION
+    // An event-driven (impulsive) compartmental model: each dose is solved in
+    // closed form - exactly, not by numerical integration - and dosing events
+    // are the only points where curves are re-parametrized against the shared
+    // depot's current state. This is the same style NONMEM's closed-form ADVAN
+    // routines use for linear compartments, extended here with a depot-mass-
+    // dependent (nonlinear, amount-in-depot) absorption rate.
     // =========================================================================
-    private fun runMasterEulerSolver(
+    private fun simulateDepotHistory(
         requestedTime: Long,
         startTime: Long,
         horizonTime: Long,
@@ -123,13 +129,12 @@ class TsunamiIobEngineImpl @Inject constructor(
         assumeZeroTempAfter: Long = Long.MAX_VALUE
     ): Map<Long, TsunamiIobResult> {
         val now = dateUtil.now()
-        val isU200 = activePlugin.activeInsulin.id.value == 205
 
         val boluses = persistenceLayer.getBolusesFromTime(startTime, true).blockingGet()
         val pumpInterface = activePlugin.activePump
         val isFakingTemps = pumpInterface.isFakingTempsByExtendedBoluses
 
-        val timeline = buildUnifiedEulerTimeline(startTime, horizonTime, sensitivityRatio, boluses, isFakingTemps, assumeZeroTempAfter, now)
+        val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, isFakingTemps, assumeZeroTempAfter, now)
 
         val maxWarpWindow = 6.0 * 60.0
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
@@ -163,9 +168,15 @@ class TsunamiIobEngineImpl @Inject constructor(
             // STRICTLY LESS THAN: Take snapshots AFTER the current dose is absorbed, but before the next!
             while (nextTargetIdx < sortedTargets.size && sortedTargets[nextTargetIdx] < dose.timestamp) {
                 val tTarget = sortedTargets[nextTargetIdx]
-                resultsMap[tTarget] = evaluateCurvesAt(tTarget, activeCurves, boluses, divisor, isU200)
+                resultsMap[tTarget] = evaluateCurvesAt(tTarget, activeCurves, boluses, divisor)
                 nextTargetIdx++
             }
+
+            // A curve past 480 min (8h) elapsed can never contribute to any evaluation from
+            // here on (evaluateCurvesAt already filters it out), since elapsed time only grows
+            // as processing moves forward. Dropping it here changes no computed value - it just
+            // keeps the list bounded to a rolling ~8h window instead of the whole simulation span.
+            activeCurves.removeAll { (dose.timestamp - it.timestamp) / 60000.0 >= 480.0 }
 
             val dtMins = (dose.timestamp - lastTime) / 60000.0
             if (dtMins > 0) {
@@ -177,7 +188,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             val physicalInjected = dose.bolusAmt + dose.extBolusAmt + dose.basalAbsAmt
             if (physicalInjected > 0.0) {
                 globalPhysicalSC += physicalInjected
-                val pkPeak = CompartmentModel.calculateSystemicPeak(globalPhysicalSC, isU200)
+                val pkPeak = CompartmentModel.calculateSystemicPeak(globalPhysicalSC)
                 val pDiv = pkPeak / 0.74
                 val newTpModelPD = 2.0 * (pDiv * pDiv)
                 globalTauSC = computeScTau(pkPeak)
@@ -210,7 +221,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
             if (dose.profileBasalAmt > 0.0 || dose.autoProfileBasalAmt > 0.0) {
                 globalTheoreticalSC += dose.profileBasalAmt
-                val theoPeak = CompartmentModel.calculateSystemicPeak(globalTheoreticalSC, isU200)
+                val theoPeak = CompartmentModel.calculateSystemicPeak(globalTheoreticalSC)
                 val tDiv = theoPeak / 0.74
                 val theoTpModelPD = 2.0 * (tDiv * tDiv)
                 globalTauTheoreticalSC = computeScTau(theoPeak)
@@ -243,14 +254,14 @@ class TsunamiIobEngineImpl @Inject constructor(
         // Process remaining snapshots at the very end of the timeline
         while (nextTargetIdx < sortedTargets.size) {
             val tTarget = sortedTargets[nextTargetIdx]
-            resultsMap[tTarget] = evaluateCurvesAt(tTarget, activeCurves, boluses, divisor, isU200)
+            resultsMap[tTarget] = evaluateCurvesAt(tTarget, activeCurves, boluses, divisor)
             nextTargetIdx++
         }
 
         return resultsMap
     }
 
-    private fun evaluateCurvesAt(tTarget: Long, activeCurves: List<TsunamiCurve>, boluses: List<BS>, divisor: Double, isU200: Boolean): TsunamiIobResult {
+    private fun evaluateCurvesAt(tTarget: Long, activeCurves: List<TsunamiCurve>, boluses: List<BS>, divisor: Double): TsunamiIobResult {
         var bSnooze = 0.0
         var lastBolusTime = 0L
 
@@ -265,7 +276,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                     val tSnoozeElapsed = (tTarget - snoozeTime) / 60000.0
 
                     if (tSnoozeElapsed in 0.0..<480.0) {
-                        val snoozePeak = CompartmentModel.calculateSystemicPeak(b.amount, isU200)
+                        val snoozePeak = CompartmentModel.calculateSystemicPeak(b.amount)
                         val pDiv = snoozePeak / 0.74
                         val snoozeTpModelPD = 2.0 * (pDiv * pDiv)
                         val tSq = tSnoozeElapsed * tSnoozeElapsed
@@ -319,7 +330,7 @@ class TsunamiIobEngineImpl @Inject constructor(
     private fun computeScTau(targetTp: Double): Double {
         val tauE = 63.48
         var low = 1.0
-        var high = 300.0
+        var high = 1000.0 // reaches the ~175 min asymptote of calculateSystemicPeak; 300 only reached ~125 min
         var mid = 150.0
 
         repeat(15) {
@@ -354,7 +365,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         return t
     }
 
-    private fun buildUnifiedEulerTimeline(
+    private fun buildDoseEventTimeline(
         fromTime: Long,
         toTime: Long,
         sensitivityRatio: Double,
@@ -362,15 +373,15 @@ class TsunamiIobEngineImpl @Inject constructor(
         isFakingTemps: Boolean,
         assumeZeroTempAfter: Long,
         currentNow: Long
-    ): List<EulerDose> {
+    ): List<DoseEvent> {
 
         val capacity = ((toTime - fromTime) / 60000L).toInt() + 10
-        val timelineMap = HashMap<Long, EulerDose>(capacity)
+        val timelineMap = HashMap<Long, DoseEvent>(capacity)
 
-        fun getOrCreate(t: Long): EulerDose {
+        fun getOrCreate(t: Long): DoseEvent {
             var dose = timelineMap[t]
             if (dose == null) {
-                dose = EulerDose(t)
+                dose = DoseEvent(t)
                 timelineMap[t] = dose
             }
             return dose
@@ -470,7 +481,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         val isPhysical: Boolean
     )
 
-    private data class EulerDose(
+    private data class DoseEvent(
         val timestamp: Long,
         var bolusAmt: Double = 0.0,
         var extBolusAmt: Double = 0.0,
@@ -484,9 +495,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         private const val A1 = 12.27
         private const val B1 = 0.05185
 
-        fun calculateSystemicPeak(currentScMass: Double, isU200: Boolean): Double {
-            val effectiveMass = if (isU200) currentScMass * 2.0 else currentScMass
-            return 0.74 * (A0 + A1 * effectiveMass) / (1.0 + B1 * effectiveMass)
-        }
+        fun calculateSystemicPeak(currentScMass: Double): Double =
+            0.74 * (A0 + A1 * currentScMass) / (1.0 + B1 * currentScMass)
     }
 }
