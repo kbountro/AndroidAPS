@@ -48,9 +48,9 @@ abstract class InsulinOrefBasePlugin(
 
     companion object {
 
-        // Must match TsunamiIobEngineImpl.DIA_HORIZON_MINUTES (9h) - kept separate since that
+        // Must match TsunamiIobEngineImpl.DIA_HORIZON_MINUTES (8h) - kept separate since that
         // engine constant is private and this preview path is decoupled from the pooled engine.
-        private const val TRAFFIC_JAM_HORIZON_MINUTES = 540.0
+        private const val TRAFFIC_JAM_HORIZON_MINUTES = 480.0
     }
 
     private var lastWarned: Long = 0

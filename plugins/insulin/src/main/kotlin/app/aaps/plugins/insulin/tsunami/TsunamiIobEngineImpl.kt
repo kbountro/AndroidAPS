@@ -52,8 +52,8 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     companion object {
         /** Duration of insulin action horizon: how long a dose keeps contributing before IOB is forced to 0. */
-        private const val DIA_HORIZON_MINUTES = 540.0 // 9h
-        private const val DIA_HORIZON_MS = 9L * 60 * 60 * 1000L
+        private const val DIA_HORIZON_MINUTES = 480.0 // 8h
+        private const val DIA_HORIZON_MS = 8L * 60 * 60 * 1000L
     }
 
     private val engineLock = Any()
