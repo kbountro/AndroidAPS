@@ -22,6 +22,6 @@
 
     <!-- NEW: Traffic Jam Model -->
     <string name="lyumjev_U100_Traffic_Jam">Lyumjev U100 (Tsunami Traffic Jam)</string>
-    <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 8-hour analytic depot pool to calculate dynamic Subcutaneous accumulation.</string>
+    <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 9-hour analytic depot pool to calculate dynamic Subcutaneous accumulation.</string>
 
 </resources>

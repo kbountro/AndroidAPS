@@ -50,6 +50,12 @@ class TsunamiIobEngineImpl @Inject constructor(
     private val activePlugin: ActivePlugin
 ) : TsunamiIobEngine {
 
+    companion object {
+        /** Duration of insulin action horizon: how long a dose keeps contributing before IOB is forced to 0. */
+        private const val DIA_HORIZON_MINUTES = 540.0 // 9h
+        private const val DIA_HORIZON_MS = 9L * 60 * 60 * 1000L
+    }
+
     private val engineLock = Any()
     private var resultCache = HashMap<String, TsunamiIobResult>()
     private var cacheVersion = 0
@@ -94,11 +100,11 @@ class TsunamiIobEngineImpl @Inject constructor(
         // If requested time is older than 24 hours, don't simulate all the way to present to save DB load
         val isDeepHistory = toTime < now - (24 * 60 * 60 * 1000L)
 
-        val startTime = toTime - (8 * 60 * 60 * 1000L) // Always guarantee 8h physical warmup
+        val startTime = toTime - DIA_HORIZON_MS // Always guarantee a full DIA horizon of physical warmup
         val horizon = if (isDeepHistory) {
             toTime + (12 * 60 * 60 * 1000L) // Batch a 12h chunk forward for scrolling
         } else {
-            max(toTime, now + 8 * 60 * 60 * 1000L) // Batch all the way through the future projection
+            max(toTime, now + DIA_HORIZON_MS) // Batch all the way through the future projection
         }
 
         val currentVersion = synchronized(engineLock) { cacheVersion }
@@ -153,7 +159,11 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, isFakingTemps, assumeZeroTempAfter, now)
 
-        val maxWarpWindow = 6.0 * 60.0
+        // Matches the full DIA horizon: a curve should still respond to crowding for as long as
+        // it can still contribute any IOB at all. The re-warp loop already visits every curve
+        // regardless of this cap (it only gates the cheap inner update), so widening it to the
+        // full horizon costs nothing extra.
+        val maxWarpWindow = DIA_HORIZON_MINUTES
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
         val capacity = ((horizonTime - startTime) / 300000L).toInt() + 20
@@ -189,11 +199,11 @@ class TsunamiIobEngineImpl @Inject constructor(
                 nextTargetIdx++
             }
 
-            // A curve past 480 min (8h) elapsed can never contribute to any evaluation from
+            // A curve past the DIA horizon elapsed can never contribute to any evaluation from
             // here on (evaluateCurvesAt already filters it out), since elapsed time only grows
             // as processing moves forward. Dropping it here changes no computed value - it just
-            // keeps the list bounded to a rolling ~8h window instead of the whole simulation span.
-            activeCurves.removeAll { (dose.timestamp - it.timestamp) / 60000.0 >= 480.0 }
+            // keeps the list bounded to a rolling window instead of the whole simulation span.
+            activeCurves.removeAll { (dose.timestamp - it.timestamp) / 60000.0 >= DIA_HORIZON_MINUTES }
 
             val dtMins = (dose.timestamp - lastTime) / 60000.0
             if (dtMins > 0) {
@@ -308,7 +318,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                     val snoozeTime = b.timestamp + (timeSinceTreatment * divisor).toLong()
                     val tSnoozeElapsed = (tTarget - snoozeTime) / 60000.0
 
-                    if (tSnoozeElapsed in 0.0..<480.0) {
+                    if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
                         // Snooze reflects this bolus's own single-dose PD curve, not pool crowding.
                         val snoozeTpModelPD = PdPkModel.pdTp(b.amount)
                         val snoozeBaseExp = exp(-tSnoozeElapsed.pow(PdPkModel.PD_P) / snoozeTpModelPD)
@@ -326,7 +336,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         for (curve in activeCurves) {
             val t = (tTarget - curve.timestamp) / 60000.0
-            if (t !in 0.0..<480.0) continue
+            if (t !in 0.0..<DIA_HORIZON_MINUTES) continue
 
             val baseExp = exp(-t.pow(PdPkModel.PD_P) / curve.tpModelPD)
             val limitExp = exp(-PdPkModel.pdUpperLimitPow / curve.tpModelPD)
@@ -529,7 +539,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         const val PK_A1 = 0.1522
         const val PK_P = 1.5495
 
-        val pdUpperLimitPow: Double = 480.0.pow(PD_P)
+        val pdUpperLimitPow: Double = TsunamiIobEngineImpl.DIA_HORIZON_MINUTES.pow(PD_P)
 
         fun pdTp(amount: Double): Double = 2.0 * (PD_A0 * amount.pow(PD_A1)).pow(PD_P)
 
