@@ -16,7 +16,9 @@ import app.aaps.core.objects.extensions.combine
 import app.aaps.core.objects.extensions.convertedToAbsolute
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -32,11 +34,12 @@ import kotlin.math.pow
  * at a time and summed the way the standard oref/PD insulin models are; the whole dose
  * history has to be walked in chronological order, carrying the depot state forward.
  *
- * The PK side (how much of each dose is still in the depot, driving how crowded it is)
- * and the PD side (the action/IOB curve actually reported to AAPS) are independently
- * fit Weibull models - see [PdPkModel] - rather than one derived heuristically from the
- * other, so depot crowding is tracked as an exact sum of each dose's own closed-form PK
- * curve rather than an approximated single shared decay rate.
+ * The PD side (the action/IOB curve actually reported to AAPS) and the PK side (serum
+ * concentration) are independently fit Weibull models - see [PdPkModel] - rather than
+ * one derived heuristically from the other. The PK model is not itself the depot's decay
+ * curve (it's the combined absorption+elimination output); the depot's own absorption
+ * rate is recovered from it by [computeScTau], holding elimination fixed at insulin
+ * lispro's real serum half-life.
  */
 @Singleton
 class TsunamiIobEngineImpl @Inject constructor(
@@ -125,12 +128,15 @@ class TsunamiIobEngineImpl @Inject constructor(
     // routines use for linear compartments, extended here with a depot-mass-
     // dependent (nonlinear, amount-in-depot) absorption rate.
     //
-    // Depot crowding at any instant is the exact sum of each still-active dose's
-    // own PK (elimination-side) curve, not a single shared pool decayed with one
-    // approximated rate constant - each dose's PK curve is fixed at its own
-    // amount and never re-parametrized by later doses, since the congestion
-    // nonlinearity acts on absorption (captured below via the PD curve's
-    // pool-mass-dependent tp), not on systemic elimination.
+    // The PK model is fit to observed SERUM CONCENTRATION (EPAR Figure 8) - the
+    // combined output of SC absorption *and* systemic elimination, not the SC
+    // depot's own content. The depot itself, under the standard two-compartment
+    // assumption, decays as simple exponential at its own (unobserved) absorption
+    // rate. That rate is recovered by holding elimination fixed at insulin
+    // lispro's real serum half-life (44 min -> tauE = 44/ln2 = 63.48 min) and
+    // solving the classic Bateman peak-time formula backward (computeScTau)
+    // against the PK model's own fitted peak time - not a heuristic. The shared
+    // depot pool is then decayed with that recovered absorption rate.
     // =========================================================================
     private fun simulateDepotHistory(
         requestedTime: Long,
@@ -152,8 +158,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val capacity = ((horizonTime - startTime) / 300000L).toInt() + 20
         val activeCurves = ArrayList<TsunamiCurve>(capacity * 2)
-        val physicalPkPool = ArrayList<PkCurve>(capacity)
-        val theoreticalPkPool = ArrayList<PkCurve>(capacity)
+
+        var globalPhysicalSC = 0.0
+        var globalTauSC = 50.0
+        var globalTheoreticalSC = 0.0
+        var globalTauTheoreticalSC = 50.0
+        var lastTime = startTime
 
         val resultsMap = HashMap<Long, TsunamiIobResult>()
 
@@ -179,19 +189,24 @@ class TsunamiIobEngineImpl @Inject constructor(
                 nextTargetIdx++
             }
 
-            // A curve/PK entry past 480 min (8h) elapsed can never contribute to any evaluation
-            // or pool-mass lookup from here on, since elapsed time only grows as processing moves
-            // forward. Dropping it here changes no computed value - it just keeps these lists
-            // bounded to a rolling ~8h window instead of the whole simulation span.
+            // A curve past 480 min (8h) elapsed can never contribute to any evaluation from
+            // here on (evaluateCurvesAt already filters it out), since elapsed time only grows
+            // as processing moves forward. Dropping it here changes no computed value - it just
+            // keeps the list bounded to a rolling ~8h window instead of the whole simulation span.
             activeCurves.removeAll { (dose.timestamp - it.timestamp) / 60000.0 >= 480.0 }
-            physicalPkPool.removeAll { (dose.timestamp - it.timestamp) / 60000.0 >= 480.0 }
-            theoreticalPkPool.removeAll { (dose.timestamp - it.timestamp) / 60000.0 >= 480.0 }
+
+            val dtMins = (dose.timestamp - lastTime) / 60000.0
+            if (dtMins > 0) {
+                globalPhysicalSC *= exp(-dtMins / globalTauSC)
+                globalTheoreticalSC *= exp(-dtMins / globalTauTheoreticalSC)
+            }
+            lastTime = dose.timestamp
 
             val physicalInjected = dose.bolusAmt + dose.extBolusAmt + dose.basalAbsAmt
             if (physicalInjected > 0.0) {
-                // Depot mass right now: what's still around from earlier doses, plus this one landing.
-                val poolMass = physicalInjected + poolMassAt(physicalPkPool, dose.timestamp)
-                val newTpModelPD = PdPkModel.pdTp(poolMass)
+                globalPhysicalSC += physicalInjected
+                val newTpModelPD = PdPkModel.pdTp(globalPhysicalSC)
+                globalTauSC = computeScTau(PdPkModel.pkPeakTime(globalPhysicalSC))
 
                 for (curve in activeCurves) {
                     if (!curve.isPhysical) continue
@@ -217,12 +232,12 @@ class TsunamiIobEngineImpl @Inject constructor(
                         isPhysical = true
                     )
                 )
-                physicalPkPool.add(PkCurve(timestamp = dose.timestamp, amount = physicalInjected, tp = PdPkModel.pkTp(physicalInjected)))
             }
 
             if (dose.profileBasalAmt > 0.0 || dose.autoProfileBasalAmt > 0.0) {
-                val theoPoolMass = dose.profileBasalAmt + poolMassAt(theoreticalPkPool, dose.timestamp)
-                val theoTpModelPD = PdPkModel.pdTp(theoPoolMass)
+                globalTheoreticalSC += dose.profileBasalAmt
+                val theoTpModelPD = PdPkModel.pdTp(globalTheoreticalSC)
+                globalTauTheoreticalSC = computeScTau(PdPkModel.pkPeakTime(globalTheoreticalSC))
 
                 for (curve in activeCurves) {
                     if (curve.isPhysical) continue
@@ -246,9 +261,6 @@ class TsunamiIobEngineImpl @Inject constructor(
                         isPhysical = false
                     )
                 )
-                if (dose.profileBasalAmt > 0.0) {
-                    theoreticalPkPool.add(PkCurve(timestamp = dose.timestamp, amount = dose.profileBasalAmt, tp = PdPkModel.pkTp(dose.profileBasalAmt)))
-                }
             }
         }
 
@@ -262,17 +274,25 @@ class TsunamiIobEngineImpl @Inject constructor(
         return resultsMap
     }
 
-    /** Sum of each still-active dose's own closed-form PK (depot) curve at [t] - the exact current depot mass. */
-    private fun poolMassAt(pool: List<PkCurve>, t: Long): Double =
-        pool.sumOf { c ->
-            val elapsed = (t - c.timestamp) / 60000.0
-            if (elapsed !in 0.0..<480.0) 0.0
-            else {
-                val baseExp = exp(-elapsed.pow(PdPkModel.PK_P) / c.tp)
-                val limitExp = exp(-PdPkModel.pkUpperLimitPow / c.tp)
-                c.amount * (baseExp - limitExp)
-            }
+    /**
+     * Recovers the SC depot's own (unobserved) absorption time constant from the PK model's
+     * fitted serum peak time, holding elimination fixed at insulin lispro's real half-life. The
+     * classic two-compartment Bateman peak-time formula, solved backward by bisection:
+     *   t_peak = (tauAbs*tauElim / (tauElim-tauAbs)) * ln(tauElim/tauAbs)
+     */
+    private fun computeScTau(targetTp: Double): Double {
+        val tauE = 63.48 // insulin lispro serum elimination time constant: 44 min half-life / ln(2)
+        var low = 1.0
+        var high = 1000.0
+        var mid = 150.0
+
+        repeat(15) {
+            mid = (low + high) / 2.0
+            val currentTp = if (abs(mid - tauE) < 0.1) mid else (mid * tauE / (tauE - mid)) * ln(tauE / mid)
+            if (currentTp > targetTp) high = mid else low = mid
         }
+        return mid
+    }
 
     private fun evaluateCurvesAt(tTarget: Long, activeCurves: List<TsunamiCurve>, boluses: List<BS>, divisor: Double): TsunamiIobResult {
         var bSnooze = 0.0
@@ -484,18 +504,15 @@ class TsunamiIobEngineImpl @Inject constructor(
         var autoProfileBasalAmt: Double = 0.0
     )
 
-    /** One physical or profile-basal dose's own closed-form PK (depot) curve; fixed at its own amount, never re-warped. */
-    private data class PkCurve(
-        val timestamp: Long,
-        val amount: Double,
-        val tp: Double
-    )
-
     /**
-     * Independently-fit PD (action/IOB) and PK (depot/serum) Weibull models, replacing the earlier
-     * single heuristic formula plus a fixed-elimination Bateman-inversion approximation for the PK
-     * side. Both follow the same family: tau(dose) = a0 * dose^a1, tp = 2 * tau^p, and are used as
-     * IOB(t) = exp(-t^p/tp) [survival], activity(t) = (p/tp) * t^(p-1) * exp(-t^p/tp) [density].
+     * Independently-fit PD (action/IOB) and PK (serum concentration) Weibull models, replacing the
+     * earlier single heuristic formula that derived a PK target from the PD peak via a fixed ratio.
+     * Both follow the same family: tau(dose) = a0 * dose^a1, tp = 2 * tau^p. The PD model is used
+     * directly as the reported action/IOB curve: IOB(t) = exp(-t^p/tp) [survival], activity(t) =
+     * (p/tp) * t^(p-1) * exp(-t^p/tp) [density]. The PK model describes serum concentration - the
+     * combined output of SC absorption and elimination, not the SC depot's own content - so it is
+     * only ever used via its own fitted peak time ([pkPeakTime]), which [computeScTau] inverts
+     * against a fixed elimination rate to recover the depot's own absorption time constant.
      *
      * Fitted from LY900014 (Lyumjev) EPAR data at doses 7/15/30U:
      *  - PD from GIR curves (Figure 34): a0=1.1814 h, a1=0.2134, p=1.9002
@@ -513,9 +530,15 @@ class TsunamiIobEngineImpl @Inject constructor(
         const val PK_P = 1.5495
 
         val pdUpperLimitPow: Double = 480.0.pow(PD_P)
-        val pkUpperLimitPow: Double = 480.0.pow(PK_P)
 
         fun pdTp(amount: Double): Double = 2.0 * (PD_A0 * amount.pow(PD_A1)).pow(PD_P)
-        fun pkTp(amount: Double): Double = 2.0 * (PK_A0 * amount.pow(PK_A1)).pow(PK_P)
+
+        private fun pkTp(amount: Double): Double = 2.0 * (PK_A0 * amount.pow(PK_A1)).pow(PK_P)
+
+        /** Peak time of the fitted PK (serum concentration) curve for a dose/pool mass of [amount]. */
+        fun pkPeakTime(amount: Double): Double {
+            val tp = pkTp(amount)
+            return (tp * (PK_P - 1.0) / PK_P).pow(1.0 / PK_P)
+        }
     }
 }
