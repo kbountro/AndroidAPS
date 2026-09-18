@@ -153,7 +153,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, isFakingTemps, assumeZeroTempAfter, now)
 
-        val maxWarpWindow = 6.0 * 60.0
+        val maxWarpWindow = 480.0 // TEMP: widened back to test whether this alone reproduces the earlier freeze
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
         val capacity = ((horizonTime - startTime) / 300000L).toInt() + 20
