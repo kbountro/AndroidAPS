@@ -46,13 +46,6 @@ abstract class InsulinOrefBasePlugin(
     aapsLogger, rh
 ), Insulin {
 
-    companion object {
-
-        // Must match TsunamiIobEngineImpl.DIA_HORIZON_MINUTES (8h) - kept separate since that
-        // engine constant is private and this preview path is decoupled from the pooled engine.
-        private const val TRAFFIC_JAM_HORIZON_MINUTES = 480.0
-    }
-
     private var lastWarned: Long = 0
     override val dia
         get(): Double {
@@ -114,12 +107,8 @@ abstract class InsulinOrefBasePlugin(
             val t = (time - bolusTime) / 1000.0 / 60.0
 
             // Hardcoded 8-hour limit for Tsunami
-            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205)) {
+            if (t < 8 * 60 && (insulinID == 105 || insulinID == 205 || insulinID == 106)) {
                 val pdResult = pdModelIobCalculation(bolus, insulinID, t)
-                result.iobContrib = pdResult.iobContrib
-                result.activityContrib = pdResult.activityContrib
-            } else if (t < TRAFFIC_JAM_HORIZON_MINUTES && insulinID == 106) {
-                val pdResult = trafficJamPdModelIobCalculation(bolus, t)
                 result.iobContrib = pdResult.iobContrib
                 result.activityContrib = pdResult.activityContrib
             } else { // MP: If the pharmacodynamic models are not used (IDs 105 & 205), use the traditional PK-based insulin model instead;
@@ -171,30 +160,6 @@ abstract class InsulinOrefBasePlugin(
         val lowerLimit = t //MP lower integration limit, in min
         val upperLimit = 8.0 * 60 //MP upper integration limit, in min
         result.iobContrib = bolus.amount * (exp(-lowerLimit.pow(2.0)/tpModel) - exp(-upperLimit.pow(2.0)/tpModel))
-
-        return result
-    }
-
-    /**
-     * Isolated single-dose Weibull PD model for Traffic Jam (insulin ID 106), used only by the
-     * profile screen's sample activity/IOB preview graph. This mirrors the fit used by
-     * [app.aaps.plugins.insulin.tsunami.TsunamiIobEngineImpl]'s PdPkModel (tau(dose) = a0*dose^a1,
-     * tp = 2*tau^p) for an unpooled, single-bolus case - the actual Traffic Jam engine additionally
-     * accounts for pooling with other doses, which is out of scope for this static preview.
-     */
-    fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
-        val a0 = 70.884 // minutes
-        val a1 = 0.2134
-        val p = 1.9002
-        val result = Iob()
-        val tau = a0 * bolus.amount.pow(a1)
-        val tpModel = 2.0 * tau.pow(p)
-
-        result.activityContrib = (p / tpModel) * t.pow(p - 1.0) * exp(-t.pow(p) / tpModel)
-
-        val lowerLimit = t
-        val upperLimit = TRAFFIC_JAM_HORIZON_MINUTES
-        result.iobContrib = bolus.amount * (exp(-lowerLimit.pow(p) / tpModel) - exp(-upperLimit.pow(p) / tpModel))
 
         return result
     }
