@@ -422,9 +422,18 @@ class TsunamiIobEngineImpl @Inject constructor(
         val alignedFromTime = (fromTime / 60000L) * 60000L
         var bTime = alignedFromTime
 
-        // Fetch Temp Basals and Extended Boluses ONCE into RAM for lightning-fast loop speeds
-        val tbs = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(alignedFromTime, toTime, true)
-        val ebs = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(alignedFromTime, toTime, true)
+        // Fetch Temp Basals and Extended Boluses ONCE into RAM, sorted chronologically so the
+        // per-minute loop below can sweep forward through them with monotonically advancing
+        // indices instead of rescanning the full list every single minute.
+        val sortedTbs = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(alignedFromTime, toTime, true).sortedBy { it.timestamp }
+        val sortedEbs = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(alignedFromTime, toTime, true).sortedBy { it.timestamp }
+
+        // Everything before these indices has definitely ended relative to the current bTime,
+        // and can never become relevant again since bTime only moves forward and each record's
+        // own start/end window never changes - so each record is only ever inspected while it's
+        // still (or not yet) possibly active, not on every unrelated minute.
+        var tbFromIdx = 0
+        var ebFromIdx = 0
 
         while (bTime < toTime) {
             val nextTime = min(bTime + 60000L, toTime)
@@ -437,10 +446,15 @@ class TsunamiIobEngineImpl @Inject constructor(
                     var absoluteRate = profileRate
 
                     // 1. Resolve Active Temp Basal in RAM (Replaces processedTbrEbData to support Deep History)
+                    while (tbFromIdx < sortedTbs.size && min(sortedTbs[tbFromIdx].timestamp + sortedTbs[tbFromIdx].duration, currentNow) <= bTime) {
+                        tbFromIdx++
+                    }
                     var activeTb: TB? = null
-                    for (tb in tbs) {
+                    for (idx in tbFromIdx until sortedTbs.size) {
+                        val tb = sortedTbs[idx]
+                        if (tb.timestamp > bTime) break // sorted ascending - none later can have started yet either
                         val effectiveEnd = min(tb.timestamp + tb.duration, currentNow)
-                        if (bTime >= tb.timestamp && bTime < effectiveEnd) {
+                        if (bTime < effectiveEnd) {
                             if (activeTb == null || tb.timestamp > activeTb.timestamp) {
                                 activeTb = tb
                             }
@@ -451,8 +465,13 @@ class TsunamiIobEngineImpl @Inject constructor(
                     }
 
                     // 2. Resolve Extended Boluses
+                    while (ebFromIdx < sortedEbs.size && min(sortedEbs[ebFromIdx].timestamp + sortedEbs[ebFromIdx].duration, currentNow) <= bTime) {
+                        ebFromIdx++
+                    }
                     var extBolusChunk = 0.0
-                    for (e in ebs) {
+                    for (idx in ebFromIdx until sortedEbs.size) {
+                        val e = sortedEbs[idx]
+                        if (e.timestamp >= nextTime) break // sorted ascending - none later can overlap this minute either
                         val effectiveEbEnd = min(e.timestamp + e.duration, currentNow)
                         val overlapStart = max(bTime, e.timestamp)
                         val overlapEnd = min(nextTime, effectiveEbEnd)
