@@ -53,6 +53,11 @@ class TsunamiIobEngineImpl @Inject constructor(
     companion object {
         private const val DIA_HORIZON_MINUTES = 480.0 // 8h
         private const val DIA_HORIZON_MS = 8L * 60 * 60 * 1000L
+
+        // Deep-history scrolling has no required batch size (forward horizon only affects how
+        // much gets pre-cached for later queries, never the correctness of the current one) - tied
+        // to a multiple of the DIA horizon so it scales automatically if that ever changes.
+        private const val DEEP_HISTORY_BATCH_MS = 2 * DIA_HORIZON_MS
     }
 
     private data class ResultCacheKey(val time: Long, val sensitivityRatio: Double, val assumeZeroTempAfter: Long)
@@ -103,7 +108,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val startTime = toTime - DIA_HORIZON_MS // Always guarantee a full DIA horizon of physical warmup
         val horizon = if (isDeepHistory) {
-            toTime + (12 * 60 * 60 * 1000L) // Batch a 12h chunk forward for scrolling
+            toTime + DEEP_HISTORY_BATCH_MS // Batch a chunk forward for scrolling
         } else {
             max(toTime, now + DIA_HORIZON_MS) // Batch all the way through the future projection
         }
