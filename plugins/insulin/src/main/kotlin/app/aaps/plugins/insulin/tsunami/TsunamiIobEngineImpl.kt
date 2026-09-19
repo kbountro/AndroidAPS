@@ -173,7 +173,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
         val capacity = ((horizonTime - startTime) / 300000L).toInt() + 20
-        val activeCurves = ArrayList<TsunamiCurve>(capacity * 2)
+        val activeCurves = ArrayDeque<TsunamiCurve>(capacity * 2)
 
         var globalPhysicalSC = 0.0
         var globalTauSC = 50.0
@@ -207,9 +207,17 @@ class TsunamiIobEngineImpl @Inject constructor(
 
             // A curve past the DIA horizon elapsed can never contribute to any evaluation from
             // here on (evaluateCurvesAt already filters it out), since elapsed time only grows
-            // as processing moves forward. Dropping it here changes no computed value - it just
-            // keeps the list bounded to a rolling window instead of the whole simulation span.
-            activeCurves.removeAll { (dose.timestamp - it.timestamp) / 60000.0 >= DIA_HORIZON_MINUTES }
+            // as processing moves forward. Curves are appended in chronological order and
+            // warping only ever pushes a timestamp further into the past (never forward), so the
+            // oldest-looking curve is always at (or near) the front - pop from there while
+            // expired instead of rescanning the whole list every tick. This can never remove a
+            // curve whose own age hasn't actually crossed the horizon (the condition is checked
+            // fresh against that curve each time, not assumed from position); by the same
+            // monotonicity, an expired curve is already past maxWarpWindow too, so it could never
+            // be warped again either.
+            while (activeCurves.isNotEmpty() && (dose.timestamp - activeCurves.first().timestamp) / 60000.0 >= DIA_HORIZON_MINUTES) {
+                activeCurves.removeFirst()
+            }
 
             val dtMins = (dose.timestamp - lastTime) / 60000.0
             if (dtMins > 0) {
@@ -555,6 +563,17 @@ class TsunamiIobEngineImpl @Inject constructor(
      *  - PK from concentration curves (Figure 8): a0=0.7973 h, a1=0.1522, p=1.5495
      * a0 is converted from hours to minutes here (source value * 60) since this engine works in
      * minutes throughout.
+     *
+     * NOTE on peak timing (PD side): a0/a1/p were fit by nonlinear least-squares over every
+     * digitized (t, activity) point across the whole curve - rising edge, peak, and tail together,
+     * for all three doses sharing one a0/a1/p - never targeting "time of peak" as its own quantity.
+     * As a result tau = PD_A0*dose^PD_A1 is NOT the curve's actual peak time except at p=2; the true
+     * peak of activity(t) is at tau*(2*(p-1)/p)^(1/p) (~0.972*tau here). More importantly, even that
+     * internally-consistent peak diverges from the empirically observed GIR peak, increasingly so at
+     * higher doses (checked against the digitized calibration points: ~2% early at 7U, ~12% at 15U,
+     * ~25%, over 30 minutes, at 30U). This is inherent to fitting whole-curve shape/AUC rather than
+     * peak time directly - treat this model as validated for AUC/shape, not for pinpointing when the
+     * peak occurs, especially above ~15U.
      */
     private object PdPkModel {
         const val PD_A0 = 70.884 // = 1.1814 h * 60
