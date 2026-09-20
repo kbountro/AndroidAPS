@@ -18,6 +18,7 @@ import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
 import javax.inject.Inject
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.pow
 
@@ -176,27 +177,79 @@ abstract class InsulinOrefBasePlugin(
     }
 
     /**
-     * Isolated single-dose Weibull PD model for Traffic Jam (insulin ID 106), used only by the
-     * profile screen's sample activity/IOB preview graph. This mirrors the fit used by
-     * TsunamiIobEngineImpl's PdPkModel (tau(dose) = a0*dose^a1, tp = 2*tau^p) for an unpooled,
-     * single-bolus case - the actual Traffic Jam engine additionally accounts for pooling with
-     * other doses, which is out of scope for this static preview.
+     * Isolated single-dose 3-compartment PD model for Traffic Jam (insulin ID 106), used both by
+     * the profile screen's sample activity/IOB preview graph and by this plugin's own per-treatment
+     * summation whenever it runs without going through the pooled TsunamiAwareIobCobCalculator
+     * decorator. Mirrors TsunamiIobEngineImpl's PdModel (D -> X -> A compartment chain; see that
+     * object's doc comment for the full derivation and calibration) for an unpooled, single-bolus
+     * case - the actual Traffic Jam engine additionally accounts for pooling with other doses,
+     * which is out of scope here. Kept as a separate copy since that engine's constants are
+     * private and this path is decoupled from the pooled engine.
+     *
+     * Note this also fixes a pre-existing bug in the previous Weibull version of this function:
+     * activityContrib was never scaled by bolus.amount here (unlike iobContrib, and unlike the
+     * sibling pdModelIobCalculation above), silently under-reporting activity by a factor of the
+     * dose size wherever this path was actually reached.
      */
     fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
-        val a0 = 70.884 // minutes
-        val a1 = 0.2134
-        val p = 1.9002
+        val ke = 0.0157533 // ln(2)/44 - real lispro serum elimination half-life, fixed
+        val k2 = 0.019413 // transit-stage rate, fixed
+        val k1 = 0.105992 * bolus.amount.pow(-0.653314) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
         val result = Iob()
-        val tau = a0 * bolus.amount.pow(a1)
-        val tpModel = 2.0 * tau.pow(p)
 
-        result.activityContrib = (p / tpModel) * t.pow(p - 1.0) * exp(-t.pow(p) / tpModel)
+        val d = exp(-k1 * t)
+        val x = chainStage2(k1, k2, t)
+        val a = threeStageA(k1, k2, ke, t)
 
-        val lowerLimit = t
-        val upperLimit = TRAFFIC_JAM_HORIZON_MINUTES
-        result.iobContrib = bolus.amount * (exp(-lowerLimit.pow(p) / tpModel) - exp(-upperLimit.pow(p) / tpModel))
+        // Subtract the (small, non-zero) residual right at the gating horizon so IOB reaches
+        // exactly zero there instead of a visible cliff where the caller stops calling this at all.
+        val horizon = TRAFFIC_JAM_HORIZON_MINUTES
+        val dH = exp(-k1 * horizon)
+        val xH = chainStage2(k1, k2, horizon)
+        val aH = threeStageA(k1, k2, ke, horizon)
+
+        result.activityContrib = bolus.amount * ke * a
+        result.iobContrib = bolus.amount * ((d + x + a) - (dH + xH + aH))
 
         return result
+    }
+
+    /** Second stage of a unit-dose 2-compartment chain entering at rate [r1], draining at [r2]. */
+    private fun chainStage2(r1: Double, r2: Double, t: Double): Double {
+        val eps = 1e-7
+        return if (abs(r2 - r1) < eps) r1 * t * exp(-r1 * t)
+        else r1 * (exp(-r1 * t) - exp(-r2 * t)) / (r2 - r1)
+    }
+
+    /** Third stage (active pool) of a unit-dose 3-compartment chain (k1, k2, ke). Degenerate-safe. */
+    private fun threeStageA(k1: Double, k2: Double, ke: Double, t: Double): Double {
+        val eps = 1e-7
+        val k1k2 = abs(k2 - k1) < eps
+        val k1ke = abs(ke - k1) < eps
+        val k2ke = abs(ke - k2) < eps
+        return when {
+            k1k2 && k1ke -> k1 * k1 * t * t / 2.0 * exp(-k1 * t)
+            k1k2         -> {
+                val q = ke - k1
+                k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
+            }
+
+            k1ke         -> {
+                val d = k2 - k1
+                k1 * k2 * t * exp(-k1 * t) / d - k1 * k2 * (exp(-k1 * t) - exp(-k2 * t)) / (d * d)
+            }
+
+            k2ke         -> {
+                val d = k2 - k1
+                k1 * k2 * (exp(-k1 * t) - exp(-k2 * t)) / (d * d) - k1 * k2 * t * exp(-k2 * t) / d
+            }
+
+            else         -> k1 * k2 * (
+                exp(-k1 * t) / ((k2 - k1) * (ke - k1)) +
+                    exp(-k2 * t) / ((k1 - k2) * (ke - k2)) +
+                    exp(-ke * t) / ((k1 - ke) * (k2 - ke))
+                )
+        }
     }
 
     override val iCfg: ICfg

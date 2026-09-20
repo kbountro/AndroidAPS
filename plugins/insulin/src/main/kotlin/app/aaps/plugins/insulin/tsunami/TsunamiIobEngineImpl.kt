@@ -18,7 +18,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
 import kotlin.math.exp
-import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -26,20 +25,20 @@ import kotlin.math.pow
 /**
  * "Traffic Jam" IOB engine backing [Insulin.InsulinType.OREF_LYUMJEV_U100_TRAFFIC_JAM].
  *
- * Models a single shared subcutaneous depot: every dose adds to it, and the more mass
- * is sitting in the depot the longer the systemic peak time gets for everything still
- * absorbing out of it - including doses already in flight, whose effective onset gets
- * stretched ("time-warped") when a later dose crowds the depot further. Because doses
- * interact through this shared, amount-dependent state, they cannot be evaluated one
- * at a time and summed the way the standard oref/PD insulin models are; the whole dose
- * history has to be walked in chronological order, carrying the depot state forward.
+ * Models a shared subcutaneous depot as a small, continuously-evolving pool of linear
+ * (first-order) compartments - not one independent closed-form curve per dose. Every dose
+ * is an impulse added directly into its category's own depot state; crowding is expressed
+ * as the depot's absorption rate depending on how much mass is currently still in transit,
+ * evaluated live rather than snapshotted per dose. Because every state is a genuine ODE
+ * state (not an age-parametrized curve), a rate constant can change value at any instant
+ * with no reinterpretation needed - the state simply keeps evolving from wherever it
+ * currently is. This is what the earlier per-dose-curve design could not do: that design
+ * evaluated `IOB(t) = exp(-t^p/tp)` from each curve's own elapsed age, so an amount-driven
+ * change to `tp` had no continuous way to apply mid-flight, and had to be patched with a
+ * "time warp" (retroactively inventing a new elapsed age to keep IOB continuous) that
+ * unavoidably forced a discontinuous drop in reported activity every time the pool grew.
  *
- * The PD side (the action/IOB curve actually reported to AAPS) and the PK side (serum
- * concentration) are independently fit Weibull models - see [PdPkModel] - rather than
- * one derived heuristically from the other. The PK model is not itself the depot's decay
- * curve (it's the combined absorption+elimination output); the depot's own absorption
- * rate is recovered from it by [computeScTau], holding elimination fixed at insulin
- * lispro's real serum half-life.
+ * See [PdModel] for the full derivation and the calibration that replaced it.
  */
 @Singleton
 class TsunamiIobEngineImpl @Inject constructor(
@@ -132,22 +131,16 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     // =========================================================================
     // THE TRAFFIC JAM DEPOT SIMULATION
-    // An event-driven (impulsive) compartmental model: each dose is solved in
-    // closed form - exactly, not by numerical integration - and dosing events
-    // are the only points where curves are re-parametrized against the shared
-    // depot's current state. This is the same style NONMEM's closed-form ADVAN
-    // routines use for linear compartments, extended here with a depot-mass-
-    // dependent (nonlinear, amount-in-depot) absorption rate.
-    //
-    // The PK model is fit to observed SERUM CONCENTRATION (EPAR Figure 8) - the
-    // combined output of SC absorption *and* systemic elimination, not the SC
-    // depot's own content. The depot itself, under the standard two-compartment
-    // assumption, decays as simple exponential at its own (unobserved) absorption
-    // rate. That rate is recovered by holding elimination fixed at insulin
-    // lispro's real serum half-life (44 min -> tauE = 44/ln2 = 63.48 min) and
-    // solving the classic Bateman peak-time formula backward (computeScTau)
-    // against the PK model's own fitted peak time - not a heuristic. The shared
-    // depot pool is then decayed with that recovered absorption rate.
+    // Five attribution categories (bolus, extended bolus, absolute temp-basal delivery,
+    // profile basal, autosens-adjusted profile basal) each carry their own persistent
+    // 3-compartment pool (depot -> transit -> active, see [PdModel]) so IOB/activity can
+    // still be broken down the same way AAPS expects. Bolus/extBolus/basalAbs share one
+    // "physical" crowding pool; profileBasal/autoProfileBasal share one "theoretical"
+    // pool - matching which doses are meant to compete for the same physical depot space.
+    // Every dose is an impulse added straight into its category's depot mass; nothing
+    // about any other category's or any earlier dose's state is ever rewritten - only the
+    // shared group's absorption rate constant is updated, and every pool simply keeps
+    // integrating forward from its current state under that rate, in closed form.
     // =========================================================================
     private fun simulateDepotHistory(
         requestedTime: Long,
@@ -164,21 +157,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, isFakingTemps, assumeZeroTempAfter, now)
 
-        // Matches the full DIA horizon: a curve should still respond to crowding for as long as
-        // it can still contribute any IOB at all. The re-warp loop already visits every curve
-        // regardless of this cap (it only gates the cheap inner update), so widening it to the
-        // full horizon costs nothing extra. An on-device A/B test confirmed this setting was not
-        // the cause of an earlier freeze (which turned out to be unrelated).
-        val maxWarpWindow = DIA_HORIZON_MINUTES
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
-        val capacity = ((horizonTime - startTime) / 300000L).toInt() + 20
-        val activeCurves = ArrayDeque<TsunamiCurve>(capacity * 2)
-
-        var globalPhysicalSC = 0.0
-        var globalTauSC = 50.0
-        var globalTheoreticalSC = 0.0
-        var globalTauTheoreticalSC = 50.0
+        // One persistent pool per attribution category - never one per dose.
+        val pools = Array(Category.entries.size) { Pool() }
+        var k1Physical = PdModel.K1_B0 * 1.0.pow(PdModel.K1_B1) // placeholder until the first physical dose sets it for real
+        var k1Theoretical = k1Physical
         var lastTime = startTime
 
         val resultsMap = HashMap<Long, TsunamiIobResult>()
@@ -201,124 +185,77 @@ class TsunamiIobEngineImpl @Inject constructor(
             // STRICTLY LESS THAN: Take snapshots AFTER the current dose is absorbed, but before the next!
             while (nextTargetIdx < sortedTargets.size && sortedTargets[nextTargetIdx] < dose.timestamp) {
                 val tTarget = sortedTargets[nextTargetIdx]
-                resultsMap[tTarget] = evaluateCurvesAt(tTarget, activeCurves, boluses, divisor)
+                val dtPeek = (tTarget - lastTime) / 60000.0
+                resultsMap[tTarget] = evaluatePools(pools, k1Physical, k1Theoretical, dtPeek, boluses, tTarget, divisor)
                 nextTargetIdx++
-            }
-
-            // A curve past the DIA horizon elapsed can never contribute to any evaluation from
-            // here on (evaluateCurvesAt already filters it out), since elapsed time only grows
-            // as processing moves forward. Curves are appended in chronological order and
-            // warping only ever pushes a timestamp further into the past (never forward), so the
-            // oldest-looking curve is always at (or near) the front - pop from there while
-            // expired instead of rescanning the whole list every tick. This can never remove a
-            // curve whose own age hasn't actually crossed the horizon (the condition is checked
-            // fresh against that curve each time, not assumed from position); by the same
-            // monotonicity, an expired curve is already past maxWarpWindow too, so it could never
-            // be warped again either.
-            while (activeCurves.isNotEmpty() && (dose.timestamp - activeCurves.first().timestamp) / 60000.0 >= DIA_HORIZON_MINUTES) {
-                activeCurves.removeFirst()
             }
 
             val dtMins = (dose.timestamp - lastTime) / 60000.0
             if (dtMins > 0) {
-                globalPhysicalSC *= exp(-dtMins / globalTauSC)
-                globalTheoreticalSC *= exp(-dtMins / globalTauTheoreticalSC)
+                for (cat in Category.entries) {
+                    val pool = pools[cat.ordinal]
+                    val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
+                    pool.propagateInPlace(k1, PdModel.K2, PdModel.KE, dtMins)
+                }
             }
             lastTime = dose.timestamp
 
             val physicalInjected = dose.bolusAmt + dose.extBolusAmt + dose.basalAbsAmt
             if (physicalInjected > 0.0) {
-                globalPhysicalSC += physicalInjected
-                val newTpModelPD = PdPkModel.pdTp(globalPhysicalSC)
-                globalTauSC = computeScTau(PdPkModel.pkPeakTime(globalPhysicalSC))
+                if (dose.bolusAmt > 0.0) pools[Category.BOLUS.ordinal].D += dose.bolusAmt
+                if (dose.extBolusAmt > 0.0) pools[Category.EXT_BOLUS.ordinal].D += dose.extBolusAmt
+                if (dose.basalAbsAmt > 0.0) pools[Category.BASAL_ABS.ordinal].D += dose.basalAbsAmt
 
-                for (curve in activeCurves) {
-                    if (!curve.isPhysical) continue
-                    val tElapsedOld = (dose.timestamp - curve.timestamp) / 60000.0
-                    if (tElapsedOld > 0 && tElapsedOld <= maxWarpWindow && curve.tpModelPD > 0.0) {
-                        if (newTpModelPD > curve.tpModelPD) {
-                            val tElapsedNew = tElapsedOld * (newTpModelPD / curve.tpModelPD).pow(1.0 / PdPkModel.PD_P)
-                            curve.timestamp = dose.timestamp - (tElapsedNew * 60000.0).toLong()
-                            curve.tpModelPD = newTpModelPD
-                        }
-                    }
-                }
-
-                activeCurves.add(
-                    TsunamiCurve(
-                        timestamp = dose.timestamp,
-                        bolusAmt = dose.bolusAmt,
-                        extBolusAmt = dose.extBolusAmt,
-                        basalAbsAmt = dose.basalAbsAmt,
-                        profileBasalAmt = 0.0,
-                        autoProfileBasalAmt = 0.0,
-                        tpModelPD = newTpModelPD,
-                        isPhysical = true
-                    )
-                )
+                val physicalMass = groupMass(pools, physical = true)
+                k1Physical = PdModel.K1_B0 * physicalMass.pow(PdModel.K1_B1)
             }
 
             if (dose.profileBasalAmt > 0.0 || dose.autoProfileBasalAmt > 0.0) {
-                globalTheoreticalSC += dose.profileBasalAmt
-                val theoTpModelPD = PdPkModel.pdTp(globalTheoreticalSC)
-                globalTauTheoreticalSC = computeScTau(PdPkModel.pkPeakTime(globalTheoreticalSC))
+                if (dose.profileBasalAmt > 0.0) pools[Category.PROFILE_BASAL.ordinal].D += dose.profileBasalAmt
+                if (dose.autoProfileBasalAmt > 0.0) pools[Category.AUTO_PROFILE_BASAL.ordinal].D += dose.autoProfileBasalAmt
 
-                for (curve in activeCurves) {
-                    if (curve.isPhysical) continue
-                    val tElapsedOld = (dose.timestamp - curve.timestamp) / 60000.0
-                    if (tElapsedOld > 0 && tElapsedOld <= maxWarpWindow && curve.tpModelPD > 0.0) {
-                        if (theoTpModelPD > curve.tpModelPD) {
-                            val tElapsedNew = tElapsedOld * (theoTpModelPD / curve.tpModelPD).pow(1.0 / PdPkModel.PD_P)
-                            curve.timestamp = dose.timestamp - (tElapsedNew * 60000.0).toLong()
-                            curve.tpModelPD = theoTpModelPD
-                        }
-                    }
-                }
-
-                activeCurves.add(
-                    TsunamiCurve(
-                        timestamp = dose.timestamp,
-                        bolusAmt = 0.0, extBolusAmt = 0.0, basalAbsAmt = 0.0,
-                        profileBasalAmt = dose.profileBasalAmt,
-                        autoProfileBasalAmt = dose.autoProfileBasalAmt,
-                        tpModelPD = theoTpModelPD,
-                        isPhysical = false
-                    )
-                )
+                val theoreticalMass = groupMass(pools, physical = false)
+                k1Theoretical = PdModel.K1_B0 * theoreticalMass.pow(PdModel.K1_B1)
             }
         }
 
         // Process remaining snapshots at the very end of the timeline
         while (nextTargetIdx < sortedTargets.size) {
             val tTarget = sortedTargets[nextTargetIdx]
-            resultsMap[tTarget] = evaluateCurvesAt(tTarget, activeCurves, boluses, divisor)
+            val dtPeek = (tTarget - lastTime) / 60000.0
+            resultsMap[tTarget] = evaluatePools(pools, k1Physical, k1Theoretical, dtPeek, boluses, tTarget, divisor)
             nextTargetIdx++
         }
 
         return resultsMap
     }
 
-    /**
-     * Recovers the SC depot's own (unobserved) absorption time constant from the PK model's
-     * fitted serum peak time, holding elimination fixed at insulin lispro's real half-life. The
-     * classic two-compartment Bateman peak-time formula, solved backward by bisection:
-     *   t_peak = (tauAbs*tauElim / (tauElim-tauAbs)) * ln(tauElim/tauAbs)
-     */
-    private fun computeScTau(targetTp: Double): Double {
-        val tauE = 63.48 // insulin lispro serum elimination time constant: 44 min half-life / ln(2)
-        var low = 1.0
-        var high = 1000.0
-        var mid = 150.0
-
-        repeat(15) {
-            mid = (low + high) / 2.0
-            val currentTp = if (abs(mid - tauE) < 0.1) mid else (mid * tauE / (tauE - mid)) * ln(tauE / mid)
-            if (currentTp > targetTp) high = mid else low = mid
+    /** Total mass still somewhere in the shared depot (depot + transit stages) for a crowding group. */
+    private fun groupMass(pools: Array<Pool>, physical: Boolean): Double {
+        var mass = 0.0
+        for (cat in Category.entries) {
+            if (cat.isPhysical == physical) {
+                val pool = pools[cat.ordinal]
+                mass += pool.D + pool.X
+            }
         }
-        return mid
+        return max(mass, 1e-6) // never feed a literal zero into the negative-exponent power law
     }
 
-    private fun evaluateCurvesAt(tTarget: Long, activeCurves: List<TsunamiCurve>, boluses: List<BS>, divisor: Double): TsunamiIobResult {
+    /**
+     * Evaluates every category's IOB/activity at [tTarget] by peeking [dtPeek] minutes ahead of the
+     * pools' last-committed state - without mutating it, since several snapshot times can fall
+     * between two consecutive dose events and each must be evaluated from the same starting state.
+     */
+    private fun evaluatePools(
+        pools: Array<Pool>,
+        k1Physical: Double,
+        k1Theoretical: Double,
+        dtPeek: Double,
+        boluses: List<BS>,
+        tTarget: Long,
+        divisor: Double
+    ): TsunamiIobResult {
         var bSnooze = 0.0
         var lastBolusTime = 0L
 
@@ -333,48 +270,33 @@ class TsunamiIobEngineImpl @Inject constructor(
                     val tSnoozeElapsed = (tTarget - snoozeTime) / 60000.0
 
                     if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
-                        // Snooze reflects this bolus's own single-dose PD curve, not pool crowding.
-                        val snoozeTpModelPD = PdPkModel.pdTp(b.amount)
-                        val snoozeBaseExp = exp(-tSnoozeElapsed.pow(PdPkModel.PD_P) / snoozeTpModelPD)
-                        val snoozeLimitExp = exp(-PdPkModel.pdUpperLimitPow / snoozeTpModelPD)
-
-                        val snoozeIobContrib = snoozeBaseExp - snoozeLimitExp
-                        bSnooze += b.amount * snoozeIobContrib
+                        // Snooze reflects this bolus's own isolated pool, not shared crowding.
+                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount)
                     }
                 }
             }
         }
 
-        var bIob = 0.0; var bAct = 0.0; var eIob = 0.0; var eAct = 0.0
-        var baIob = 0.0; var baAct = 0.0; var pIob = 0.0; var pAct = 0.0; var apIob = 0.0; var apAct = 0.0
-
-        for (curve in activeCurves) {
-            val t = (tTarget - curve.timestamp) / 60000.0
-            if (t !in 0.0..<DIA_HORIZON_MINUTES) continue
-
-            val tPowPm1 = t.pow(PdPkModel.PD_P - 1.0)
-            val baseExp = exp(-(tPowPm1 * t) / curve.tpModelPD)
-            val limitExp = exp(-PdPkModel.pdUpperLimitPow / curve.tpModelPD)
-
-            val safeIobContrib = baseExp - limitExp
-            val activity = (PdPkModel.PD_P / curve.tpModelPD) * tPowPm1 * baseExp
-
-            if (curve.bolusAmt > 0.0) { bIob += curve.bolusAmt * safeIobContrib; bAct += curve.bolusAmt * activity }
-            if (curve.extBolusAmt > 0.0) { eIob += curve.extBolusAmt * safeIobContrib; eAct += curve.extBolusAmt * activity }
-            if (curve.basalAbsAmt > 0.0) { baIob += curve.basalAbsAmt * safeIobContrib; baAct += curve.basalAbsAmt * activity }
-            if (curve.profileBasalAmt > 0.0) { pIob += curve.profileBasalAmt * safeIobContrib; pAct += curve.profileBasalAmt * activity }
-            if (curve.autoProfileBasalAmt > 0.0) { apIob += curve.autoProfileBasalAmt * safeIobContrib; apAct += curve.autoProfileBasalAmt * activity }
+        fun peek(cat: Category): Pool {
+            val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
+            return pools[cat.ordinal].propagated(k1, PdModel.K2, PdModel.KE, dtPeek)
         }
 
-        val bnIob = baIob - pIob
-        val bnAct = baAct - pAct
-        val bnaIob = baIob - apIob
-        val bnaAct = baAct - apAct
+        val bolusP = peek(Category.BOLUS)
+        val extBolusP = peek(Category.EXT_BOLUS)
+        val basalAbsP = peek(Category.BASAL_ABS)
+        val profileP = peek(Category.PROFILE_BASAL)
+        val autoProfileP = peek(Category.AUTO_PROFILE_BASAL)
+
+        val bnIob = basalAbsP.iob() - profileP.iob()
+        val bnAct = basalAbsP.activity() - profileP.activity()
+        val bnaIob = basalAbsP.iob() - autoProfileP.iob()
+        val bnaAct = basalAbsP.activity() - autoProfileP.activity()
 
         return TsunamiIobResult(
-            bolusTotal = mapToTotal(bIob, bAct, "bolus", lastBolusTime, bSnooze),
-            extBolusTotal = mapToTotal(eIob, eAct, "extBolus"),
-            profileBaselineTotal = mapToTotal(pIob, pAct, "profile"),
+            bolusTotal = mapToTotal(bolusP.iob(), bolusP.activity(), "bolus", lastBolusTime, bSnooze),
+            extBolusTotal = mapToTotal(extBolusP.iob(), extBolusP.activity(), "extBolus"),
+            profileBaselineTotal = mapToTotal(profileP.iob(), profileP.activity(), "profile"),
             basalNetTotal = mapToTotal(bnIob, bnAct, "netBasal"),
             basalNetAutoTotal = mapToTotal(bnaIob, bnaAct, "netBasal")
         )
@@ -528,16 +450,29 @@ class TsunamiIobEngineImpl @Inject constructor(
         return timelineMap.values.sortedBy { it.timestamp }
     }
 
-    private data class TsunamiCurve(
-        var timestamp: Long,
-        val bolusAmt: Double,
-        val extBolusAmt: Double,
-        val basalAbsAmt: Double,
-        val profileBasalAmt: Double,
-        val autoProfileBasalAmt: Double,
-        var tpModelPD: Double,
-        val isPhysical: Boolean
-    )
+    private enum class Category(val isPhysical: Boolean) {
+        BOLUS(true), EXT_BOLUS(true), BASAL_ABS(true),
+        PROFILE_BASAL(false), AUTO_PROFILE_BASAL(false)
+    }
+
+    /** One category's live state: mass still in the SC depot (D), in transit (X), or active (A). */
+    private class Pool(var D: Double = 0.0, var X: Double = 0.0, var A: Double = 0.0) {
+
+        fun iob(): Double = D + X + A
+        fun activity(): Double = PdModel.KE * A
+
+        fun propagated(k1: Double, k2: Double, ke: Double, dtMinutes: Double): Pool {
+            if (dtMinutes <= 0.0 || (D == 0.0 && X == 0.0 && A == 0.0)) return Pool(D, X, A)
+            val (nd, nx, na) = PdModel.propagate(D, X, A, k1, k2, ke, dtMinutes)
+            return Pool(nd, nx, na)
+        }
+
+        fun propagateInPlace(k1: Double, k2: Double, ke: Double, dtMinutes: Double) {
+            if (dtMinutes <= 0.0 || (D == 0.0 && X == 0.0 && A == 0.0)) return
+            val (nd, nx, na) = PdModel.propagate(D, X, A, k1, k2, ke, dtMinutes)
+            D = nd; X = nx; A = na
+        }
+    }
 
     private data class DoseEvent(
         val timestamp: Long,
@@ -549,51 +484,110 @@ class TsunamiIobEngineImpl @Inject constructor(
     )
 
     /**
-     * Independently-fit PD (action/IOB) and PK (serum concentration) Weibull models, replacing the
-     * earlier single heuristic formula that derived a PK target from the PD peak via a fixed ratio.
-     * Both follow the same family: tau(dose) = a0 * dose^a1, tp = 2 * tau^p. The PD model is used
-     * directly as the reported action/IOB curve: IOB(t) = exp(-t^p/tp) [survival], activity(t) =
-     * (p/tp) * t^(p-1) * exp(-t^p/tp) [density]. The PK model describes serum concentration - the
-     * combined output of SC absorption and elimination, not the SC depot's own content - so it is
-     * only ever used via its own fitted peak time ([pkPeakTime]), which [computeScTau] inverts
-     * against a fixed elimination rate to recover the depot's own absorption time constant.
+     * Three linked first-order compartments replacing the earlier independently-fit Weibull
+     * PD/PK curves: D (SC depot) -> X (transit) -> A (active, reported as activity = KE*A).
+     * IOB(t) = D(t) + X(t) + A(t): mass not yet through the final elimination step.
      *
-     * Fitted from LY900014 (Lyumjev) EPAR data at doses 7/15/30U:
-     *  - PD from GIR curves (Figure 34): a0=1.1814 h, a1=0.2134, p=1.9002
-     *  - PK from concentration curves (Figure 8): a0=0.7973 h, a1=0.1522, p=1.5495
-     * a0 is converted from hours to minutes here (source value * 60) since this engine works in
-     * minutes throughout.
+     * Only [K1_B0]/[K1_B1] (the depot's own absorption rate, D -> X) depend on how much mass
+     * is currently shared-pool crowded; [K2] (transit) and [KE] (elimination) are fixed
+     * constants, never touched by crowding. This is deliberate, not just simpler: since
+     * activity = KE*A and KE never changes, activity is exactly continuous through every dose
+     * event, for every category, with no exception - a dose can only ever slow down mass that
+     * hasn't left the depot yet, never mass that has already moved on.
      *
-     * NOTE on peak timing (PD side): a0/a1/p were fit by nonlinear least-squares over every
-     * digitized (t, activity) point across the whole curve - rising edge, peak, and tail together,
-     * for all three doses sharing one a0/a1/p - never targeting "time of peak" as its own quantity.
-     * As a result tau = PD_A0*dose^PD_A1 is NOT the curve's actual peak time except at p=2; the true
-     * peak of activity(t) is at tau*(2*(p-1)/p)^(1/p) (~0.972*tau here). More importantly, even that
-     * internally-consistent peak diverges from the empirically observed GIR peak, increasingly so at
-     * higher doses (checked against the digitized calibration points: ~2% early at 7U, ~12% at 15U,
-     * ~25%, over 30 minutes, at 30U). This is inherent to fitting whole-curve shape/AUC rather than
-     * peak time directly - treat this model as validated for AUC/shape, not for pinpointing when the
-     * peak occurs, especially above ~15U.
+     * [KE] is not a free-fit parameter: it's fixed at insulin lispro's real serum elimination
+     * half-life (44 min -> ke = ln(2)/44). [K2] and [K1_B0]/[K1_B1] were then calibrated by
+     * nonlinear least-squares against the *entire* previous Weibull-fitted PD curve (rising
+     * edge, peak, and tail together) at the three EPAR calibration doses (7/15/30U) - the same
+     * whole-curve methodology the original Weibull fit itself used - rather than only matching
+     * peak time/height. A 2-compartment (D -> A) version was checked first and is infeasible
+     * outright: the tallest peak it can produce for a matched peak time falls ~35% short of
+     * the Weibull-fitted target at every calibration dose, regardless of rate constants. The
+     * 3-compartment version reaches R^2 ~= 0.986 against the full target curve at all three
+     * doses, with K2 and KE fixed and only K1 varying - freeing K2/KE to vary too improves
+     * this by less than 0.0002, i.e. essentially not at all.
+     *
+     * Fitted constants (dose in U, rates in 1/min):
+     *  - KE    = ln(2)/44 = 0.015753/min (fixed; real lispro serum elimination half-life)
+     *  - K2    = 0.019413/min (fixed; transit-stage rate)
+     *  - K1(M) = K1_B0 * M^K1_B1, K1_B0=0.105992, K1_B1=-0.653314 (the only crowding-dependent
+     *            rate; M is the live shared-pool mass, generalizing the single-dose amount used
+     *            during calibration)
      */
-    private object PdPkModel {
-        const val PD_A0 = 70.884 // = 1.1814 h * 60
-        const val PD_A1 = 0.2134
-        const val PD_P = 1.9002
+    private object PdModel {
+        const val KE = 0.0157533 // ln(2)/44
+        const val K2 = 0.019413
 
-        const val PK_A0 = 47.838 // = 0.7973 h * 60
-        const val PK_A1 = 0.1522
-        const val PK_P = 1.5495
+        const val K1_B0 = 0.105992
+        const val K1_B1 = -0.653314
 
-        val pdUpperLimitPow: Double = TsunamiIobEngineImpl.DIA_HORIZON_MINUTES.pow(PD_P)
+        private const val RATE_EPS = 1e-7
 
-        fun pdTp(amount: Double): Double = 2.0 * (PD_A0 * amount.pow(PD_A1)).pow(PD_P)
+        /**
+         * Exact closed-form propagation of (D, X, A) forward by [dt] minutes under constant
+         * rates (k1, k2, ke) - equivalent to integrating the linear ODE
+         *   dD/dt = -k1*D ; dX/dt = k1*D - k2*X ; dA/dt = k2*X - ke*A
+         * with no discretization error for any dt. Built from two primitives ([chainStage2] and
+         * [threeStageA]) so every place a rate-difference would divide by (near) zero is routed
+         * through an explicit, numerically-safe degenerate branch instead - crowding continuously
+         * varies K1, so K1 crossing arbitrarily close to the fixed K2 or KE is an expected,
+         * not exceptional, case.
+         */
+        fun propagate(d0: Double, x0: Double, a0: Double, k1: Double, k2: Double, ke: Double, dt: Double): Triple<Double, Double, Double> {
+            val d = d0 * exp(-k1 * dt)
+            val x = x0 * exp(-k2 * dt) + chainStage2(d0, k1, k2, dt)
+            val a = a0 * exp(-ke * dt) + chainStage2(x0, k2, ke, dt) + threeStageA(d0, k1, k2, ke, dt)
+            return Triple(d, x, a)
+        }
 
-        private fun pkTp(amount: Double): Double = 2.0 * (PK_A0 * amount.pow(PK_A1)).pow(PK_P)
+        /** Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single dose. */
+        fun isolatedIobFraction(tElapsed: Double, amount: Double): Double {
+            if (amount <= 0.0) return 0.0
+            val k1 = K1_B0 * amount.pow(K1_B1)
+            val (d, x, a) = propagate(amount, 0.0, 0.0, k1, K2, KE, tElapsed)
+            return (d + x + a) / amount
+        }
 
-        /** Peak time of the fitted PK (serum concentration) curve for a dose/pool mass of [amount]. */
-        fun pkPeakTime(amount: Double): Double {
-            val tp = pkTp(amount)
-            return (tp * (PK_P - 1.0) / PK_P).pow(1.0 / PK_P)
+        /** Second stage (X) of a 2-compartment chain fed by [q0] entering at rate [r1], draining at [r2]. */
+        private fun chainStage2(q0: Double, r1: Double, r2: Double, t: Double): Double {
+            if (q0 == 0.0) return 0.0
+            return if (abs(r2 - r1) < RATE_EPS) {
+                q0 * r1 * t * exp(-r1 * t)
+            } else {
+                q0 * r1 * (exp(-r1 * t) - exp(-r2 * t)) / (r2 - r1)
+            }
+        }
+
+        /** Third stage (A) impulse response fed by [d0] entering the chain (k1, k2, ke) at t=0. */
+        private fun threeStageA(d0: Double, k1: Double, k2: Double, ke: Double, t: Double): Double {
+            if (d0 == 0.0) return 0.0
+            val k1k2 = abs(k2 - k1) < RATE_EPS
+            val k1ke = abs(ke - k1) < RATE_EPS
+            val k2ke = abs(ke - k2) < RATE_EPS
+
+            return when {
+                k1k2 && k1ke -> d0 * k1 * k1 * t * t / 2.0 * exp(-k1 * t) // all three rates equal (Erlang-3)
+                k1k2         -> { // k1 == k2 != ke
+                    val q = ke - k1
+                    d0 * k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
+                }
+
+                k1ke         -> { // k1 == ke != k2
+                    val d = k2 - k1
+                    d0 * k1 * k2 * t * exp(-k1 * t) / d - d0 * k1 * k2 * (exp(-k1 * t) - exp(-k2 * t)) / (d * d)
+                }
+
+                k2ke         -> { // k2 == ke != k1
+                    val d = k2 - k1
+                    d0 * k1 * k2 * (exp(-k1 * t) - exp(-k2 * t)) / (d * d) - d0 * k1 * k2 * t * exp(-k2 * t) / d
+                }
+
+                else         -> d0 * k1 * k2 * (
+                    exp(-k1 * t) / ((k2 - k1) * (ke - k1)) +
+                        exp(-k2 * t) / ((k1 - k2) * (ke - k2)) +
+                        exp(-ke * t) / ((k1 - ke) * (k2 - ke))
+                    )
+            }
         }
     }
 }
