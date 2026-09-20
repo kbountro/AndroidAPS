@@ -165,6 +165,72 @@ class TsunamiIobEngineImpl @Inject constructor(
         var k1Theoretical = k1Physical
         var lastTime = startTime
 
+        // Sorted once so the snooze/lastBolusTime bookkeeping below can sweep forward with
+        // monotonically advancing indices instead of rescanning every bolus for every snapshot.
+        val sortedBoluses = boluses.filter { it.isValid }.sortedBy { it.timestamp }
+        var bolusValidIdx = 0 // boluses folded into lastBolusTimeSeen so far (timestamp <= current tTarget)
+        var bolusFrontIdx = 0 // boluses before this index have permanently expired snooze windows
+        var lastBolusTimeSeen = 0L
+
+        // Evaluates every category's IOB/activity at [tTarget] by peeking [dtPeek] minutes ahead of the
+        // pools' last-committed state - without mutating it, since several snapshot times can fall
+        // between two consecutive dose events and each must be evaluated from the same starting state.
+        fun evaluatePools(dtPeek: Double, tTarget: Long): TsunamiIobResult {
+            while (bolusValidIdx < sortedBoluses.size && sortedBoluses[bolusValidIdx].timestamp <= tTarget) {
+                val b = sortedBoluses[bolusValidIdx]
+                if (b.amount > 0 && b.timestamp > lastBolusTimeSeen) lastBolusTimeSeen = b.timestamp
+                bolusValidIdx++
+            }
+            // tSnoozeElapsed grows monotonically with tTarget for a fixed bolus (divisor > 0), so once
+            // a bolus's window has expired it can never reopen - safe to drop it from the front for good.
+            while (bolusFrontIdx < bolusValidIdx) {
+                val b = sortedBoluses[bolusFrontIdx]
+                val tSnoozeElapsed = ((tTarget - b.timestamp) * divisor) / 60000.0
+                if (tSnoozeElapsed >= DIA_HORIZON_MINUTES) bolusFrontIdx++ else break
+            }
+
+            var bSnooze = 0.0
+            for (idx in bolusFrontIdx until bolusValidIdx) {
+                val b = sortedBoluses[idx]
+                if (b.type != BS.Type.SMB) {
+                    // Age used by this bolus's own isolated curve is divisor times the real elapsed
+                    // time (matching the stock calculator's "evaluate the curve further in the future"
+                    // technique - see IobCobCalculatorPlugin.calculateIobFromBolusToTime), NOT elapsed
+                    // time since some derived timestamp - using the latter silently zeroed this out
+                    // for every divisor value in the enforced [1, 10] range.
+                    val tSnoozeElapsed = ((tTarget - b.timestamp) * divisor) / 60000.0
+                    if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
+                        // Snooze reflects this bolus's own isolated pool, not shared crowding.
+                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount)
+                    }
+                }
+            }
+
+            fun peek(cat: Category): Pool {
+                val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
+                return pools[cat.ordinal].propagated(k1, PdModel.K2, PdModel.KE, dtPeek)
+            }
+
+            val bolusP = peek(Category.BOLUS)
+            val extBolusP = peek(Category.EXT_BOLUS)
+            val basalAbsP = peek(Category.BASAL_ABS)
+            val profileP = peek(Category.PROFILE_BASAL)
+            val autoProfileP = peek(Category.AUTO_PROFILE_BASAL)
+
+            val bnIob = basalAbsP.iob() - profileP.iob()
+            val bnAct = basalAbsP.activity() - profileP.activity()
+            val bnaIob = basalAbsP.iob() - autoProfileP.iob()
+            val bnaAct = basalAbsP.activity() - autoProfileP.activity()
+
+            return TsunamiIobResult(
+                bolusTotal = mapToTotal(bolusP.iob(), bolusP.activity(), "bolus", lastBolusTimeSeen, bSnooze),
+                extBolusTotal = mapToTotal(extBolusP.iob(), extBolusP.activity(), "extBolus"),
+                profileBaselineTotal = mapToTotal(profileP.iob(), profileP.activity(), "profile"),
+                basalNetTotal = mapToTotal(bnIob, bnAct, "netBasal"),
+                basalNetAutoTotal = mapToTotal(bnaIob, bnaAct, "netBasal")
+            )
+        }
+
         val resultsMap = HashMap<Long, TsunamiIobResult>()
 
         // Use a Set to automatically prevent duplicates, ensuring a perfect chronological map
@@ -186,7 +252,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             while (nextTargetIdx < sortedTargets.size && sortedTargets[nextTargetIdx] < dose.timestamp) {
                 val tTarget = sortedTargets[nextTargetIdx]
                 val dtPeek = (tTarget - lastTime) / 60000.0
-                resultsMap[tTarget] = evaluatePools(pools, k1Physical, k1Theoretical, dtPeek, boluses, tTarget, divisor)
+                resultsMap[tTarget] = evaluatePools(dtPeek, tTarget)
                 nextTargetIdx++
             }
 
@@ -229,7 +295,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         while (nextTargetIdx < sortedTargets.size) {
             val tTarget = sortedTargets[nextTargetIdx]
             val dtPeek = (tTarget - lastTime) / 60000.0
-            resultsMap[tTarget] = evaluatePools(pools, k1Physical, k1Theoretical, dtPeek, boluses, tTarget, divisor)
+            resultsMap[tTarget] = evaluatePools(dtPeek, tTarget)
             nextTargetIdx++
         }
 
@@ -254,66 +320,6 @@ class TsunamiIobEngineImpl @Inject constructor(
             }
         }
         return max(mass, 1e-6) // never feed a literal zero into the negative-exponent power law
-    }
-
-    /**
-     * Evaluates every category's IOB/activity at [tTarget] by peeking [dtPeek] minutes ahead of the
-     * pools' last-committed state - without mutating it, since several snapshot times can fall
-     * between two consecutive dose events and each must be evaluated from the same starting state.
-     */
-    private fun evaluatePools(
-        pools: Array<Pool>,
-        k1Physical: Double,
-        k1Theoretical: Double,
-        dtPeek: Double,
-        boluses: List<BS>,
-        tTarget: Long,
-        divisor: Double
-    ): TsunamiIobResult {
-        var bSnooze = 0.0
-        var lastBolusTime = 0L
-
-        for (b in boluses) {
-            if (b.isValid && b.timestamp <= tTarget) {
-                if (b.amount > 0 && b.timestamp > lastBolusTime) {
-                    lastBolusTime = b.timestamp
-                }
-                if (b.type != BS.Type.SMB) {
-                    val timeSinceTreatment = tTarget - b.timestamp
-                    val snoozeTime = b.timestamp + (timeSinceTreatment * divisor).toLong()
-                    val tSnoozeElapsed = (tTarget - snoozeTime) / 60000.0
-
-                    if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
-                        // Snooze reflects this bolus's own isolated pool, not shared crowding.
-                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount)
-                    }
-                }
-            }
-        }
-
-        fun peek(cat: Category): Pool {
-            val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
-            return pools[cat.ordinal].propagated(k1, PdModel.K2, PdModel.KE, dtPeek)
-        }
-
-        val bolusP = peek(Category.BOLUS)
-        val extBolusP = peek(Category.EXT_BOLUS)
-        val basalAbsP = peek(Category.BASAL_ABS)
-        val profileP = peek(Category.PROFILE_BASAL)
-        val autoProfileP = peek(Category.AUTO_PROFILE_BASAL)
-
-        val bnIob = basalAbsP.iob() - profileP.iob()
-        val bnAct = basalAbsP.activity() - profileP.activity()
-        val bnaIob = basalAbsP.iob() - autoProfileP.iob()
-        val bnaAct = basalAbsP.activity() - autoProfileP.activity()
-
-        return TsunamiIobResult(
-            bolusTotal = mapToTotal(bolusP.iob(), bolusP.activity(), "bolus", lastBolusTime, bSnooze),
-            extBolusTotal = mapToTotal(extBolusP.iob(), extBolusP.activity(), "extBolus"),
-            profileBaselineTotal = mapToTotal(profileP.iob(), profileP.activity(), "profile"),
-            basalNetTotal = mapToTotal(bnIob, bnAct, "netBasal"),
-            basalNetAutoTotal = mapToTotal(bnaIob, bnaAct, "netBasal")
-        )
     }
 
     private fun mapToTotal(iob: Double, act: Double, type: String, lastBolusTime: Long = 0L, bSnooze: Double = 0.0): IobTotal {
