@@ -206,7 +206,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 if (dose.extBolusAmt > 0.0) pools[Category.EXT_BOLUS.ordinal].D += dose.extBolusAmt
                 if (dose.basalAbsAmt > 0.0) pools[Category.BASAL_ABS.ordinal].D += dose.basalAbsAmt
 
-                val physicalMass = physicalGroupMass(pools)
+                val physicalMass = groupMass(pools, physical = true)
                 k1Physical = PdModel.K1_B0 * physicalMass.pow(PdModel.K1_B1)
             }
 
@@ -214,11 +214,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 if (dose.profileBasalAmt > 0.0) pools[Category.PROFILE_BASAL.ordinal].D += dose.profileBasalAmt
                 if (dose.autoProfileBasalAmt > 0.0) pools[Category.AUTO_PROFILE_BASAL.ordinal].D += dose.autoProfileBasalAmt
 
-                // Driven by the plain profile pool ALONE - autoProfileBasal (which scales with
-                // sensitivityRatio) must never feed back into this, or the "ground truth" profile
-                // curve would shift with autosens instead of reflecting only the programmed rate.
-                val profilePool = pools[Category.PROFILE_BASAL.ordinal]
-                val theoreticalMass = max(profilePool.D + profilePool.X, 1e-6)
+                val theoreticalMass = groupMass(pools, physical = false)
                 k1Theoretical = PdModel.K1_B0 * theoreticalMass.pow(PdModel.K1_B1)
             }
         }
@@ -234,15 +230,11 @@ class TsunamiIobEngineImpl @Inject constructor(
         return resultsMap
     }
 
-    /**
-     * Total mass still somewhere in the shared physical depot (bolus + extBolus + basalAbs) -
-     * every unit of actually-administered insulin genuinely competes for the same physical SC
-     * space, so all three deliberately crowd each other here.
-     */
-    private fun physicalGroupMass(pools: Array<Pool>): Double {
+    /** Total mass still somewhere in the shared depot (depot + transit stages) for a crowding group. */
+    private fun groupMass(pools: Array<Pool>, physical: Boolean): Double {
         var mass = 0.0
         for (cat in Category.entries) {
-            if (cat.isPhysical) {
+            if (cat.isPhysical == physical) {
                 val pool = pools[cat.ordinal]
                 mass += pool.D + pool.X
             }
