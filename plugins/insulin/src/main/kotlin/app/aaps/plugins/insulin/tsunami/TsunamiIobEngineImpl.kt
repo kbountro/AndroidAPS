@@ -217,8 +217,10 @@ class TsunamiIobEngineImpl @Inject constructor(
                 // Driven by the plain profile pool ALONE - autoProfileBasal (which scales with
                 // sensitivityRatio) must never feed back into this, or the "ground truth" profile
                 // curve would shift with autosens instead of reflecting only the programmed rate.
+                // Only D (mass still physically in the depot), not X (already past it) - see
+                // physicalGroupMass's doc comment for why X must never count as crowding mass.
                 val profilePool = pools[Category.PROFILE_BASAL.ordinal]
-                val theoreticalMass = max(profilePool.D + profilePool.X, 1e-6)
+                val theoreticalMass = max(profilePool.D, 1e-6)
                 k1Theoretical = PdModel.K1_B0 * theoreticalMass.pow(PdModel.K1_B1)
             }
         }
@@ -235,16 +237,20 @@ class TsunamiIobEngineImpl @Inject constructor(
     }
 
     /**
-     * Total mass still somewhere in the shared physical depot (bolus + extBolus + basalAbs) -
+     * Total mass still physically sitting in the shared depot (bolus + extBolus + basalAbs) -
      * every unit of actually-administered insulin genuinely competes for the same physical SC
-     * space, so all three deliberately crowd each other here.
+     * space, so all three deliberately crowd each other here. Deliberately D only, never D+X:
+     * X is mass that has already left the depot (past the crowding-limited step, in transit
+     * toward the active/eliminated stage), so it no longer competes for SC depot space and must
+     * not inflate the rate that governs the depot's own outflow. Getting this wrong compounds
+     * under sustained dosing - X never fully clears between frequent small doses (real SMB/TBR
+     * cadence), so including it keeps dragging k1 down further the longer a session runs.
      */
     private fun physicalGroupMass(pools: Array<Pool>): Double {
         var mass = 0.0
         for (cat in Category.entries) {
             if (cat.isPhysical) {
-                val pool = pools[cat.ordinal]
-                mass += pool.D + pool.X
+                mass += pools[cat.ordinal].D
             }
         }
         return max(mass, 1e-6) // never feed a literal zero into the negative-exponent power law
