@@ -51,13 +51,15 @@ that dips.
 
 ## Other things worth knowing
 
-- **Peak timing at high doses can run later than real life.** The fitted curve shape
-  matches the *whole* absorption curve (rise, peak, and tail together) as well as possible
-  across all three calibration doses — it wasn't specifically fitted to get the peak's
-  timing right. That trade-off is small at low doses and grows at high ones: roughly 2%
-  early at 7U, worsening to about 25% (over 30 minutes) at 30U. This is a property of the
-  calibration, not something that can be tuned away without a different underlying curve
-  shape — see the note in `TsunamiIobEngineImpl.PdPkModel` for the numbers.
+![TsunamiMods vs conventional Tsunami vs EPAR clamp data](traffic_jam_comparison.svg)
+
+Single isolated doses, nothing else in the system, no time-warp in play: 2U (extrapolated,
+no EPAR reference) and 7U/15U/30U at the actual EPAR calibration points. At 7U all three
+curves track closely. At 15U and 30U this fork's curve peaks earlier than both the plain
+Tsunami model and the real EPAR data, which stay close to each other — a property of
+fitting the whole absorption shape rather than the peak's timing specifically, not
+something a different fit removes.
+
 - **Bolus-wizard snooze doesn't actually do anything right now.** It's meant to quiet SMB
   dosing for a while after a manual bolus, but the math behind it cancels itself out at
   every snooze-divisor setting, so it never actually contributes anything.
