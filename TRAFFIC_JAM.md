@@ -1,24 +1,23 @@
 # Traffic Jam insulin model (this fork: original / per-dose curves)
 
-This is the "Lyumjev U100 (Tsunami Traffic Jam)" insulin model, insulin ID 106. It's an
-alternative to the normal oref insulin curves, built around one idea: insulin sitting
-under the skin doesn't all absorb at the same fixed speed. The more of it is sitting there
-at once, the slower it soaks in — the same way a lot of fluid injected into one small
-patch of tissue takes longer to clear than a small amount would. Stack a big bolus on top
-of your basal and correction insulin, and everything absorbs a bit slower for a while, not
-just the new dose.
+This is the "Lyumjev U100 (Tsunami Traffic Jam)" insulin model, insulin ID 106, built
+around one idea: insulin sitting under the skin doesn't all absorb at the same fixed
+speed. The more of it is sitting there at once, the slower it soaks in — the same way a
+lot of fluid injected into one small patch of tissue takes longer to clear than a small
+amount would. Stack a big bolus on top of your basal and correction insulin, and
+everything absorbs a bit slower for a while, not just the new dose.
 
-There's a second, newer implementation of this same idea on branch
-`AAPS_dev_PoolCompartment`, which fixes a real side effect this version has (explained
-below). This file describes what's actually running here, on this fork.
+There's another implementation of this same idea on branch `AAPS_dev_PoolCompartment`,
+described in its own copy of this file, built around a set of shared running tanks rather
+than the per-dose curves described below. This file describes what actually runs on this
+branch.
 
 One more thing worth knowing up front: Traffic Jam (ID 106) isn't the same curve as the
 plain Tsunami PD models (IDs 105/205, "Lyumjev U100/U200 PD"). Those use an older, separate
 formula and fit. Traffic Jam's curve was fit independently against the same published
 Lyumjev absorption data, using a different formula shape (rise, peak, tail, rather than a
 plain peak-time estimate). Different formula, different constants — but the two end up
-producing very similar-looking activity/IOB curves in practice. Worth reporting, not worth
-worrying about.
+producing very similar-looking activity/IOB curves in practice.
 
 ## How it works
 
@@ -35,7 +34,7 @@ programmed baseline, evaluated as if nothing else was happening) is tracked as a
 completely separate running total, so boluses and temp basals never touch it — it stays a
 clean number to compare actual delivery against.
 
-## The known side effect
+## A side effect worth knowing about
 
 Each dose's curve is a fixed shape, drawn once, indexed by how much time has passed since
 it was given. When the shared total grows and an already-active curve needs to slow down,
@@ -44,14 +43,13 @@ whole shape is built around "time since this dose was given," and there's no way
 its absorption speed without also deciding what to do with that elapsed-time number.
 
 The way this is handled: elapsed time is stretched (the curve is treated as effectively
-older than it really is), calculated so the reported *remaining IOB* comes out exactly
-the same right before and after. That's the right thing to protect — IOB is what dosing
+older than it really is), calculated so the reported *remaining IOB* comes out exactly the
+same right before and after. That's the right thing to protect — IOB is what dosing
 decisions actually use. But protecting IOB this way has a cost: reported *activity* for
 that curve drops immediately, every single time, whenever the shared total grows. Not a
 rare edge case — every dose that adds to the shared total does this to every other
-currently-active curve. It's been checked and quantified: the size of the drop scales with
-how much the total grew, and it's a real, visible kink in the activity graph, not a
-rounding artifact.
+currently-active curve. The size of the drop scales with how much the total grew, and it's
+a real, visible kink in the activity graph, not a rounding artifact.
 
 IOB itself stays correct through all this. It's specifically the activity number (and
 anything derived from it, like the graph curve) that visibly dips.
@@ -65,10 +63,9 @@ anything derived from it, like the graph curve) that visibly dips.
   early at 7U, worsening to about 25% (over 30 minutes) at 30U. This is a property of the
   calibration, not something that can be tuned away without a different underlying curve
   shape — see the note in `TsunamiIobEngineImpl.PdPkModel` for the numbers.
-- **Bolus-wizard snooze doesn't actually do anything right now.** The formula meant to
-  quiet SMB dosing for a while after a manual bolus has an inherited bug that makes it
-  contribute nothing at any snooze setting. Confirmed fixed on the `AAPS_dev_PoolCompartment`
-  fork; not yet ported here.
+- **Bolus-wizard snooze doesn't actually do anything right now.** It's meant to quiet SMB
+  dosing for a while after a manual bolus, but the math behind it cancels itself out at
+  every snooze-divisor setting, so it never actually contributes anything.
 
 ## If something looks off
 
