@@ -45,14 +45,17 @@ Two things share crowding, tracked completely separately:
 
 The three absorption/transit/clearance rates weren't fit fresh from lab data — they were
 fit to reproduce Traffic Jam's own curve at those same reference doses, as closely as a
-3-stage tank system can manage: about 98.6% of that curve's shape reproduced. Two
-consequences of the small remaining gap:
+3-stage tank system can manage: about 98.6% of that curve's shape reproduced.
 
 - **The tail is a little longer.** Fixed clearance stages don't cut off as sharply as the
   reference curve does, so a small nonzero IOB — usually well under 0.2U — can linger a few
   hours longer than you might expect, e.g. overnight or fasting. Not a leak, just a slower
   final approach to zero.
-- **Peak timing at high doses can run later than real life.** The reference curve was
-  fitted to match the whole absorption shape (rise, peak, tail together), not specifically
-  to get the peak's timing right, and that trade-off carries through here — small under
-  ~15U, growing above it. See `TsunamiIobEngineImpl.PdModel` for the numbers.
+
+![Pool Compartment vs conventional Tsunami vs EPAR clamp data](traffic_jam_comparison.svg)
+
+Single isolated doses, nothing else in the system: 2U (extrapolated, no EPAR reference)
+and 7U/15U/30U at the actual EPAR calibration points. At 7U all three curves track closely.
+At 15U and 30U this fork's curve peaks earlier and narrower than both the plain Tsunami
+model and the real EPAR data, which stay close to each other — a property of the 3-stage
+tank shape itself, not something a different fit of the same three rates removes.
