@@ -15,6 +15,14 @@ side effect (a brief dip in reported activity every time a new dose crowded the 
 explained there), and this rewrite removes it by changing how the crowding is tracked
 internally, not by changing what the model is trying to represent.
 
+One more thing worth knowing up front: Traffic Jam (ID 106) isn't the same curve as the
+plain Tsunami PD models (IDs 105/205, "Lyumjev U100/U200 PD"). Those use an older, separate
+formula and fit. Traffic Jam's curve was fit independently against the same published
+Lyumjev absorption data, using a different formula shape (rise, peak, tail, rather than a
+plain peak-time estimate). Different formula, different constants — but the two end up
+producing very similar-looking activity/IOB curves in practice. Worth reporting, not worth
+worrying about.
+
 ## How it works
 
 Every dose (bolus, extended bolus, temp basal delivery) is treated as insulin moving
@@ -50,12 +58,13 @@ the last stage, a new dose can never touch insulin that has already moved past t
 That's the whole fix compared to the first version: there's no need to reach back and
 "re-age" anything that's already in flight, so there's nothing left to cause a jump.
 
-## What's different from the original oref curve, in practice
+## What's different from the original Traffic Jam curve, in practice
 
-The fitted curve shape is matched to the same real absorption data as the first version
-(Lyumjev GIR curves at 7/15/30U from its EPAR filing), not a fresh fit — matched closely
-(about 98.6% of the curve's shape reproduced) but not perfectly identical. Two practical
-consequences:
+The three absorption/transit/clearance rates in this fork weren't fit fresh against lab
+data — they were fit to reproduce the *other* fork's own Traffic Jam curve (the rise-peak-
+tail one described above, at the same 7/15/30U reference points), as closely as a 3-stage
+tank system can manage: about 98.6% of that curve's shape reproduced, not perfectly
+identical. Two practical consequences of that small remaining gap:
 
 - **The tail is a little longer.** Real, and by design (fixed clearance stages don't cut
   off sharply the way the original curve did), you may see a small nonzero IOB — usually
