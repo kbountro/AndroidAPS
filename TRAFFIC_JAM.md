@@ -59,7 +59,3 @@ curves track closely. At 15U and 30U this fork's curve peaks earlier than both t
 Tsunami model and the real EPAR data, which stay close to each other — a property of
 fitting the whole absorption shape rather than the peak's timing specifically, not
 something a different fit removes.
-
-- **Bolus-wizard snooze doesn't actually do anything right now.** It's meant to quiet SMB
-  dosing for a while after a manual bolus, but the math behind it cancels itself out at
-  every snooze-divisor setting, so it never actually contributes anything.

@@ -328,9 +328,12 @@ class TsunamiIobEngineImpl @Inject constructor(
                     lastBolusTime = b.timestamp
                 }
                 if (b.type != BS.Type.SMB) {
-                    val timeSinceTreatment = tTarget - b.timestamp
-                    val snoozeTime = b.timestamp + (timeSinceTreatment * divisor).toLong()
-                    val tSnoozeElapsed = (tTarget - snoozeTime) / 60000.0
+                    // Age used by this bolus's own isolated curve is divisor times the real elapsed
+                    // time (matching the stock calculator's "evaluate the curve further in the future"
+                    // technique - see IobCobCalculatorPlugin.calculateIobFromBolusToTime), NOT elapsed
+                    // time since some derived timestamp - using the latter silently zeroed this out
+                    // for every divisor value in the enforced [1, 10] range.
+                    val tSnoozeElapsed = ((tTarget - b.timestamp) * divisor) / 60000.0
 
                     if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
                         // Snooze reflects this bolus's own single-dose PD curve, not pool crowding.
