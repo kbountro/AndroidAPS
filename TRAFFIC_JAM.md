@@ -12,6 +12,14 @@ There's a second, newer implementation of this same idea on branch
 `AAPS_dev_PoolCompartment`, which fixes a real side effect this version has (explained
 below). This file describes what's actually running here, on this fork.
 
+One more thing worth knowing up front: Traffic Jam (ID 106) isn't the same curve as the
+plain Tsunami PD models (IDs 105/205, "Lyumjev U100/U200 PD"). Those use an older, separate
+formula and fit. Traffic Jam's curve was fit independently against the same published
+Lyumjev absorption data, using a different formula shape (rise, peak, tail, rather than a
+plain peak-time estimate). Different formula, different constants — but the two end up
+producing very similar-looking activity/IOB curves in practice. Worth reporting, not worth
+worrying about.
+
 ## How it works
 
 Each dose (bolus, extended bolus, temp basal delivery, profile basal) gets its own
