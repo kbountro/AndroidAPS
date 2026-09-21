@@ -27,32 +27,27 @@ from its EPAR filing) — a rise, a peak, then a tail, not the usual bi-exponent
 AAPS normally uses.
 
 All the *actually delivered* insulin — bolus, extended bolus, and real temp basal
-delivery — shares one running total: think of it as one shared patch of tissue. Every time
-a new dose lands, that shared total goes up, and every active curve's absorption speed
-(how spread-out its peak is) gets recalculated from the new total. Profile basal (your
-programmed baseline, evaluated as if nothing else was happening) is tracked as a
-completely separate running total, so boluses and temp basals never touch it — it stays a
-clean number to compare actual delivery against.
+delivery — shares one running total, like one shared patch of tissue. Every new dose
+raises that total, and every active curve's absorption speed (how spread-out its peak is)
+gets recalculated from it. Profile basal (your programmed baseline, evaluated as if
+nothing else was happening) is tracked as a completely separate running total, so boluses
+and temp basals never touch it — it stays a clean number to compare actual delivery
+against.
 
 ## A side effect worth knowing about
 
-Each dose's curve is a fixed shape, drawn once, indexed by how much time has passed since
-it was given. When the shared total grows and an already-active curve needs to slow down,
-there's no clean way to change its speed mid-curve without breaking something — the curve's
-whole shape is built around "time since this dose was given," and there's no way to update
-its absorption speed without also deciding what to do with that elapsed-time number.
-
-The way this is handled: elapsed time is stretched (the curve is treated as effectively
-older than it really is), calculated so the reported *remaining IOB* comes out exactly the
-same right before and after. That's the right thing to protect — IOB is what dosing
-decisions actually use. But protecting IOB this way has a cost: reported *activity* for
-that curve drops immediately, every single time, whenever the shared total grows. Not a
-rare edge case — every dose that adds to the shared total does this to every other
-currently-active curve. The size of the drop scales with how much the total grew, and it's
-a real, visible kink in the activity graph, not a rounding artifact.
-
-IOB itself stays correct through all this. It's specifically the activity number (and
-anything derived from it, like the graph curve) that visibly dips.
+Each dose's curve is a fixed shape, indexed by how much time has passed since it was
+given — there's no clean way to slow an already-drawn curve down mid-curve without also
+deciding what to do with that elapsed-time number. The fix used here: elapsed time is
+stretched (the curve is treated as older than it really is), chosen so the reported
+*remaining IOB* comes out exactly the same right before and after — the number dosing
+decisions actually use. The cost is that reported *activity* for every other active curve
+drops immediately, every time the shared total grows. Not a rare edge case: every dose
+that adds to the shared total does this to every other currently-active curve, and the
+size of the drop scales with how much the total grew — a real, visible kink in the
+activity graph, not a rounding artifact. IOB itself stays correct throughout; it's
+specifically the activity number (and anything derived from it, like the graph curve)
+that dips.
 
 ## Other things worth knowing
 
@@ -66,11 +61,3 @@ anything derived from it, like the graph curve) that visibly dips.
 - **Bolus-wizard snooze doesn't actually do anything right now.** It's meant to quiet SMB
   dosing for a while after a manual bolus, but the math behind it cancels itself out at
   every snooze-divisor setting, so it never actually contributes anything.
-
-## If something looks off
-
-Give a bolus, then a second one a few minutes later, and watch the activity graph right at
-the second dose — you should see a small, sudden drop in every other active curve's
-contribution at that exact moment. That's expected here, not a bug — it's the side effect
-described above. If it looks unexpectedly large, or IOB itself (not just activity) jumps,
-that's the thing worth actually reporting.
