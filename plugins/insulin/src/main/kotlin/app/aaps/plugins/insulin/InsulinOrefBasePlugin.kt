@@ -193,8 +193,8 @@ abstract class InsulinOrefBasePlugin(
      */
     fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
         val ke = 0.0157533 // ln(2)/44 - real lispro serum elimination half-life, fixed
-        val k2 = 0.019413 // transit-stage rate, fixed
-        val k1 = 0.105992 * bolus.amount.pow(-0.653314) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
+        val k2 = 0.019023 // transit-stage rate, fixed
+        val k1 = 0.110235 * bolus.amount.pow(-0.644422) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
         val result = Iob()
 
         val d = exp(-k1 * t)

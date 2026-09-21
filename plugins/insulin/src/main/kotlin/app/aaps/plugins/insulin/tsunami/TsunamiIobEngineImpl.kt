@@ -516,30 +516,29 @@ class TsunamiIobEngineImpl @Inject constructor(
      * hasn't left the depot yet, never mass that has already moved on.
      *
      * [KE] is not a free-fit parameter: it's fixed at insulin lispro's real serum elimination
-     * half-life (44 min -> ke = ln(2)/44). [K2] and [K1_B0]/[K1_B1] were then calibrated by
-     * nonlinear least-squares against the *entire* previous Weibull-fitted PD curve (rising
-     * edge, peak, and tail together) at the three EPAR calibration doses (7/15/30U) - the same
-     * whole-curve methodology the original Weibull fit itself used - rather than only matching
-     * peak time/height. A 2-compartment (D -> A) version was checked first and is infeasible
-     * outright: the tallest peak it can produce for a matched peak time falls ~35% short of
-     * the Weibull-fitted target at every calibration dose, regardless of rate constants. The
-     * 3-compartment version reaches R^2 ~= 0.986 against the full target curve at all three
-     * doses, with K2 and KE fixed and only K1 varying - freeing K2/KE to vary too improves
-     * this by less than 0.0002, i.e. essentially not at all.
+     * half-life (44 min -> ke = ln(2)/44). [K2] and [K1_B0]/[K1_B1] were calibrated by nonlinear
+     * least-squares directly against the digitized EPAR GIR clamp curves (Lyumjev/LY900014,
+     * 7/15/30U) - not against the earlier Weibull fit's own curve, which was itself only an
+     * intermediate approximation of that same data. A 2-compartment (D -> A) version was
+     * checked first and is infeasible outright: the tallest peak it can produce for a matched
+     * peak time falls well short of the target at every calibration dose, regardless of rate
+     * constants. The 3-compartment version reaches R^2 ~= 0.956 combined across all three doses
+     * (0.982/0.973/0.940 at 7U/15U/30U respectively) with K2 and KE fixed and only K1 varying -
+     * see `traffic_jam_comparison.svg` for what that gap actually looks like at each dose.
      *
      * Fitted constants (dose in U, rates in 1/min):
      *  - KE    = ln(2)/44 = 0.015753/min (fixed; real lispro serum elimination half-life)
-     *  - K2    = 0.019413/min (fixed; transit-stage rate)
-     *  - K1(M) = K1_B0 * M^K1_B1, K1_B0=0.105992, K1_B1=-0.653314 (the only crowding-dependent
+     *  - K2    = 0.019023/min (fixed; transit-stage rate)
+     *  - K1(M) = K1_B0 * M^K1_B1, K1_B0=0.110235, K1_B1=-0.644422 (the only crowding-dependent
      *            rate; M is the live shared-pool mass, generalizing the single-dose amount used
      *            during calibration)
      */
     private object PdModel {
         const val KE = 0.0157533 // ln(2)/44
-        const val K2 = 0.019413
+        const val K2 = 0.019023
 
-        const val K1_B0 = 0.105992
-        const val K1_B1 = -0.653314
+        const val K1_B0 = 0.110235
+        const val K1_B1 = -0.644422
 
         private const val RATE_EPS = 1e-7
 

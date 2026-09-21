@@ -41,14 +41,15 @@ Two things share crowding, tracked completely separately:
   baseline "how much basal insulin do I structurally need" figure that other calculations
   (like how much basal IOB you're running above or below profile) get compared against.
 
-## Absorption rates and the reference curve
+## Absorption rates and the fit
 
-The three absorption/transit/clearance rates weren't fit fresh from lab data — they were
-fit to reproduce Traffic Jam's own curve at those same reference doses, as closely as a
-3-stage tank system can manage: about 98.6% of that curve's shape reproduced.
+The three absorption/transit/clearance rates were fit directly against the same published
+Lyumjev EPAR clamp data (7/15/30U), by nonlinear least-squares — not against an intermediate
+curve. Combined across all three doses this reaches R^2 ~= 0.956 (0.982/0.973/0.940 at
+7U/15U/30U respectively): closer at the smaller, more common doses, looser at 30U.
 
 - **The tail is a little longer.** Fixed clearance stages don't cut off as sharply as the
-  reference curve does, so a small nonzero IOB — usually well under 0.2U — can linger a few
+  digitized data does, so a small nonzero IOB — usually well under 0.2U — can linger a few
   hours longer than you might expect, e.g. overnight or fasting. Not a leak, just a slower
   final approach to zero.
 
