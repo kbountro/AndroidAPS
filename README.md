@@ -1,6 +1,6 @@
 # Traffic Jam insulin model (this fork: original / per-dose curves)
 
-This is the "Lyumjev U100 (Tsunami Traffic Jam)" insulin model, insulin ID 106, built around one idea: insulin sitting under the skin doesn't all absorb at the same fixed speed. The more of it is, the slower it is absorbed. A series of SMBs slows down the absorption of all previous unabsorbed doses, not just the new dose.
+This is the "Lyumjev U100 (Tsunami Traffic Jam)" insulin model, built around one idea: insulin sitting under the skin doesn't all absorb at the same fixed speed. The more of it is, the slower it is absorbed. A series of SMBs slows down the absorption of all previous unabsorbed doses, not just the new dose.
 
 There's another implementation of this same idea on branch `AAPS_dev_PoolCompartment`,
 described in its own README, built around a set of shared running tanks rather
