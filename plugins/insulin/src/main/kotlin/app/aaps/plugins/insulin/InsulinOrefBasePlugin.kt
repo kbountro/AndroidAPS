@@ -193,8 +193,12 @@ abstract class InsulinOrefBasePlugin(
      */
     fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
         val ke = 0.0157533 // ln(2)/44 - real lispro serum elimination half-life, fixed
-        val k2 = 0.019023 // transit-stage rate, fixed
-        val k1 = 0.110235 * bolus.amount.pow(-0.644422) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
+        // widened refit (1/3.5/7/15/30U vs TsunamiMods), in effect - see PdModel's doc comment in
+        // TsunamiIobEngineImpl for the full rationale (small-SMB cascade match vs single-dose accuracy)
+        val k2 = 0.031796 // transit-stage rate, fixed
+        // val k2 = 0.019023 // official: EPAR-only fit (7/15/30U), kept for rollback
+        val k1 = 0.069092 * bolus.amount.pow(-0.596593) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
+        // val k1 = 0.110235 * bolus.amount.pow(-0.644422) // official: EPAR-only fit, kept for rollback
         val result = Iob()
 
         val d = exp(-k1 * t)

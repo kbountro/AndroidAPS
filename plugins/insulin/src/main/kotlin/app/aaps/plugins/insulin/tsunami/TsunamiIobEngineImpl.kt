@@ -516,8 +516,8 @@ class TsunamiIobEngineImpl @Inject constructor(
      * hasn't left the depot yet, never mass that has already moved on.
      *
      * [KE] is not a free-fit parameter: it's fixed at insulin lispro's real serum elimination
-     * half-life (44 min -> ke = ln(2)/44). [K2] and [K1_B0]/[K1_B1] were calibrated by nonlinear
-     * least-squares directly against the digitized EPAR GIR clamp curves (Lyumjev/LY900014,
+     * half-life (44 min -> ke = ln(2)/44). [K2] and [K1_B0]/[K1_B1] were originally calibrated by
+     * nonlinear least-squares directly against the digitized EPAR GIR clamp curves (Lyumjev/LY900014,
      * 7/15/30U) - not against the earlier Weibull fit's own curve, which was itself only an
      * intermediate approximation of that same data. A 2-compartment (D -> A) version was
      * checked first and is infeasible outright: the tallest peak it can produce for a matched
@@ -526,19 +526,38 @@ class TsunamiIobEngineImpl @Inject constructor(
      * (0.982/0.973/0.940 at 7U/15U/30U respectively) with K2 and KE fixed and only K1 varying -
      * see `traffic_jam_comparison.svg` for what that gap actually looks like at each dose.
      *
+     * WIDENED REFIT (current, in effect below): the EPAR-only fit above was calibrated purely on
+     * isolated single doses at 7/15/30U - there is no real digitized data anywhere below 7U, yet
+     * real AndroidAPS usage is dominated by small SMBs (mostly <2U), far outside that range.
+     * Validating the EPAR-only fit against the other Traffic Jam engine's (TsunamiMods') own real
+     * 12-dose SMB cascade (individual doses 0.1-1.3U) showed it deviating from that cascade by up
+     * to 7.0% of total dose. Refitting K2/K1_B0/K1_B1 against TsunamiMods' own PD curve at a
+     * widened dose set (1/3.5/7/15/30U - i.e. adding two doses inside the real SMB range, matched
+     * against TsunamiMods' independently-derived curve there since no EPAR data exists for them)
+     * cuts that same cascade deviation to 3.8%. The cost: worse tail accuracy at 15-30U (activity
+     * RMSE vs the real EPAR curves worsens ~17-25% there) relative to the single-large-dose
+     * accuracy the EPAR-only fit has. Since real usage is small-SMB-dominated, the widened fit is
+     * the one in effect; the original EPAR-only values are kept commented below for reference and
+     * easy rollback.
+     *
      * Fitted constants (dose in U, rates in 1/min):
      *  - KE    = ln(2)/44 = 0.015753/min (fixed; real lispro serum elimination half-life)
-     *  - K2    = 0.019023/min (fixed; transit-stage rate)
-     *  - K1(M) = K1_B0 * M^K1_B1, K1_B0=0.110235, K1_B1=-0.644422 (the only crowding-dependent
-     *            rate; M is the live shared-pool mass, generalizing the single-dose amount used
-     *            during calibration)
+     *  - K2    = 0.031796/min (widened refit, in effect; was 0.019023/min, EPAR 7/15/30U only)
+     *  - K1(M) = K1_B0 * M^K1_B1, K1_B0=0.069092, K1_B1=-0.596593 (widened refit, in effect;
+     *            was K1_B0=0.110235, K1_B1=-0.644422, EPAR 7/15/30U only) - the only
+     *            crowding-dependent rate; M is the live shared-pool mass, generalizing the
+     *            single-dose amount used during calibration
      */
     private object PdModel {
         const val KE = 0.0157533 // ln(2)/44
-        const val K2 = 0.019023
 
-        const val K1_B0 = 0.110235
-        const val K1_B1 = -0.644422
+        const val K2 = 0.031796 // widened refit (1/3.5/7/15/30U vs TsunamiMods) - in effect
+        // const val K2 = 0.019023 // official: EPAR-only fit (7/15/30U), kept for rollback
+
+        const val K1_B0 = 0.069092 // widened refit - in effect
+        const val K1_B1 = -0.596593 // widened refit - in effect
+        // const val K1_B0 = 0.110235 // official: EPAR-only fit, kept for rollback
+        // const val K1_B1 = -0.644422 // official: EPAR-only fit, kept for rollback
 
         private const val RATE_EPS = 1e-7
 
