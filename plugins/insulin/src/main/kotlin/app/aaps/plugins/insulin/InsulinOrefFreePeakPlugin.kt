@@ -27,7 +27,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class InsulinOrefFreePeakPlugin @Inject constructor(
-    private val preferences: Preferences,
+    preferences: Preferences,
     rh: ResourceHelper,
     profileFunction: ProfileFunction,
     rxBus: RxBus,
@@ -35,7 +35,7 @@ class InsulinOrefFreePeakPlugin @Inject constructor(
     config: Config,
     hardLimits: HardLimits,
     uiInteraction: UiInteraction
-) : InsulinOrefBasePlugin(rh, profileFunction, rxBus, aapsLogger, config, hardLimits, uiInteraction) {
+) : InsulinOrefBasePlugin(preferences, rh, profileFunction, rxBus, aapsLogger, config, hardLimits, uiInteraction) {
 
     override val id get(): Insulin.InsulinType = Insulin.InsulinType.OREF_FREE_PEAK
 

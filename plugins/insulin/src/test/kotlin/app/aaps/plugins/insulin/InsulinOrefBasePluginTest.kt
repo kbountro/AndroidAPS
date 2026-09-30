@@ -10,6 +10,7 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
+import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.shared.tests.TestBase
 import com.google.common.truth.Truth.assertThat
 import org.json.JSONObject
@@ -25,13 +26,14 @@ class InsulinOrefBasePluginTest : TestBase() {
     var shortDiaNotificationSend = false
 
     inner class InsulinBaseTest(
+        preferences: Preferences,
         rh: ResourceHelper,
         profileFunction: ProfileFunction,
         rxBus: RxBus,
         aapsLogger: AAPSLogger,
         config: Config,
         hardLimits: HardLimits
-    ) : InsulinOrefBasePlugin(rh, profileFunction, rxBus, aapsLogger, config, hardLimits, uiInteraction) {
+    ) : InsulinOrefBasePlugin(preferences, rh, profileFunction, rxBus, aapsLogger, config, hardLimits, uiInteraction) {
 
         override fun sendShortDiaNotification(dia: Double) {
             shortDiaNotificationSend = true
@@ -57,10 +59,11 @@ class InsulinOrefBasePluginTest : TestBase() {
     @Mock lateinit var config: Config
     @Mock lateinit var hardLimits: HardLimits
     @Mock lateinit var uiInteraction: UiInteraction
+    @Mock lateinit var preferences: Preferences
 
     @BeforeEach
     fun setUp() {
-        sut = InsulinBaseTest(rh, profileFunction, rxBus, aapsLogger, config, hardLimits)
+        sut = InsulinBaseTest(preferences, rh, profileFunction, rxBus, aapsLogger, config, hardLimits)
         whenever(hardLimits.minDia()).thenReturn(5.0)
     }
 

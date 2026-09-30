@@ -17,6 +17,8 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
+import app.aaps.core.keys.DoubleKey
+import app.aaps.core.keys.interfaces.Preferences
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.exp
@@ -29,6 +31,7 @@ import kotlin.math.pow
  *
  */
 abstract class InsulinOrefBasePlugin(
+    val preferences: Preferences,
     rh: ResourceHelper,
     val profileFunction: ProfileFunction,
     val rxBus: RxBus,
@@ -52,6 +55,14 @@ abstract class InsulinOrefBasePlugin(
         // Must match TsunamiIobEngineImpl's DIA horizon (8h) - kept separate since that
         // engine constant is private and this preview path is decoupled from the pooled engine.
         private const val TRAFFIC_JAM_HORIZON_MINUTES = 480.0
+
+        // The "Effective DIA" preference (DoubleKey.InsulinTrafficJamEffectiveDia) is defined at
+        // this reference dose and IOB-remaining threshold - see that key's doc comment for why
+        // (1U: the smallest dose actually inside the crowding-refit's target range; 1%: a small,
+        // easily-explained "done" cutoff for an otherwise-asymptotic curve). Must match the
+        // reference point TsunamiIobEngineImpl's PdModel.speedFactorForEffectiveDia uses.
+        private const val EFFECTIVE_DIA_REFERENCE_DOSE_U = 1.0
+        private const val EFFECTIVE_DIA_IOB_FRACTION_THRESHOLD = 0.01
     }
 
     private var lastWarned: Long = 0
@@ -192,13 +203,20 @@ abstract class InsulinOrefBasePlugin(
      * dose size wherever this path was actually reached.
      */
     fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
-        val ke = 0.0157533 // ln(2)/44 - real lispro serum elimination half-life, fixed
+        val ke = 0.0157533 // ln(2)/44 - real lispro serum elimination half-life, fixed - NEVER scaled by speed
         // widened refit (1/3.5/7/15/30U vs TsunamiMods), in effect - see PdModel's doc comment in
         // TsunamiIobEngineImpl for the full rationale (small-SMB cascade match vs single-dose accuracy)
-        val k2 = 0.031796 // transit-stage rate, fixed
-        // val k2 = 0.019023 // official: EPAR-only fit (7/15/30U), kept for rollback
-        val k1 = 0.069092 * bolus.amount.pow(-0.596593) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
-        // val k1 = 0.110235 * bolus.amount.pow(-0.644422) // official: EPAR-only fit, kept for rollback
+        val k2Base = 0.031796 // transit-stage rate, fixed per-dose, scaled below by the user's own speed
+        // val k2Base = 0.019023 // official: EPAR-only fit (7/15/30U), kept for rollback
+        val k1B0 = 0.069092
+        val k1B1 = -0.596593
+        // val k1B0 = 0.110235; val k1B1 = -0.644422 // official: EPAR-only fit, kept for rollback
+
+        // Per-patient absorption speed knob (see DoubleKey.InsulinTrafficJamEffectiveDia): only the
+        // depot/transit rates (k1, k2) scale, never ke - see that key's doc comment for why.
+        val speedFactor = speedFactorForEffectiveDia(preferences.get(DoubleKey.InsulinTrafficJamEffectiveDia))
+        val k2 = speedFactor * k2Base
+        val k1 = speedFactor * k1B0 * bolus.amount.pow(k1B1) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
         val result = Iob()
 
         val d = exp(-k1 * t)
@@ -216,6 +234,41 @@ abstract class InsulinOrefBasePlugin(
         result.iobContrib = bolus.amount * ((d + x + a) - (dH + xH + aH))
 
         return result
+    }
+
+    /**
+     * Inverts the user-facing "Effective DIA" (hours, time for a lone [EFFECTIVE_DIA_REFERENCE_DOSE_U]
+     * dose to decay to [EFFECTIVE_DIA_IOB_FRACTION_THRESHOLD] of IOB) into the internal speed
+     * multiplier applied to k1/k2. No closed form exists (the underlying curve is a sum of
+     * exponentials), so this bisects: isolated-dose IOB fraction at the reference dose is strictly
+     * monotonic in speed (faster absorption -> reference dose clears sooner), so a fixed number of
+     * bisection steps always converges. See TsunamiIobEngineImpl's PdModel.speedFactorForEffectiveDia
+     * for the pooled engine's copy of this same inversion.
+     */
+    private fun speedFactorForEffectiveDia(effectiveDiaHours: Double): Double {
+        val targetMinutes = effectiveDiaHours * 60.0
+        val k2Base = 0.031796
+        val k1B0 = 0.069092
+        val k1B1 = -0.596593
+        val ke = 0.0157533
+
+        fun isolatedIobFractionAtReferenceDose(speed: Double): Double {
+            val k1 = speed * k1B0 * EFFECTIVE_DIA_REFERENCE_DOSE_U.pow(k1B1)
+            val k2 = speed * k2Base
+            val d = exp(-k1 * targetMinutes)
+            val x = chainStage2(k1, k2, targetMinutes)
+            val a = threeStageA(k1, k2, ke, targetMinutes)
+            return d + x + a
+        }
+
+        var lo = 0.01 // slowest allowed speed
+        var hi = 100.0 // fastest allowed speed
+        repeat(60) {
+            val mid = (lo + hi) / 2.0
+            // Higher speed -> faster clearance -> lower remaining fraction at a fixed target time.
+            if (isolatedIobFractionAtReferenceDose(mid) > EFFECTIVE_DIA_IOB_FRACTION_THRESHOLD) lo = mid else hi = mid
+        }
+        return (lo + hi) / 2.0
     }
 
     /** Second stage of a unit-dose 2-compartment chain entering at rate [r1], draining at [r2]. */

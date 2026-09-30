@@ -159,9 +159,18 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
+        // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamEffectiveDia): only the
+        // depot/transit rates (k1, k2) scale, never ke - see that key's doc comment for why, and
+        // PdModel.speedFactorForEffectiveDia for the inversion from the user-facing hours value.
+        // Read once per simulated window, like K1_B0/K2/KE themselves are effectively constant -
+        // a mid-window change to this preference is not retroactively applied to the past, same
+        // as those.
+        val speedFactor = PdModel.speedFactorForEffectiveDia(preferences.get(DoubleKey.InsulinTrafficJamEffectiveDia))
+        val k2Scaled = PdModel.K2 * speedFactor
+
         // One persistent pool per attribution category - never one per dose.
         val pools = Array(Category.entries.size) { Pool() }
-        var k1Physical = PdModel.K1_B0 * 1.0.pow(PdModel.K1_B1) // placeholder until the first physical dose sets it for real
+        var k1Physical = speedFactor * PdModel.K1_B0 * 1.0.pow(PdModel.K1_B1) // placeholder until the first physical dose sets it for real
         var k1Theoretical = k1Physical
         var lastTime = startTime
 
@@ -201,14 +210,14 @@ class TsunamiIobEngineImpl @Inject constructor(
                     val tSnoozeElapsed = ((tTarget - b.timestamp) * divisor) / 60000.0
                     if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
                         // Snooze reflects this bolus's own isolated pool, not shared crowding.
-                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount)
+                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount, speedFactor)
                     }
                 }
             }
 
             fun peek(cat: Category): Pool {
                 val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
-                return pools[cat.ordinal].propagated(k1, PdModel.K2, PdModel.KE, dtPeek)
+                return pools[cat.ordinal].propagated(k1, k2Scaled, PdModel.KE, dtPeek)
             }
 
             val bolusP = peek(Category.BOLUS)
@@ -261,7 +270,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 for (cat in Category.entries) {
                     val pool = pools[cat.ordinal]
                     val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
-                    pool.propagateInPlace(k1, PdModel.K2, PdModel.KE, dtMins)
+                    pool.propagateInPlace(k1, k2Scaled, PdModel.KE, dtMins)
                 }
             }
             lastTime = dose.timestamp
@@ -273,7 +282,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 if (dose.basalAbsAmt > 0.0) pools[Category.BASAL_ABS.ordinal].D += dose.basalAbsAmt
 
                 val physicalMass = physicalGroupMass(pools)
-                k1Physical = PdModel.K1_B0 * physicalMass.pow(PdModel.K1_B1)
+                k1Physical = speedFactor * PdModel.K1_B0 * physicalMass.pow(PdModel.K1_B1)
             }
 
             if (dose.profileBasalAmt > 0.0 || dose.autoProfileBasalAmt > 0.0) {
@@ -287,7 +296,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 // physicalGroupMass's doc comment for why X must never count as crowding mass.
                 val profilePool = pools[Category.PROFILE_BASAL.ordinal]
                 val theoreticalMass = max(profilePool.D, 1e-6)
-                k1Theoretical = PdModel.K1_B0 * theoreticalMass.pow(PdModel.K1_B1)
+                k1Theoretical = speedFactor * PdModel.K1_B0 * theoreticalMass.pow(PdModel.K1_B1)
             }
         }
 
@@ -578,12 +587,38 @@ class TsunamiIobEngineImpl @Inject constructor(
             return Triple(d, x, a)
         }
 
-        /** Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single dose. */
-        fun isolatedIobFraction(tElapsed: Double, amount: Double): Double {
+        /**
+         * Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single
+         * dose, at the given per-patient absorption [speedFactor] (see [speedFactorForEffectiveDia]).
+         * Only k1/k2 scale by it, never ke.
+         */
+        fun isolatedIobFraction(tElapsed: Double, amount: Double, speedFactor: Double): Double {
             if (amount <= 0.0) return 0.0
-            val k1 = K1_B0 * amount.pow(K1_B1)
-            val (d, x, a) = propagate(amount, 0.0, 0.0, k1, K2, KE, tElapsed)
+            val k1 = speedFactor * K1_B0 * amount.pow(K1_B1)
+            val (d, x, a) = propagate(amount, 0.0, 0.0, k1, speedFactor * K2, KE, tElapsed)
             return (d + x + a) / amount
+        }
+
+        /**
+         * Inverts the user-facing "Effective DIA" preference (DoubleKey.InsulinTrafficJamEffectiveDia:
+         * hours for a lone 1U dose to decay to 1% IOB remaining) into the speed multiplier applied to
+         * k1/k2. No closed form exists (the underlying curve is a sum of exponentials), so this
+         * bisects: [isolatedIobFraction] at the reference dose is strictly monotonic in speed (faster
+         * absorption -> reference dose clears sooner), so a fixed number of bisection steps always
+         * converges. See InsulinOrefBasePlugin's copy of this same inversion for the preview path.
+         */
+        fun speedFactorForEffectiveDia(effectiveDiaHours: Double): Double {
+            val targetMinutes = effectiveDiaHours * 60.0
+            val referenceDose = 1.0
+            val threshold = 0.01
+            var lo = 0.01 // slowest allowed speed
+            var hi = 100.0 // fastest allowed speed
+            repeat(60) {
+                val mid = (lo + hi) / 2.0
+                // Higher speed -> faster clearance -> lower remaining fraction at a fixed target time.
+                if (isolatedIobFraction(targetMinutes, referenceDose, mid) > threshold) lo = mid else hi = mid
+            }
+            return (lo + hi) / 2.0
         }
 
         /** Second stage (X) of a 2-compartment chain fed by [q0] entering at rate [r1], draining at [r2]. */

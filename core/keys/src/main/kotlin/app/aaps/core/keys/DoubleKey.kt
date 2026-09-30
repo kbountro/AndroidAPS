@@ -62,4 +62,12 @@ enum class DoubleKey(
     ActivityScaleFactor("activity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
     InactivityScaleFactor("inactivity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
 
+    // Traffic Jam (Pool Compartment) absorption speed knob, shown as an "effective DIA" in hours:
+    // the time for a single 1U dose to decay to 1% IOB remaining. Internally converted to a
+    // multiplier on the depot/transit rates (K1_B0, K2) - see PdModel.speedFactorForEffectiveDia
+    // in TsunamiIobEngineImpl for why elimination (KE) is deliberately left out of that scaling,
+    // and why 1U/1% was chosen as the reference point. Default reproduces stock behavior exactly
+    // (speedFactor = 1.0, i.e. the unscaled widened-refit constants).
+    InsulinTrafficJamEffectiveDia("insulin_traffic_jam_effective_dia", 5.9, 4.5, 15.0, hideParentScreenIfHidden = true),
+
 }
