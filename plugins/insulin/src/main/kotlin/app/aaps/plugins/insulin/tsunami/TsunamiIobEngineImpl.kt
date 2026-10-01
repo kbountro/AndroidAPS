@@ -159,13 +159,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
-        // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamEffectiveDia): only the
-        // depot/transit rates (k1, k2) scale, never ke - see that key's doc comment for why, and
-        // PdModel.speedFactorForEffectiveDia for the inversion from the user-facing hours value.
-        // Read once per simulated window, like K1_B0/K2/KE themselves are effectively constant -
-        // a mid-window change to this preference is not retroactively applied to the past, same
-        // as those.
-        val speedFactor = PdModel.speedFactorForEffectiveDia(preferences.get(DoubleKey.InsulinTrafficJamEffectiveDia))
+        // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier): only the
+        // depot/transit rates (k1, k2) scale, never ke - see that key's doc comment for why. Read
+        // once per simulated window, like K1_B0/K2/KE themselves are effectively constant - a
+        // mid-window change to this preference is not retroactively applied to the past, same as
+        // those.
+        val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val k2Scaled = PdModel.K2 * speedFactor
 
         // One persistent pool per attribution category - never one per dose.
@@ -589,36 +588,14 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         /**
          * Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single
-         * dose, at the given per-patient absorption [speedFactor] (see [speedFactorForEffectiveDia]).
-         * Only k1/k2 scale by it, never ke.
+         * dose, at the given per-patient absorption [speedFactor] (DoubleKey.InsulinTrafficJamSpeedMultiplier,
+         * applied directly - see that key's doc comment). Only k1/k2 scale by it, never ke.
          */
         fun isolatedIobFraction(tElapsed: Double, amount: Double, speedFactor: Double): Double {
             if (amount <= 0.0) return 0.0
             val k1 = speedFactor * K1_B0 * amount.pow(K1_B1)
             val (d, x, a) = propagate(amount, 0.0, 0.0, k1, speedFactor * K2, KE, tElapsed)
             return (d + x + a) / amount
-        }
-
-        /**
-         * Inverts the user-facing "Effective DIA" preference (DoubleKey.InsulinTrafficJamEffectiveDia:
-         * hours for a lone 1U dose to decay to 1% IOB remaining) into the speed multiplier applied to
-         * k1/k2. No closed form exists (the underlying curve is a sum of exponentials), so this
-         * bisects: [isolatedIobFraction] at the reference dose is strictly monotonic in speed (faster
-         * absorption -> reference dose clears sooner), so a fixed number of bisection steps always
-         * converges. See InsulinOrefBasePlugin's copy of this same inversion for the preview path.
-         */
-        fun speedFactorForEffectiveDia(effectiveDiaHours: Double): Double {
-            val targetMinutes = effectiveDiaHours * 60.0
-            val referenceDose = 1.0
-            val threshold = 0.01
-            var lo = 0.01 // slowest allowed speed
-            var hi = 100.0 // fastest allowed speed
-            repeat(60) {
-                val mid = (lo + hi) / 2.0
-                // Higher speed -> faster clearance -> lower remaining fraction at a fixed target time.
-                if (isolatedIobFraction(targetMinutes, referenceDose, mid) > threshold) lo = mid else hi = mid
-            }
-            return (lo + hi) / 2.0
         }
 
         /** Second stage (X) of a 2-compartment chain fed by [q0] entering at rate [r1], draining at [r2]. */
