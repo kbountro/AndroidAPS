@@ -99,7 +99,6 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     private val innovationValidationSamples = 15
 
     // Gap handling.
-    private val minorGapThreshold = 7.0
     private val majorGapThreshold = 60.0
     private val rateDecayTimeConstant = 30.0
 
@@ -459,9 +458,12 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
         for (i in (endIdx - 1) downTo startIdx) {
             val dt = (data[i].timestamp - data[i + 1].timestamp) / millisPerMinute
 
-            if (dt > minorGapThreshold && dt <= majorGapThreshold) {
-                x[1] *= rateDamp(dt)
-            }
+            // predict() already applies rateDamp(dt) to the rate for whatever dt is passed to
+            // it (a few lines below) - this used to ALSO pre-damp x[1] here for gaps in
+            // (minorGapThreshold, majorGapThreshold], compounding into exp(-2*dt/30) instead of
+            // the intended single exp(-dt/30), with a discontinuous jump in effective decay right
+            // at the threshold. predict()'s own decay already scales correctly with dt, gap or
+            // not, so no separate "bridging" step is needed.
 
             p[0] = p[0].coerceIn(0.1, maxGlucoseVariance)
             p[3] = p[3].coerceIn(0.001, maxRateVariance)
