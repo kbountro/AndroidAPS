@@ -52,6 +52,24 @@ and 7U/15U/30U at the actual EPAR calibration points, now alongside `AAPS_dev_Ts
 own curve so the two forks can be compared directly, not just against conventional Tsunami
 and the real data.
 
+## Per-patient absorption speed
+
+A preference (Insulin settings → Absorption Speed, `DoubleKey.InsulinTrafficJamSpeedMultiplier`,
+range 0.2-5.0, default 1.0) scales the depot/transit rates (K1, K2) directly: 2.0 means
+absorption — and therefore roughly peak activity timing — is twice as fast as standard;
+0.5 means half as fast. It's a direct multiplier applied as-is, not a derived "effective
+DIA" or other indirect framing, since this model's decay is dose-dependent (crowding) and
+asymptotic, so no single duration number would actually be dose-independent or exact.
+
+Elimination (KE) is deliberately never scaled by this knob — it's pinned to insulin
+lispro's real, published serum half-life (44 minutes), which doesn't change with how fast
+insulin leaves the injection site. Only the depot-to-transit and transit-to-active legs
+move.
+
+At the default 1.0, this is an exact no-op: every rate is multiplied by `1.0`, which is
+bit-for-bit identical to the unscaled rate, so the default behaves exactly like the fit
+described above with no knob present at all.
+
 ## Real multi-dose behavior
 
 ![Real 12-dose cascade replay: Pool Compartment vs TsunamiMods vs conventional Tsunami](traffic_jam_cascade.svg)
