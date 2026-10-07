@@ -2,6 +2,7 @@ package app.aaps.plugins.insulin.tsunami
 
 import app.aaps.core.data.model.BS
 import app.aaps.core.data.model.TB
+import app.aaps.core.data.model.TE
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.insulin.Insulin
@@ -141,6 +142,16 @@ class TsunamiIobEngineImpl @Inject constructor(
     // about any other category's or any earlier dose's state is ever rewritten - only the
     // shared group's absorption rate constant is updated, and every pool simply keeps
     // integrating forward from its current state under that rate, in closed form.
+    //
+    // SITE CHANGES: a cannula/site change (TE.Type.CANNULA_CHANGE - also logged by patch
+    // pumps on pod activation) starts a brand new set of these five pools ([SiteState]),
+    // keyed by a monotonically increasing generation number. Insulin delivered before the
+    // change keeps crowding only with other insulin from that same old site as it finishes
+    // absorbing; insulin delivered at or after the change crowds only the new site's own
+    // pools. The two never interact - no mass or rate crosses between generations - and
+    // every generation keeps decaying independently for as long as it still holds any
+    // mass, however many site changes occur in a window. Reported IOB/activity per
+    // category is simply the sum across every generation still alive.
     // =========================================================================
     private fun simulateDepotHistory(
         requestedTime: Long,
@@ -167,10 +178,27 @@ class TsunamiIobEngineImpl @Inject constructor(
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val k2Scaled = PdModel.K2 * speedFactor
 
-        // One persistent pool per attribution category - never one per dose.
-        val pools = Array(Category.entries.size) { Pool() }
-        var k1Physical = speedFactor * PdModel.K1_B0 * 1.0.pow(PdModel.K1_B1) // placeholder until the first physical dose sets it for real
-        var k1Theoretical = k1Physical
+        // Site-change boundaries within the simulated window: each one starts a fresh
+        // [SiteState] generation. A dose's generation is how many boundaries fall at or
+        // before its own timestamp, so doses before the first boundary (or when there is
+        // none at all) all land in generation 0 - identical to the single-pool behavior
+        // this replaces. Boundaries outside the window never matter: anything that old is
+        // already past the DIA horizon, and anything that new hasn't happened yet.
+        val siteChangeBoundaries = persistenceLayer.getTherapyEventDataFromTime(startTime, TE.Type.CANNULA_CHANGE, true)
+            .map { it.timestamp }
+            .filter { it <= horizonTime }
+
+        // One persistent set of pools (and crowding rates) per site generation - never one
+        // per dose, and never shared across generations.
+        class SiteState {
+
+            val pools = Array(Category.entries.size) { Pool() }
+            var k1Physical = speedFactor * PdModel.K1_B0 * 1.0.pow(PdModel.K1_B1) // placeholder until the first physical dose sets it for real
+            var k1Theoretical = k1Physical
+        }
+
+        val sites = HashMap<Int, SiteState>()
+        fun siteFor(gen: Int): SiteState = sites.getOrPut(gen) { SiteState() }
         var lastTime = startTime
 
         // Sorted once so the snooze/lastBolusTime bookkeeping below can sweep forward with
@@ -214,16 +242,23 @@ class TsunamiIobEngineImpl @Inject constructor(
                 }
             }
 
-            fun peek(cat: Category): Pool {
-                val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
-                return pools[cat.ordinal].propagated(k1, k2Scaled, PdModel.KE, dtPeek)
+            // Sums every still-live site generation's own peeked pool - crowding never
+            // crosses generations, but the reported total is their combined IOB/activity.
+            fun peekSum(cat: Category): Pool {
+                var sumD = 0.0; var sumX = 0.0; var sumA = 0.0
+                for (site in sites.values) {
+                    val k1 = if (cat.isPhysical) site.k1Physical else site.k1Theoretical
+                    val p = site.pools[cat.ordinal].propagated(k1, k2Scaled, PdModel.KE, dtPeek)
+                    sumD += p.D; sumX += p.X; sumA += p.A
+                }
+                return Pool(sumD, sumX, sumA)
             }
 
-            val bolusP = peek(Category.BOLUS)
-            val extBolusP = peek(Category.EXT_BOLUS)
-            val basalAbsP = peek(Category.BASAL_ABS)
-            val profileP = peek(Category.PROFILE_BASAL)
-            val autoProfileP = peek(Category.AUTO_PROFILE_BASAL)
+            val bolusP = peekSum(Category.BOLUS)
+            val extBolusP = peekSum(Category.EXT_BOLUS)
+            val basalAbsP = peekSum(Category.BASAL_ABS)
+            val profileP = peekSum(Category.PROFILE_BASAL)
+            val autoProfileP = peekSum(Category.AUTO_PROFILE_BASAL)
 
             val bnIob = basalAbsP.iob() - profileP.iob()
             val bnAct = basalAbsP.activity() - profileP.activity()
@@ -266,36 +301,43 @@ class TsunamiIobEngineImpl @Inject constructor(
 
             val dtMins = (dose.timestamp - lastTime) / 60000.0
             if (dtMins > 0) {
-                for (cat in Category.entries) {
-                    val pool = pools[cat.ordinal]
-                    val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
-                    pool.propagateInPlace(k1, k2Scaled, PdModel.KE, dtMins)
+                // Every live generation decays continuously in real time regardless of
+                // whether THIS dose belongs to it - an old site's leftover insulin keeps
+                // absorbing on its own schedule even after the new site starts filling up.
+                for (site in sites.values) {
+                    for (cat in Category.entries) {
+                        val pool = site.pools[cat.ordinal]
+                        val k1 = if (cat.isPhysical) site.k1Physical else site.k1Theoretical
+                        pool.propagateInPlace(k1, k2Scaled, PdModel.KE, dtMins)
+                    }
                 }
             }
             lastTime = dose.timestamp
 
+            val site = siteFor(siteGenerationFor(dose.timestamp, siteChangeBoundaries))
+
             val physicalInjected = dose.bolusAmt + dose.extBolusAmt + dose.basalAbsAmt
             if (physicalInjected > 0.0) {
-                if (dose.bolusAmt > 0.0) pools[Category.BOLUS.ordinal].D += dose.bolusAmt
-                if (dose.extBolusAmt > 0.0) pools[Category.EXT_BOLUS.ordinal].D += dose.extBolusAmt
-                if (dose.basalAbsAmt > 0.0) pools[Category.BASAL_ABS.ordinal].D += dose.basalAbsAmt
+                if (dose.bolusAmt > 0.0) site.pools[Category.BOLUS.ordinal].D += dose.bolusAmt
+                if (dose.extBolusAmt > 0.0) site.pools[Category.EXT_BOLUS.ordinal].D += dose.extBolusAmt
+                if (dose.basalAbsAmt > 0.0) site.pools[Category.BASAL_ABS.ordinal].D += dose.basalAbsAmt
 
-                val physicalMass = physicalGroupMass(pools)
-                k1Physical = speedFactor * PdModel.K1_B0 * physicalMass.pow(PdModel.K1_B1)
+                val physicalMass = physicalGroupMass(site.pools)
+                site.k1Physical = speedFactor * PdModel.K1_B0 * physicalMass.pow(PdModel.K1_B1)
             }
 
             if (dose.profileBasalAmt > 0.0 || dose.autoProfileBasalAmt > 0.0) {
-                if (dose.profileBasalAmt > 0.0) pools[Category.PROFILE_BASAL.ordinal].D += dose.profileBasalAmt
-                if (dose.autoProfileBasalAmt > 0.0) pools[Category.AUTO_PROFILE_BASAL.ordinal].D += dose.autoProfileBasalAmt
+                if (dose.profileBasalAmt > 0.0) site.pools[Category.PROFILE_BASAL.ordinal].D += dose.profileBasalAmt
+                if (dose.autoProfileBasalAmt > 0.0) site.pools[Category.AUTO_PROFILE_BASAL.ordinal].D += dose.autoProfileBasalAmt
 
                 // Driven by the plain profile pool ALONE - autoProfileBasal (which scales with
                 // sensitivityRatio) must never feed back into this, or the "ground truth" profile
                 // curve would shift with autosens instead of reflecting only the programmed rate.
                 // Only D (mass still physically in the depot), not X (already past it) - see
                 // physicalGroupMass's doc comment for why X must never count as crowding mass.
-                val profilePool = pools[Category.PROFILE_BASAL.ordinal]
+                val profilePool = site.pools[Category.PROFILE_BASAL.ordinal]
                 val theoreticalMass = max(profilePool.D, 1e-6)
-                k1Theoretical = speedFactor * PdModel.K1_B0 * theoreticalMass.pow(PdModel.K1_B1)
+                site.k1Theoretical = speedFactor * PdModel.K1_B0 * theoreticalMass.pow(PdModel.K1_B1)
             }
         }
 
@@ -311,14 +353,31 @@ class TsunamiIobEngineImpl @Inject constructor(
     }
 
     /**
-     * Total mass still physically sitting in the shared depot (bolus + extBolus + basalAbs) -
-     * every unit of actually-administered insulin genuinely competes for the same physical SC
-     * space, so all three deliberately crowd each other here. Deliberately D only, never D+X:
-     * X is mass that has already left the depot (past the crowding-limited step, in transit
-     * toward the active/eliminated stage), so it no longer competes for SC depot space and must
-     * not inflate the rate that governs the depot's own outflow. Getting this wrong compounds
-     * under sustained dosing - X never fully clears between frequent small doses (real SMB/TBR
-     * cadence), so including it keeps dragging k1 down further the longer a session runs.
+     * How many of [boundaries] (sorted ascending site-change timestamps) fall at or before
+     * [timestamp] - the generation number that timestamp's dose belongs to. A change logged
+     * exactly at a dose's own timestamp already counts: that dose is the first one into the
+     * new site. Binary search since [boundaries] is walked once per dose event.
+     */
+    private fun siteGenerationFor(timestamp: Long, boundaries: List<Long>): Int {
+        var lo = 0
+        var hi = boundaries.size
+        while (lo < hi) {
+            val mid = (lo + hi) / 2
+            if (boundaries[mid] <= timestamp) lo = mid + 1 else hi = mid
+        }
+        return lo
+    }
+
+    /**
+     * Total mass still physically sitting in one site's shared depot (bolus + extBolus +
+     * basalAbs) - every unit of actually-administered insulin genuinely competes for the same
+     * physical SC space, so all three deliberately crowd each other here. Deliberately D only,
+     * never D+X: X is mass that has already left the depot (past the crowding-limited step, in
+     * transit toward the active/eliminated stage), so it no longer competes for SC depot space
+     * and must not inflate the rate that governs the depot's own outflow. Getting this wrong
+     * compounds under sustained dosing - X never fully clears between frequent small doses
+     * (real SMB/TBR cadence), so including it keeps dragging k1 down further the longer a
+     * session runs. [pools] is always one site generation's own pools, never mixed across sites.
      */
     private fun physicalGroupMass(pools: Array<Pool>): Double {
         var mass = 0.0
