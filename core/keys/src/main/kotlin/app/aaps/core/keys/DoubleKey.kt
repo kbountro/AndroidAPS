@@ -63,7 +63,7 @@ enum class DoubleKey(
     InactivityScaleFactor("inactivity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
 
     // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on the
-    // depot/transit rates (K1_B0, K2), applied as-is - no derived "effective DIA" or other indirect
+    // shared depot/transit rate (K1_B0), applied as-is - no derived "effective DIA" or other indirect
     // framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no single
     // duration number would actually be dose-independent or exact. 2.0 means absorption - and
     // therefore roughly peak activity timing - is twice as fast as standard; 0.5 means half as

@@ -16,34 +16,36 @@ straight into the depot, drains through transit into active, then out. Reported 
 whatever's left across all three stages; reported activity is how fast the active stage is
 being cleared.
 
-Insulin accumulation in the depot stage only slows the depot's drain rate. The other two stages run at fixed speeds
-that never change. The active stage's clearance rate isn't fitted at all, it's pinned to
-insulin lispro's real, published half-life (44 minutes). A new dose can
-only ever slow down insulin that hasn't left the depot yet. It never affects
-insulin that's either in the transit or the active stages.
+The depot and transit stages share one drain rate, and the more insulin sits in the depot, the
+slower that rate gets: a jam slows both. The active stage clears at a fixed speed that never
+changes. A new dose can only ever slow down insulin still in the depot or transit. It never
+affects insulin that has reached the active stage, so reported activity stays continuous.
 
 Profile basal (the true baseline, evaluated as if nothing else was happening) is tracked independently as usual, but following the same mechanism.
 
 ## Absorption rates and the fit
 
-The three absorption/transit/clearance rates were originally fit directly against the same
-published Lyumjev EPAR clamp data (7/15/30U), by nonlinear least-squares — not against an
-intermediate curve. Combined across all three doses that reached R^2 ~= 0.956
-(0.982/0.973/0.940 at 7U/15U/30U respectively): closer at the smaller, more common doses,
-looser at 30U.
+An earlier version crowded only the depot, with transit and the active stage at fixed speeds
+(the active stage pinned to lispro's 44-minute serum half-life). Those two fixed stages alone
+put a ~95-minute floor under the mean action time of every dose, against ~70 minutes for
+TsunamiMods' curve at 0.3U, so small SMBs acted too slowly however fast the depot was. And the
+depot, the only stage crowding could act on, held just ~7% of a 0.3U SMB's action time, so the
+crowding mass drained within minutes and a cascade of SMBs barely jammed.
 
-That EPAR-only fit was calibrated purely on isolated single doses at 7/15/30U — there's no
-real digitized absorption data anywhere below 7U, yet real AndroidAPS usage is dominated by
-small SMBs (mostly under 2U), far outside that range. Checking the EPAR-only fit against
-`AAPS_dev_TsunamiMods`' own real 12-dose SMB cascade (individual doses 0.1-1.3U) showed it
-deviating from that cascade by up to 7.0% of total dose. The constants now in effect were
-refit against TsunamiMods' own PD curve at a widened dose set (1/3.5/7/15/30U — adding two
-doses inside the real SMB range, matched against TsunamiMods' independently-derived curve
-there since no EPAR data exists for them), which cuts that cascade deviation to 3.8%. The
-tradeoff: worse tail accuracy at 15-30U against the real EPAR curves (activity RMSE worsens
-~17-25% there) than the EPAR-only fit had. Since real usage is small-SMB-dominated, the
-widened-refit constants are the ones in effect; the original EPAR-only values are kept
-commented in the source for reference and easy rollback.
+The current fit crowds depot and transit together and fits the active stage's clearance
+instead of pinning it (half-life ~24 minutes). The isolated single-dose curve is fit by
+nonlinear least-squares against TsunamiMods' EPAR-fitted curve at 0.2/0.5/1/2/3.5/7/15/30U:
+R^2 0.98 at 0.1U, 0.99 from 0.3U to 3.5U, 0.986 at 7U and 0.97 at 30U (the previous fit had
+0.75 at 0.1U and 0.88 at 0.3U). Most of each dose's action time now sits in the crowded stages
+(~55% at 0.3U, ~76% at 7U).
+
+Replaying the engine with 0.5 U/h basal running, a 0.3U SMB is 90% absorbed after ~148 minutes
+(previously ~195; TsunamiMods' isolated curve ~122), and a 12-SMB, 7.85U cascade carries up to
+8.6% of its dose as extra IOB from crowding (previously 2.8%). Basal shares the crowded pool, so
+at higher basal rates the depot holds more insulin and an SMB on top absorbs more slowly (at
+1 U/h, ~173 minutes to 90%).
+
+The plots below were generated with the previous constants and have not been regenerated yet.
 
 ![Pool Compartment vs TsunamiMods vs conventional Tsunami vs EPAR clamp data](traffic_jam_comparison.svg)
 
@@ -55,16 +57,15 @@ and the real data.
 ## Per-patient absorption speed
 
 A preference (Insulin settings → Absorption Speed, `DoubleKey.InsulinTrafficJamSpeedMultiplier`,
-range 0.2-5.0, default 1.0) scales the depot/transit rates (K1, K2) directly: 2.0 means
+range 0.2-5.0, default 1.0) scales the shared depot/transit rate directly: 2.0 means
 absorption — and therefore roughly peak activity timing — is twice as fast as standard;
 0.5 means half as fast. It's a direct multiplier applied as-is, not a derived "effective
 DIA" or other indirect framing, since this model's decay is dose-dependent (crowding) and
 asymptotic, so no single duration number would actually be dose-independent or exact.
 
-Elimination (KE) is deliberately never scaled by this knob — it's pinned to insulin
-lispro's real, published serum half-life (44 minutes), which doesn't change with how fast
-insulin leaves the injection site. Only the depot-to-transit and transit-to-active legs
-move.
+The active stage's clearance (KE) is deliberately never scaled by this knob, since it doesn't
+depend on how fast insulin leaves the injection site. Only the depot-to-transit and
+transit-to-active legs move.
 
 At the default 1.0, this is an exact no-op: every rate is multiplied by `1.0`, which is
 bit-for-bit identical to the unscaled rate, so the default behaves exactly like the fit
@@ -74,7 +75,7 @@ described above with no knob present at all.
 
 ![Real 12-dose cascade replay: Pool Compartment vs TsunamiMods vs conventional Tsunami](traffic_jam_cascade.svg)
 
-Replaying a real 6.85U/12-SMB sequence from an actual device log (each fork's own
+(Numbers in this section are for the previous constants.) Replaying a real 6.85U/12-SMB sequence from an actual device log (each fork's own
 crowding mechanism included — this fork's pooled-depot rate, TsunamiMods' pooled-SC
 time-warp) against the plain Tsunami model as a reference: this fork reaches a peak gap of
 0.654U (9.6% of the total dose delivered) around 3.3h into the sequence, versus 0.557U

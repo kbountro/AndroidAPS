@@ -28,8 +28,8 @@ import kotlin.math.pow
  * Models a shared subcutaneous depot as a small, continuously-evolving pool of linear
  * (first-order) compartments - not one independent closed-form curve per dose. Every dose
  * is an impulse added directly into its category's own depot state; crowding is expressed
- * as the depot's absorption rate depending on how much mass is currently still in transit,
- * evaluated live rather than snapshotted per dose. Because every state is a genuine ODE
+ * as the shared depot/transit rate depending on how much mass is currently still in the
+ * depot, evaluated live rather than snapshotted per dose. Because every state is a genuine ODE
  * state (not an age-parametrized curve), a rate constant can change value at any instant
  * with no reinterpretation needed - the state simply keeps evolving from wherever it
  * currently is. This is what the earlier per-dose-curve design could not do: that design
@@ -160,12 +160,11 @@ class TsunamiIobEngineImpl @Inject constructor(
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier): only the
-        // depot/transit rates (k1, k2) scale, never ke - see that key's doc comment for why. Read
-        // once per simulated window, like K1_B0/K2/KE themselves are effectively constant - a
+        // crowded depot/transit rate scales, never ke - see that key's doc comment for why. Read
+        // once per simulated window, like K1_B0/KE themselves are effectively constant - a
         // mid-window change to this preference is not retroactively applied to the past, same as
         // those.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
-        val k2Scaled = PdModel.K2 * speedFactor
 
         // One persistent pool per attribution category - never one per dose.
         val pools = Array(Category.entries.size) { Pool() }
@@ -216,7 +215,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
             fun peek(cat: Category): Pool {
                 val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
-                return pools[cat.ordinal].propagated(k1, k2Scaled, PdModel.KE, dtPeek)
+                return pools[cat.ordinal].propagated(k1, k1, PdModel.KE, dtPeek)
             }
 
             val bolusP = peek(Category.BOLUS)
@@ -269,7 +268,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 for (cat in Category.entries) {
                     val pool = pools[cat.ordinal]
                     val k1 = if (cat.isPhysical) k1Physical else k1Theoretical
-                    pool.propagateInPlace(k1, k2Scaled, PdModel.KE, dtMins)
+                    pool.propagateInPlace(k1, k1, PdModel.KE, dtMins)
                 }
             }
             lastTime = dose.timestamp
@@ -512,60 +511,41 @@ class TsunamiIobEngineImpl @Inject constructor(
     )
 
     /**
-     * Three linked first-order compartments replacing the earlier independently-fit Weibull
-     * PD/PK curves: D (SC depot) -> X (transit) -> A (active, reported as activity = KE*A).
-     * IOB(t) = D(t) + X(t) + A(t): mass not yet through the final elimination step.
+     * Three linked first-order compartments: D (SC depot) -> X (transit) -> A (active, reported as
+     * activity = KE*A). IOB(t) = D(t) + X(t) + A(t): mass not yet through the final step.
      *
-     * Only [K1_B0]/[K1_B1] (the depot's own absorption rate, D -> X) depend on how much mass
-     * is currently shared-pool crowded; [K2] (transit) and [KE] (elimination) are fixed
-     * constants, never touched by crowding. This is deliberate, not just simpler: since
-     * activity = KE*A and KE never changes, activity is exactly continuous through every dose
-     * event, for every category, with no exception - a dose can only ever slow down mass that
-     * hasn't left the depot yet, never mass that has already moved on.
+     * Depot and transit share ONE crowding-dependent rate, K(M) = K1_B0 * M^K1_B1, where M is the
+     * live depot mass of the shared pool (D only - see physicalGroupMass). [KE] is fixed and never
+     * touched by crowding, so activity = KE*A stays exactly continuous through every dose event: a
+     * new dose slows mass still in the depot or transit, never mass already in the active stage.
      *
-     * [KE] is not a free-fit parameter: it's fixed at insulin lispro's real serum elimination
-     * half-life (44 min -> ke = ln(2)/44). [K2] and [K1_B0]/[K1_B1] were originally calibrated by
-     * nonlinear least-squares directly against the digitized EPAR GIR clamp curves (Lyumjev/LY900014,
-     * 7/15/30U) - not against the earlier Weibull fit's own curve, which was itself only an
-     * intermediate approximation of that same data. A 2-compartment (D -> A) version was
-     * checked first and is infeasible outright: the tallest peak it can produce for a matched
-     * peak time falls well short of the target at every calibration dose, regardless of rate
-     * constants. The 3-compartment version reaches R^2 ~= 0.956 combined across all three doses
-     * (0.982/0.973/0.940 at 7U/15U/30U respectively) with K2 and KE fixed and only K1 varying -
-     * see `traffic_jam_comparison.svg` for what that gap actually looks like at each dose.
+     * Why depot AND transit, with a fitted KE: in the previous fit only the depot (D -> X) was
+     * crowded, while transit (K2 = 0.031796) and the active stage (KE pinned to lispro's 44 min
+     * serum half-life) were fixed. Those two fixed stages alone put a ~95 min floor under the mean
+     * action time of every dose, against ~70 min for TsunamiMods' curve at 0.3U, so small SMBs
+     * were slow however fast the depot was - and the depot, the only stage crowding could act on,
+     * held just ~7% of a 0.3U dose's mean action time. Crowding mass drained within minutes, so a
+     * cascade barely jammed. Sharing the crowded rate across depot and transit and fitting KE moves
+     * most of the action time into the crowded stages (~55% at 0.3U, ~76% at 7U).
      *
-     * WIDENED REFIT (current, in effect below): the EPAR-only fit above was calibrated purely on
-     * isolated single doses at 7/15/30U - there is no real digitized data anywhere below 7U, yet
-     * real AndroidAPS usage is dominated by small SMBs (mostly <2U), far outside that range.
-     * Validating the EPAR-only fit against the other Traffic Jam engine's (TsunamiMods') own real
-     * 12-dose SMB cascade (individual doses 0.1-1.3U) showed it deviating from that cascade by up
-     * to 7.0% of total dose. Refitting K2/K1_B0/K1_B1 against TsunamiMods' own PD curve at a
-     * widened dose set (1/3.5/7/15/30U - i.e. adding two doses inside the real SMB range, matched
-     * against TsunamiMods' independently-derived curve there since no EPAR data exists for them)
-     * cuts that same cascade deviation to 3.8%. The cost: worse tail accuracy at 15-30U (activity
-     * RMSE vs the real EPAR curves worsens ~17-25% there) relative to the single-large-dose
-     * accuracy the EPAR-only fit has. Since real usage is small-SMB-dominated, the widened fit is
-     * the one in effect; the original EPAR-only values are kept commented below for reference and
-     * easy rollback.
+     * Fit: nonlinear least-squares of the isolated single-dose activity curve against TsunamiMods'
+     * EPAR-fitted PD curve at 0.2/0.5/1/2/3.5/7/15/30U (weights 0.7/0.5 at 15/30U). R^2 per dose:
+     * 0.98 at 0.1U, 0.99 at 0.3-3.5U, 0.986 at 7U, 0.97 at 30U (previous fit: 0.75 at 0.1U, 0.88
+     * at 0.3U). Replaying the engine with 0.5 U/h basal in the pool, a 0.3U SMB is 90% absorbed at
+     * ~148 min (was ~195; TsunamiMods isolated ~122), and a 12-SMB/7.85U cascade gains up to 8.6%
+     * of its dose in extra IOB from crowding (was 2.8%). Basal shares the crowded pool, so at
+     * higher basal rates the depot holds more mass and SMBs on top run slower (1 U/h: ~173 min).
      *
      * Fitted constants (dose in U, rates in 1/min):
-     *  - KE    = ln(2)/44 = 0.015753/min (fixed; real lispro serum elimination half-life)
-     *  - K2    = 0.031796/min (widened refit, in effect; was 0.019023/min, EPAR 7/15/30U only)
-     *  - K1(M) = K1_B0 * M^K1_B1, K1_B0=0.069092, K1_B1=-0.596593 (widened refit, in effect;
-     *            was K1_B0=0.110235, K1_B1=-0.644422, EPAR 7/15/30U only) - the only
-     *            crowding-dependent rate; M is the live shared-pool mass, generalizing the
-     *            single-dose amount used during calibration
+     *  - K(M) = K1_B0 * M^K1_B1, K1_B0 = 0.032716, K1_B1 = -0.308082 (depot and transit)
+     *  - KE   = 0.029126 (t1/2 ~23.8 min; the action stage, no longer pinned to serum half-life)
+     * Previous fit: K1_B0 = 0.069092, K1_B1 = -0.596593 (depot only), K2 = 0.031796, KE = ln(2)/44.
      */
     private object PdModel {
-        const val KE = 0.0157533 // ln(2)/44
+        const val KE = 0.029126 // fitted; t1/2 ~23.8 min
 
-        const val K2 = 0.031796 // widened refit (1/3.5/7/15/30U vs TsunamiMods) - in effect
-        // const val K2 = 0.019023 // official: EPAR-only fit (7/15/30U), kept for rollback
-
-        const val K1_B0 = 0.069092 // widened refit - in effect
-        const val K1_B1 = -0.596593 // widened refit - in effect
-        // const val K1_B0 = 0.110235 // official: EPAR-only fit, kept for rollback
-        // const val K1_B1 = -0.644422 // official: EPAR-only fit, kept for rollback
+        const val K1_B0 = 0.032716
+        const val K1_B1 = -0.308082
 
         private const val RATE_EPS = 1e-7
 
@@ -575,9 +555,9 @@ class TsunamiIobEngineImpl @Inject constructor(
          *   dD/dt = -k1*D ; dX/dt = k1*D - k2*X ; dA/dt = k2*X - ke*A
          * with no discretization error for any dt. Built from two primitives ([chainStage2] and
          * [threeStageA]) so every place a rate-difference would divide by (near) zero is routed
-         * through an explicit, numerically-safe degenerate branch instead - crowding continuously
-         * varies K1, so K1 crossing arbitrarily close to the fixed K2 or KE is an expected,
-         * not exceptional, case.
+         * through an explicit, numerically-safe degenerate branch instead - callers pass the same
+         * crowded rate for k1 and k2, and crowding continuously varies it, so it crossing
+         * arbitrarily close to the fixed KE is an expected, not exceptional, case.
          */
         fun propagate(d0: Double, x0: Double, a0: Double, k1: Double, k2: Double, ke: Double, dt: Double): Triple<Double, Double, Double> {
             val d = d0 * exp(-k1 * dt)
@@ -589,12 +569,12 @@ class TsunamiIobEngineImpl @Inject constructor(
         /**
          * Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single
          * dose, at the given per-patient absorption [speedFactor] (DoubleKey.InsulinTrafficJamSpeedMultiplier,
-         * applied directly - see that key's doc comment). Only k1/k2 scale by it, never ke.
+         * applied directly - see that key's doc comment). Only the shared depot/transit rate scales by it, never ke.
          */
         fun isolatedIobFraction(tElapsed: Double, amount: Double, speedFactor: Double): Double {
             if (amount <= 0.0) return 0.0
             val k1 = speedFactor * K1_B0 * amount.pow(K1_B1)
-            val (d, x, a) = propagate(amount, 0.0, 0.0, k1, speedFactor * K2, KE, tElapsed)
+            val (d, x, a) = propagate(amount, 0.0, 0.0, k1, k1, KE, tElapsed)
             return (d + x + a) / amount
         }
 
@@ -617,9 +597,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
             return when {
                 k1k2 && k1ke -> d0 * k1 * k1 * t * t / 2.0 * exp(-k1 * t) // all three rates equal (Erlang-3)
-                k1k2         -> { // k1 == k2 != ke
+                k1k2         -> { // k1 == k2 != ke - the normal case, since depot and transit share one rate
                     val q = ke - k1
-                    d0 * k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
+                    // Series near q*t -> 0: the closed form cancels catastrophically there, and the
+                    // shared crowded rate crosses ke at a common pool mass (~1.46U at speed 1.0).
+                    if (abs(q * t) < 1e-3) d0 * k1 * k1 * exp(-k1 * t) * t * t * (0.5 - q * t / 6.0 + q * q * t * t / 24.0)
+                    else d0 * k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
                 }
 
                 k1ke         -> { // k1 == ke != k2

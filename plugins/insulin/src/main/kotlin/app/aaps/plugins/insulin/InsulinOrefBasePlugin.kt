@@ -195,21 +195,18 @@ abstract class InsulinOrefBasePlugin(
      * dose size wherever this path was actually reached.
      */
     fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
-        val ke = 0.0157533 // ln(2)/44 - real lispro serum elimination half-life, fixed - NEVER scaled by speed
-        // widened refit (1/3.5/7/15/30U vs TsunamiMods), in effect - see PdModel's doc comment in
-        // TsunamiIobEngineImpl for the full rationale (small-SMB cascade match vs single-dose accuracy)
-        val k2Base = 0.031796 // transit-stage rate, fixed per-dose, scaled below by the user's own speed
-        // val k2Base = 0.019023 // official: EPAR-only fit (7/15/30U), kept for rollback
-        val k1B0 = 0.069092
-        val k1B1 = -0.596593
-        // val k1B0 = 0.110235; val k1B1 = -0.644422 // official: EPAR-only fit, kept for rollback
+        // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
+        val ke = 0.029126 // active-stage clearance, fitted - NEVER scaled by speed
+        val k1B0 = 0.032716
+        val k1B1 = -0.308082
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
-        // directly): only the depot/transit rates (k1, k2) scale, never ke - see that key's doc
+        // directly): only the crowded depot/transit rate scales, never ke - see that key's doc
         // comment for why.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
-        val k2 = speedFactor * k2Base
-        val k1 = speedFactor * k1B0 * bolus.amount.pow(k1B1) // crowding-dependent absorption rate (unpooled: driven by this dose's own amount)
+        // Depot and transit share one crowding-dependent rate (unpooled: driven by this dose's own amount).
+        val k1 = speedFactor * k1B0 * bolus.amount.pow(k1B1)
+        val k2 = k1
         val result = Iob()
 
         val d = exp(-k1 * t)
@@ -246,7 +243,10 @@ abstract class InsulinOrefBasePlugin(
             k1k2 && k1ke -> k1 * k1 * t * t / 2.0 * exp(-k1 * t)
             k1k2         -> {
                 val q = ke - k1
-                k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
+                // Series near q*t -> 0: the closed form cancels catastrophically there, and the
+                // shared crowded rate crosses ke at a common pool mass.
+                if (abs(q * t) < 1e-3) k1 * k1 * exp(-k1 * t) * t * t * (0.5 - q * t / 6.0 + q * q * t * t / 24.0)
+                else k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
             }
 
             k1ke         -> {

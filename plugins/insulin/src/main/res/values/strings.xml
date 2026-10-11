@@ -25,6 +25,6 @@
     <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 8-hour analytic depot pool to calculate dynamic Subcutaneous accumulation.</string>
     <string name="insulin_traffic_jam_speed_settings">Absorption Speed</string>
     <string name="insulin_traffic_jam_speed_multiplier_title">Absorption Speed [x]</string>
-    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard your insulin absorbs from the injection site. 2 means peak activity arrives about twice as fast; 0.5 means about half as fast. This does not change the fixed 44-minute serum elimination half-life - only how quickly insulin leaves the injection site.</string>
+    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard your insulin absorbs from the injection site. 2 means peak activity arrives about twice as fast; 0.5 means about half as fast. This does not change the fixed clearance of the active stage - only how quickly insulin leaves the injection site.</string>
 
 </resources>
