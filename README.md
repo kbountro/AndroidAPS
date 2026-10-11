@@ -17,9 +17,10 @@ whatever's left across all three stages; reported activity is how fast the activ
 being cleared.
 
 The depot and transit stages share one drain rate, and the more insulin sits in the depot, the
-slower that rate gets: a jam slows both. The active stage clears at a fixed speed that never
-changes. A new dose can only ever slow down insulin still in the depot or transit. It never
-affects insulin that has reached the active stage, so reported activity stays continuous.
+slower that rate gets: a jam slows both. The active stage clears at a constant rate that
+crowding never changes (half-life 40.7 minutes, fitted to the clamp data). A new dose can only
+ever slow down insulin still in the depot or transit. It never affects insulin that has reached
+the active stage, so reported activity stays continuous.
 
 Profile basal (the true baseline, evaluated as if nothing else was happening) is tracked independently as usual, but following the same mechanism.
 
@@ -32,19 +33,26 @@ TsunamiMods' curve at 0.3U, so small SMBs acted too slowly however fast the depo
 depot, the only stage crowding could act on, held just ~7% of a 0.3U SMB's action time, so the
 crowding mass drained within minutes and a cascade of SMBs barely jammed.
 
-The current fit crowds depot and transit together and fits the active stage's clearance
-instead of pinning it (half-life 23.8 minutes). The isolated single-dose curve is fit by
-nonlinear least-squares against TsunamiMods' EPAR-fitted curve at 0.2/0.5/1/2/3.5/7/15/30U.
-R^2 against that curve over 0-600 minutes is 0.983 at 0.1U, 0.990-0.991 from 0.3U to 3.5U,
-0.988 at 7U and 0.978 at 30U (the previous fit had 0.765 at 0.1U and 0.891 at 0.3U). Most of
-each dose's mean action time now sits in the crowded stages (55% at 0.3U, 76% at 7U).
+The current model crowds depot and transit together and fits the active stage's clearance
+along with the two crowding constants, by unweighted nonlinear least-squares on the digitized
+EPAR clamp curves (Lyumjev 7/15/30U, 832 points, each normalized to unit area over 0-600
+minutes). R^2 is 0.982 / 0.976 / 0.940 per dose and 0.970 pooled (previous fit: 0.980 / 0.965 /
+0.935, pooled 0.964). The fitted half-life of the active stage is 40.7 minutes. With the two
+crowding constants refitted at each fixed half-life, the residual sum of squares stays within 1%
+of its minimum from 30.9 to 47.7 minutes; at lispro's 44-minute serum half-life it is 0.18%
+higher. The crowded stages hold 33.5% of the mean action time at 0.3U and 59.5% at 7U.
+
+EPAR has no curves below 7U. Against TsunamiMods' curve there, which is an extrapolation of its
+own 7-30U fit, R^2 over 0-600 minutes is 0.922 at 0.1U, 0.961 at 0.3U and 0.982 at 1U (previous
+fit: 0.765, 0.891 and 0.969).
 
 Replaying the engine with 0.5 U/h basal running, the cumulative activity added by a 0.3U SMB
-reaches 90% of the dose after 148 minutes (previously 195; TsunamiMods' isolated curve: 122).
+reaches 90% of the dose after 172 minutes (previously 195; TsunamiMods' isolated curve: 122).
 For a 12-SMB, 7.85U cascade, the IOB exceeds the sum of the SMBs' separate IOB contributions
-by up to 10.8% of the cascade total (previously 2.2%). Basal shares the crowded pool, so at
+by up to 7.3% of the cascade total (previously 2.2%). Basal shares the crowded pool, so at
 higher basal rates the depot holds more insulin and an SMB on top acts more slowly: at 1 U/h,
-the 0.3U SMB takes 173 minutes to reach 90%, and the cascade's excess is 8.6% (previously 2.8%).
+the 0.3U SMB takes 185 minutes to reach 90% (previously 197), and the cascade's excess is 6.3%
+(previously 2.8%).
 
 The plots below were generated with the previous constants and have not been regenerated yet.
 
@@ -82,7 +90,7 @@ time-warp) against the plain Tsunami model as a reference: this fork reaches a p
 0.654U (9.6% of the total dose delivered) around 3.3h into the sequence, versus 0.557U
 (8.1%) for TsunamiMods over the same replay. Both forks report meaningfully more IOB than
 plain Tsunami would during a run of stacked SMBs; this fork's gap is still the larger of
-the two, though the widened refit above brought it much closer to TsunamiMods' own
+the two, though the earlier widened refit brought it much closer to TsunamiMods' own
 (previously 13.7% before that refit). Neither gap should be closed by preemptively raising
 basal — it reflects the crowding model doing its job, not an error — but it's worth
 knowing which fork is the gentler transition if switching between them.

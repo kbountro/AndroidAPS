@@ -525,29 +525,35 @@ class TsunamiIobEngineImpl @Inject constructor(
      * action time of every dose, against ~70 min for TsunamiMods' curve at 0.3U, so small SMBs
      * were slow however fast the depot was - and the depot, the only stage crowding could act on,
      * held just ~7% of a 0.3U dose's mean action time. Crowding mass drained within minutes, so a
-     * cascade barely jammed. Sharing the crowded rate across depot and transit and fitting KE moves
-     * most of the action time into the crowded stages (~55% at 0.3U, ~76% at 7U).
+     * cascade barely jammed. With the crowded rate shared by depot and transit, the crowded stages
+     * hold 33.5% of the mean action time at 0.3U and 59.5% at 7U.
      *
-     * Fit: nonlinear least-squares of the isolated single-dose activity curve against TsunamiMods'
-     * EPAR-fitted PD curve at 0.2/0.5/1/2/3.5/7/15/30U (weights 0.7/0.5 at 15/30U). R^2 against
-     * that curve over 0-600 min: 0.983 at 0.1U, 0.990-0.991 at 0.3-3.5U, 0.988 at 7U, 0.978 at
-     * 30U (previous fit: 0.765 at 0.1U, 0.891 at 0.3U). Engine replay with 0.5 U/h basal in the
-     * pool: the cumulative activity added by a 0.3U SMB reaches 90% of the dose at 148 min (was
-     * 195; TsunamiMods isolated: 122), and a 12-SMB/7.85U cascade's IOB exceeds the sum of its
-     * SMBs' separate IOB contributions by up to 10.8% of the cascade total (was 2.2%). Basal
-     * shares the crowded pool, so at higher basal rates the depot holds more mass and SMBs on top
-     * act more slowly (at 1 U/h: 173 min, and 8.6% for the cascade).
+     * Fit: unweighted nonlinear least-squares of the isolated single-dose activity curve, with
+     * K1_B0, K1_B1 and KE all free, against the digitized EPAR GIR clamp curves (Lyumjev/LY900014,
+     * 7/15/30U, 832 points, each normalized to unit area over 0-600 min). R^2 per dose 0.982 /
+     * 0.976 / 0.940, pooled over all points 0.970 (previous fit: 0.980 / 0.965 / 0.935, pooled
+     * 0.964). The fitted KE half-life is 40.7 min. With K1_B0 and K1_B1 refitted at each fixed KE,
+     * the residual sum of squares stays within 1% of its minimum for half-lives of 30.9-47.7 min,
+     * and is 0.18% above it at lispro's 44 min serum half-life. EPAR has no curves below 7U.
+     * Against TsunamiMods' curve there, an extrapolation of its own 7-30U fit, R^2 over 0-600 min
+     * is 0.922 at 0.1U, 0.961 at 0.3U and 0.982 at 1U (previous fit: 0.765, 0.891 and 0.969).
+     * Engine replay with 0.5 U/h basal in the pool: the cumulative activity added by a 0.3U SMB
+     * reaches 90% of the dose at 172 min (was 195; TsunamiMods isolated: 122), and a 12-SMB/7.85U
+     * cascade's IOB exceeds the sum of its SMBs' separate IOB contributions by up to 7.3% of the
+     * cascade total (was 2.2%). Basal shares the crowded pool, so at higher basal rates the depot
+     * holds more mass and SMBs on top act more slowly (at 1 U/h: 185 min, was 197, and 6.3% for
+     * the cascade, was 2.8%).
      *
      * Fitted constants (dose in U, rates in 1/min):
-     *  - K(M) = K1_B0 * M^K1_B1, K1_B0 = 0.032716, K1_B1 = -0.308082 (depot and transit)
-     *  - KE   = 0.029126 (t1/2 ~23.8 min; the action stage, no longer pinned to serum half-life)
+     *  - K(M) = K1_B0 * M^K1_B1, K1_B0 = 0.044874, K1_B1 = -0.339993 (depot and transit)
+     *  - KE   = 0.0170232 (t1/2 40.7 min; the active stage, no longer pinned to serum half-life)
      * Previous fit: K1_B0 = 0.069092, K1_B1 = -0.596593 (depot only), K2 = 0.031796, KE = ln(2)/44.
      */
     private object PdModel {
-        const val KE = 0.029126 // fitted; t1/2 ~23.8 min
+        const val KE = 0.0170232 // fitted; t1/2 40.7 min
 
-        const val K1_B0 = 0.032716
-        const val K1_B1 = -0.308082
+        const val K1_B0 = 0.044874
+        const val K1_B1 = -0.339993
 
         private const val RATE_EPS = 1e-7
 
@@ -602,7 +608,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 k1k2         -> { // k1 == k2 != ke - the normal case, since depot and transit share one rate
                     val q = ke - k1
                     // Series near q*t -> 0: the closed form cancels catastrophically there, and the
-                    // shared crowded rate crosses ke at a common pool mass (~1.46U at speed 1.0).
+                    // shared crowded rate crosses ke at a common pool mass (~17U at speed 1.0).
                     if (abs(q * t) < 1e-3) d0 * k1 * k1 * exp(-k1 * t) * t * t * (0.5 - q * t / 6.0 + q * q * t * t / 24.0)
                     else d0 * k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
                 }

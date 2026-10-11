@@ -68,7 +68,7 @@ enum class DoubleKey(
     // duration number would actually be dose-independent or exact. 2.0 means absorption - and
     // therefore roughly peak activity timing - is twice as fast as standard; 0.5 means half as
     // fast. Elimination (KE) is deliberately never scaled by this - see PdModel in
-    // TsunamiIobEngineImpl for why. Default 1.0 reproduces stock (unscaled widened-refit) behavior.
+    // TsunamiIobEngineImpl for why. Default 1.0 reproduces the unscaled fitted constants.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
 
 }
