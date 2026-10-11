@@ -33,17 +33,18 @@ depot, the only stage crowding could act on, held just ~7% of a 0.3U SMB's actio
 crowding mass drained within minutes and a cascade of SMBs barely jammed.
 
 The current fit crowds depot and transit together and fits the active stage's clearance
-instead of pinning it (half-life ~24 minutes). The isolated single-dose curve is fit by
-nonlinear least-squares against TsunamiMods' EPAR-fitted curve at 0.2/0.5/1/2/3.5/7/15/30U:
-R^2 0.98 at 0.1U, 0.99 from 0.3U to 3.5U, 0.986 at 7U and 0.97 at 30U (the previous fit had
-0.75 at 0.1U and 0.88 at 0.3U). Most of each dose's action time now sits in the crowded stages
-(~55% at 0.3U, ~76% at 7U).
+instead of pinning it (half-life 23.8 minutes). The isolated single-dose curve is fit by
+nonlinear least-squares against TsunamiMods' EPAR-fitted curve at 0.2/0.5/1/2/3.5/7/15/30U.
+R^2 against that curve over 0-600 minutes is 0.983 at 0.1U, 0.990-0.991 from 0.3U to 3.5U,
+0.988 at 7U and 0.978 at 30U (the previous fit had 0.765 at 0.1U and 0.891 at 0.3U). Most of
+each dose's mean action time now sits in the crowded stages (55% at 0.3U, 76% at 7U).
 
-Replaying the engine with 0.5 U/h basal running, a 0.3U SMB is 90% absorbed after ~148 minutes
-(previously ~195; TsunamiMods' isolated curve ~122), and a 12-SMB, 7.85U cascade carries up to
-8.6% of its dose as extra IOB from crowding (previously 2.8%). Basal shares the crowded pool, so
-at higher basal rates the depot holds more insulin and an SMB on top absorbs more slowly (at
-1 U/h, ~173 minutes to 90%).
+Replaying the engine with 0.5 U/h basal running, the cumulative activity added by a 0.3U SMB
+reaches 90% of the dose after 148 minutes (previously 195; TsunamiMods' isolated curve: 122).
+For a 12-SMB, 7.85U cascade, the IOB exceeds the sum of the SMBs' separate IOB contributions
+by up to 10.8% of the cascade total (previously 2.2%). Basal shares the crowded pool, so at
+higher basal rates the depot holds more insulin and an SMB on top acts more slowly: at 1 U/h,
+the 0.3U SMB takes 173 minutes to reach 90%, and the cascade's excess is 8.6% (previously 2.8%).
 
 The plots below were generated with the previous constants and have not been regenerated yet.
 

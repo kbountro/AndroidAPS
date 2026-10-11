@@ -529,12 +529,14 @@ class TsunamiIobEngineImpl @Inject constructor(
      * most of the action time into the crowded stages (~55% at 0.3U, ~76% at 7U).
      *
      * Fit: nonlinear least-squares of the isolated single-dose activity curve against TsunamiMods'
-     * EPAR-fitted PD curve at 0.2/0.5/1/2/3.5/7/15/30U (weights 0.7/0.5 at 15/30U). R^2 per dose:
-     * 0.98 at 0.1U, 0.99 at 0.3-3.5U, 0.986 at 7U, 0.97 at 30U (previous fit: 0.75 at 0.1U, 0.88
-     * at 0.3U). Replaying the engine with 0.5 U/h basal in the pool, a 0.3U SMB is 90% absorbed at
-     * ~148 min (was ~195; TsunamiMods isolated ~122), and a 12-SMB/7.85U cascade gains up to 8.6%
-     * of its dose in extra IOB from crowding (was 2.8%). Basal shares the crowded pool, so at
-     * higher basal rates the depot holds more mass and SMBs on top run slower (1 U/h: ~173 min).
+     * EPAR-fitted PD curve at 0.2/0.5/1/2/3.5/7/15/30U (weights 0.7/0.5 at 15/30U). R^2 against
+     * that curve over 0-600 min: 0.983 at 0.1U, 0.990-0.991 at 0.3-3.5U, 0.988 at 7U, 0.978 at
+     * 30U (previous fit: 0.765 at 0.1U, 0.891 at 0.3U). Engine replay with 0.5 U/h basal in the
+     * pool: the cumulative activity added by a 0.3U SMB reaches 90% of the dose at 148 min (was
+     * 195; TsunamiMods isolated: 122), and a 12-SMB/7.85U cascade's IOB exceeds the sum of its
+     * SMBs' separate IOB contributions by up to 10.8% of the cascade total (was 2.2%). Basal
+     * shares the crowded pool, so at higher basal rates the depot holds more mass and SMBs on top
+     * act more slowly (at 1 U/h: 173 min, and 8.6% for the cascade).
      *
      * Fitted constants (dose in U, rates in 1/min):
      *  - K(M) = K1_B0 * M^K1_B1, K1_B0 = 0.032716, K1_B1 = -0.308082 (depot and transit)
