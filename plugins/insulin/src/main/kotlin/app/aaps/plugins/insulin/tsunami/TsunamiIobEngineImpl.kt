@@ -526,62 +526,64 @@ class TsunamiIobEngineImpl @Inject constructor(
      * however fast the depot was - and the depot, the only stage crowding could act on, held just
      * ~7% of a 0.3U dose's mean action time. Crowding mass drained within minutes, so a cascade
      * barely jammed. With the crowded rate shared by depot and transit, the crowded stages hold
-     * 55.6% of the mean action time at 0.3U and 76.7% at 7U.
+     * 57.8% of the mean action time at 0.3U and 78.0% at 7U.
      *
      * Why KE is fitted to small doses as well as to EPAR: mass leaves the active stage at rate KE
      * whatever the dose, so no dose reaches 50% of its cumulative activity before ln(2)/KE or 90%
      * before ln(10)/KE. EPAR has no curves below 7U. Fitted to the raw EPAR curves alone with the
-     * objective below, KE's half-life is 38.2 min (K1_B0 0.042893, K1_B1 -0.331891) and an isolated
-     * 0.3U dose reaches 90% at 164 min, against 122 min for TsunamiMods' curve. (The constants
+     * objective below, KE's half-life is 34.2 min (K1_B0 0.039785, K1_B1 -0.323317) and an isolated
+     * 0.3U dose reaches 90% at 155 min, against 122 min for TsunamiMods' curve. (The constants
      * these replace, "the raw-EPAR fit" below, were fitted by unweighted least squares to the EPAR
      * activity curves alone: half-life 40.7 min, 0.3U 90% at 169 min.) So the small-dose target is
      * TsunamiMods' curve, which is an extrapolation of TsunamiMods' own fit to the same 7-30U EPAR
-     * data, not a measurement. With those curves in the fit, KE's half-life is 23.2 min.
+     * data, not a measurement. With those curves in the fit, KE's half-life is 21.9 min.
      *
      * Fit: K1_B0, K1_B1 and KE free, with the objective TsunamiMods' Weibull constants were fitted
-     * with: activity and IOB together, each normalized over 0-480 min. Each target activity curve
-     * is renormalized to unit area over 0-480 min and each target IOB curve is 1 minus its
-     * cumulative integral (1 at 0, 0 at 480 min). The model's isolated single-dose activity a(t)
-     * and IOB S(t) - S(480) are compared with them over 0-480 min, and each target curve's squared
-     * errors are divided by its total sum of squares, so the objective is the sum over the curves
-     * of (1 - R^2). Targets: the digitized EPAR GIR clamp curves (Lyumjev/LY900014, 7/15/30U,
-     * points up to 480 min) and TsunamiMods' curves at 0.2/0.5/1/2/3.5U (1-min grid), 16 curves in
-     * all. TsunamiMods' Weibull form fitted to the EPAR curves alone this way gives a0 70.058 min,
-     * a1 0.2172, p 1.9064, within 1.8% of TsunamiMods' constants. With K1_B0 and K1_B1 refitted at
-     * each fixed KE, the objective stays within 1% of its minimum for half-lives of 20.7-25.7 min.
-     * With the small-dose set changed to 0.5-3.5U or 0.2-5U, or with the EPAR curves together
-     * weighted as much as the small-dose curves together, the fitted half-life is 23.2-26.8 min
-     * over the six combinations. On the EPAR curves alone, the objective is 2.59 times that of the
-     * Weibull form fitted the same way (EPAR-only fit 2.43, raw-EPAR fit 2.44). Against the EPAR
-     * activity curves normalized over 0-600 min: R^2 per dose 0.983 / 0.972 / 0.938, pooled over
-     * all points 0.968 (raw-EPAR fit: 0.982 / 0.976 / 0.940, pooled 0.970), residual sum of squares
-     * 5.4% above the raw-EPAR fit's. Against TsunamiMods' activity curve, R^2 over 0-600 min is
-     * 0.985 at 0.1U and 0.991 at 0.3U (neither dose is in the fit) and 0.988-0.991 at the five
-     * fitted doses (raw-EPAR fit: 0.922 at 0.1U, 0.961 at 0.3U, 0.982 at 1U). Isolated dose,
-     * minutes until its cumulative activity reaches 50% / 90% of the dose: 0.3U 67 / 135 (raw-EPAR
-     * fit 73 / 169; TsunamiMods 65 / 122), 1U 84 / 167 (88 / 191; 84 / 158), 3U 105 / 210
-     * (108 / 222; 106 / 200). For an isolated dose this structure's 90% time is at least 1.99 times
-     * its 50% time (the minimum, at K(M) = KE), against 1.88 for TsunamiMods' curve, so the 90%
-     * times cannot match TsunamiMods' while the 50% times do.
+     * with: activity and IOB together, on curves truncated at 480 min. Every curve, target and
+     * model alike, is cut at 480 min and normalized over 0-480 min: activity is divided by its
+     * integral over 0-480 min, and IOB is 1 minus the cumulative activity divided by its value at
+     * 480 min (1 at 0, 0 at 480 min). For the model's isolated single-dose activity a(t) and IOB
+     * fraction S(t), that is a(t) / (1 - S(480)) and (S(t) - S(480)) / (1 - S(480)). Each target
+     * curve's squared errors are divided by its total sum of squares, so the objective is the sum
+     * over the curves of (1 - R^2), all over 0-480 min. Targets: the digitized EPAR GIR clamp
+     * curves (Lyumjev/LY900014, 7/15/30U, points up to 480 min) and TsunamiMods' curves at
+     * 0.2/0.5/1/2/3.5U (1-min grid), 16 curves in all. TsunamiMods' Weibull form fitted to the EPAR
+     * curves alone this way gives a0 69.944 min, a1 0.2177, p 1.9017, within 2.0% of TsunamiMods'
+     * constants. With K1_B0 and K1_B1 refitted at each fixed KE, the objective stays within 1% of
+     * its minimum for half-lives of 19.4-24.6 min. With the small-dose set changed to 0.5-3.5U or
+     * 0.2-5U, or with the EPAR curves together weighted as much as the small-dose curves together,
+     * the fitted half-life is 21.9-25.1 min over the six combinations. On the EPAR curves alone,
+     * the objective is 2.55 times that of the Weibull form fitted the same way (EPAR-only fit 2.47,
+     * raw-EPAR fit 2.48). R^2 on the truncated curves over 0-480 min: EPAR activity
+     * 0.980 / 0.964 / 0.917 per dose and 0.961 pooled over all points (raw-EPAR fit:
+     * 0.980 / 0.969 / 0.915, pooled 0.962), with a residual sum of squares 2.4% above the raw-EPAR
+     * fit's; EPAR IOB 0.999 / 0.998 / 0.993. Against TsunamiMods' activity curve, R^2 is 0.986 at
+     * 0.1U and 0.991 at 0.3U (neither dose is in the fit) and 0.986-0.991 at the five fitted doses
+     * (raw-EPAR fit: 0.918 at 0.1U, 0.958 at 0.3U, 0.981 at 1U). Isolated dose, minutes until its
+     * cumulative activity reaches 50% / 90% of the dose (not truncated, as this engine computes
+     * it): 0.3U 66 / 134 (raw-EPAR fit 73 / 169; TsunamiMods 65 / 122), 1U 84 / 167 (88 / 191;
+     * 84 / 158), 3U 105 / 211 (108 / 222; 106 / 200). For an isolated dose this structure's 90%
+     * time is at least 1.99 times its 50% time (the minimum, at K(M) = KE), against 1.88 for
+     * TsunamiMods' curve, so the 90% times cannot match TsunamiMods' while the 50% times do.
      * Engine replay with 0.5 U/h basal in the pool: the cumulative activity added by a 0.3U SMB
      * reaches 90% of the dose at 146 min (raw-EPAR fit 172; depot-only model 195), and a
      * 12-SMB/7.85U cascade's IOB exceeds the sum of its SMBs' separate IOB contributions by up to
-     * 10.6% of the cascade total (7.3%; 2.2%). Basal shares the crowded pool, so at higher basal
-     * rates the depot holds more mass and SMBs on top act more slowly (at 1 U/h: 170 min and 8.4%;
+     * 10.9% of the cascade total (7.3%; 2.2%). Basal shares the crowded pool, so at higher basal
+     * rates the depot holds more mass and SMBs on top act more slowly (at 1 U/h: 171 min and 8.6%;
      * raw-EPAR fit 185 min and 6.3%; depot-only model 197 min and 2.8%).
      *
      * Fitted constants (dose in U, rates in 1/min):
-     *  - K(M) = K1_B0 * M^K1_B1, K1_B0 = 0.032979, K1_B1 = -0.306177 (depot and transit)
-     *  - KE   = 0.0299001 (t1/2 23.2 min; the active stage, no longer pinned to serum half-life)
+     *  - K(M) = K1_B0 * M^K1_B1, K1_B0 = 0.032072, K1_B1 = -0.303093 (depot and transit)
+     *  - KE   = 0.0315818 (t1/2 21.9 min; the active stage, no longer pinned to serum half-life)
      * Raw-EPAR fit: K1_B0 = 0.044874, K1_B1 = -0.339993, KE = 0.0170232 (t1/2 40.7 min).
      * Depot-only model: K1_B0 = 0.069092, K1_B1 = -0.596593 (depot only), K2 = 0.031796,
      * KE = ln(2)/44.
      */
     private object PdModel {
-        const val KE = 0.0299001 // fitted; t1/2 23.2 min
+        const val KE = 0.0315818 // fitted; t1/2 21.9 min
 
-        const val K1_B0 = 0.032979
-        const val K1_B1 = -0.306177
+        const val K1_B0 = 0.032072
+        const val K1_B1 = -0.303093
 
         private const val RATE_EPS = 1e-7
 
@@ -636,7 +638,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 k1k2         -> { // k1 == k2 != ke - the normal case, since depot and transit share one rate
                     val q = ke - k1
                     // Series near q*t -> 0: the closed form cancels catastrophically there, and the
-                    // shared crowded rate crosses ke at a common pool mass (~1.4U at speed 1.0).
+                    // shared crowded rate crosses ke at a common pool mass (~1.05U at speed 1.0).
                     if (abs(q * t) < 1e-3) d0 * k1 * k1 * exp(-k1 * t) * t * t * (0.5 - q * t / 6.0 + q * q * t * t / 24.0)
                     else d0 * k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
                 }

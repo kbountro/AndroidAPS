@@ -18,7 +18,7 @@ being cleared.
 
 The depot and transit stages share one drain rate, and the more insulin sits in the depot, the
 slower that rate gets: a jam slows both. The active stage clears at a constant rate that
-crowding never changes (half-life 23.2 minutes, fitted as described below). A new dose can only
+crowding never changes (half-life 21.9 minutes, fitted as described below). A new dose can only
 ever slow down insulin still in the depot or transit. It never affects insulin that has reached
 the active stage, so reported activity stays continuous.
 
@@ -45,46 +45,47 @@ residual sum of squares stays within 1% of its minimum from 30.9 to 47.7 minutes
 activity curves leave the half-life loose.
 
 The constants are now fitted with the objective TsunamiMods' Weibull constants were fitted with:
-activity and IOB together, each normalized over 0-480 minutes. Each target activity curve is
-renormalized to unit area over 0-480 minutes and each target IOB curve is 1 minus its cumulative
-integral (1 at 0 minutes, 0 at 480). The model's isolated single-dose activity and IOB (the IOB
-minus its value at 480 minutes) are compared with them over 0-480 minutes, and each target
+activity and IOB together, on curves truncated at 480 minutes. Every curve, target and model
+alike, is cut at 480 minutes and normalized over 0-480 minutes: activity is divided by its
+integral over 0-480 minutes, and IOB is 1 minus the cumulative activity divided by its value at
+480 minutes (1 at 0 minutes, 0 at 480). For the model's isolated single-dose activity a(t) and
+IOB fraction S(t), that is a(t) / (1 - S(480)) and (S(t) - S(480)) / (1 - S(480)). Each target
 curve's squared errors are divided by its total sum of squares, so the objective is the sum over
-the curves of 1 - R^2. TsunamiMods' Weibull form fitted to the EPAR curves this way gives a0
-70.058 minutes, a1 0.2172, p 1.9064, within 1.8% of TsunamiMods' 70.884 / 0.2134 / 1.9002.
-Fitted to the EPAR curves alone this way, this model's half-life is 38.2 minutes and an isolated
-0.3U dose still takes 164 minutes to reach 90%.
+the curves of 1 - R^2, all over 0-480 minutes. TsunamiMods' Weibull form fitted to the EPAR
+curves this way gives a0 69.944 minutes, a1 0.2177, p 1.9017, within 2.0% of TsunamiMods'
+70.884 / 0.2134 / 1.9002. Fitted to the EPAR curves alone this way, this model's half-life is
+34.2 minutes and an isolated 0.3U dose still takes 155 minutes to reach 90%.
 
 EPAR has no curves below 7U, so the fit also uses TsunamiMods' curves at 0.2, 0.5, 1, 2 and 3.5U
-(1-minute grid) as the small-dose target, normalized the same way. Those curves are an
-extrapolation of TsunamiMods' own fit to the same 7-30U EPAR data, not measurements. With the 16
-curves (activity and IOB at the 3 EPAR doses and the 5 TsunamiMods doses) weighted equally, the
-fitted half-life is 23.2 minutes. With the two crowding constants refitted at each fixed
-half-life, the objective stays within 1% of its minimum from 20.7 to 25.7 minutes. With the
-small-dose set changed to 0.5-3.5U or 0.2-5U, or with the EPAR curves together weighted as much
-as the small-dose curves together, the fitted half-life ranges from 23.2 to 26.8 minutes over
-the six combinations. On the EPAR curves alone the objective is 2.59 times that of TsunamiMods'
-Weibull form fitted the same way (this model fitted to the EPAR curves alone: 2.43; fit to raw
-EPAR activity alone: 2.44).
+(1-minute grid) as the small-dose target, truncated and normalized the same way. Those curves
+are an extrapolation of TsunamiMods' own fit to the same 7-30U EPAR data, not measurements. With
+the 16 curves (activity and IOB at the 3 EPAR doses and the 5 TsunamiMods doses) weighted
+equally, the fitted half-life is 21.9 minutes. With the two crowding constants refitted at each
+fixed half-life, the objective stays within 1% of its minimum from 19.4 to 24.6 minutes. With
+the small-dose set changed to 0.5-3.5U or 0.2-5U, or with the EPAR curves together weighted as
+much as the small-dose curves together, the fitted half-life ranges from 21.9 to 25.1 minutes
+over the six combinations. On the EPAR curves alone the objective is 2.55 times that of
+TsunamiMods' Weibull form fitted the same way (this model fitted to the EPAR curves alone: 2.47;
+fit to raw EPAR activity alone: 2.48).
 
-Against the EPAR activity curves normalized over 0-600 minutes, R^2 is 0.983 / 0.972 / 0.938 per
-dose and 0.968 pooled (fit to raw EPAR activity alone: 0.982 / 0.976 / 0.940, pooled 0.970), and
-the residual sum of squares is 5.4% above that fit's. Against TsunamiMods' activity curve, R^2
-over 0-600 minutes is 0.985 at 0.1U and 0.991 at 0.3U, neither of which is in the fit, and
-0.988-0.991 at the five fitted doses (fit to raw EPAR activity alone: 0.922 at 0.1U, 0.961 at
-0.3U, 0.982 at 1U). The crowded stages hold 55.6% of the mean action time at 0.3U and 76.7% at
-7U.
+R^2 on the truncated curves over 0-480 minutes: against the EPAR activity curves
+0.980 / 0.964 / 0.917 per dose and 0.961 pooled (fit to raw EPAR activity alone:
+0.980 / 0.969 / 0.915, pooled 0.962), with a residual sum of squares 2.4% above that fit's;
+against the EPAR IOB curves 0.999 / 0.998 / 0.993. Against TsunamiMods' activity curve, R^2 is
+0.986 at 0.1U and 0.991 at 0.3U, neither of which is in the fit, and 0.986-0.991 at the five
+fitted doses (fit to raw EPAR activity alone: 0.918 at 0.1U, 0.958 at 0.3U, 0.981 at 1U). The
+crowded stages hold 57.8% of the mean action time at 0.3U and 78.0% at 7U.
 
 Minutes until an isolated dose's cumulative activity reaches 50% / 90% of the dose (no basal,
-nothing else in the system):
+nothing else in the system, not truncated):
 
 | Dose | Current fit | Fit to raw EPAR activity alone | Depot-only version | TsunamiMods |
 |------|-------------|--------------------------------|--------------------|-------------|
-| 0.1U | 55 / 115    | 63 / 158                       | 81 / 192           | 52 / 97     |
-| 0.3U | 67 / 135    | 73 / 169                       | 85 / 195           | 65 / 122    |
+| 0.1U | 55 / 114    | 63 / 158                       | 81 / 192           | 52 / 97     |
+| 0.3U | 66 / 134    | 73 / 169                       | 85 / 195           | 65 / 122    |
 | 1U   | 84 / 167    | 88 / 191                       | 93 / 204           | 84 / 158    |
-| 3U   | 105 / 210   | 108 / 222                      | 107 / 223          | 106 / 200   |
-| 5U   | 118 / 237   | 120 / 243                      | 116 / 239          | 119 / 223   |
+| 3U   | 105 / 211   | 108 / 222                      | 107 / 223          | 106 / 200   |
+| 5U   | 118 / 238   | 120 / 243                      | 116 / 239          | 119 / 223   |
 
 For an isolated dose, this model's 90% time is at least 1.99 times its 50% time (the minimum,
 reached when the crowded rate equals the active stage's), against 1.88 for TsunamiMods' curve.
@@ -93,11 +94,11 @@ So with the 50% times at TsunamiMods' level, the 90% times stay later than Tsuna
 Replaying the engine with 0.5 U/h basal running, the cumulative activity added by a 0.3U SMB
 reaches 90% of the dose after 146 minutes (fit to raw EPAR activity alone: 172; depot-only
 version: 195; TsunamiMods' isolated curve: 122). For a 12-SMB, 7.85U cascade, the IOB exceeds
-the sum of the SMBs' separate IOB contributions by up to 10.6% of the cascade total (7.3%;
-2.2%), and the cascade reaches 50% / 90% of its total activity 22.0 / 21.7 minutes later than
+the sum of the SMBs' separate IOB contributions by up to 10.9% of the cascade total (7.3%;
+2.2%), and the cascade reaches 50% / 90% of its total activity 22.5 / 22.6 minutes later than
 the sum of its SMBs replayed separately (15.8 / 13.3; 4.0 / 2.4). Basal shares the crowded pool,
 so at higher basal rates the depot holds more insulin and an SMB on top acts more slowly: at
-1 U/h, the 0.3U SMB takes 170 minutes to reach 90% (185; 197), and the cascade's excess is 8.4%
+1 U/h, the 0.3U SMB takes 171 minutes to reach 90% (185; 197), and the cascade's excess is 8.6%
 (6.3%; 2.8%).
 
 The plots below were generated with the depot-only version's constants and have not been
