@@ -18,7 +18,7 @@ being cleared.
 
 The depot and transit stages share one drain rate, and the more insulin sits in the depot, the
 slower that rate gets: a jam slows both. The active stage clears at a constant rate that
-crowding never changes (half-life 40.7 minutes, fitted to the clamp data). A new dose can only
+crowding never changes (half-life 23.6 minutes, fitted as described below). A new dose can only
 ever slow down insulin still in the depot or transit. It never affects insulin that has reached
 the active stage, so reported activity stays continuous.
 
@@ -33,28 +33,56 @@ TsunamiMods' curve at 0.3U, so small SMBs acted too slowly however fast the depo
 depot, the only stage crowding could act on, held just ~7% of a 0.3U SMB's action time, so the
 crowding mass drained within minutes and a cascade of SMBs barely jammed.
 
-The current model crowds depot and transit together and fits the active stage's clearance
-along with the two crowding constants, by unweighted nonlinear least-squares on the digitized
-EPAR clamp curves (Lyumjev 7/15/30U, 832 points, each normalized to unit area over 0-600
-minutes). R^2 is 0.982 / 0.976 / 0.940 per dose and 0.970 pooled (previous fit: 0.980 / 0.965 /
-0.935, pooled 0.964). The fitted half-life of the active stage is 40.7 minutes. With the two
-crowding constants refitted at each fixed half-life, the residual sum of squares stays within 1%
-of its minimum from 30.9 to 47.7 minutes; at lispro's 44-minute serum half-life it is 0.18%
-higher. The crowded stages hold 33.5% of the mean action time at 0.3U and 59.5% at 7U.
+The current model crowds depot and transit together and fits the active stage's clearance along
+with the two crowding constants. Insulin leaves the active stage at the same rate whatever the
+dose, so that stage's half-life sets a floor under every dose's timing: no dose reaches 50% of
+its cumulative activity before one half-life, or 90% before 3.32 half-lives (ln 10 / ln 2).
+Fitted to the digitized EPAR clamp curves alone (Lyumjev 7/15/30U, 832 points, each normalized
+to unit area over 0-600 minutes), the half-life comes out at 40.7 minutes, so no dose, however
+small, reached 90% before 135 minutes (TsunamiMods' curve at 0.3U: 122). With the two crowding
+constants refitted at each fixed half-life, the EPAR residual sum of squares stays within 1% of
+its minimum from 30.9 to 47.7 minutes.
 
-EPAR has no curves below 7U. Against TsunamiMods' curve there, which is an extrapolation of its
-own 7-30U fit, R^2 over 0-600 minutes is 0.922 at 0.1U, 0.961 at 0.3U and 0.982 at 1U (previous
-fit: 0.765, 0.891 and 0.969).
+EPAR has no curves below 7U, so the fit also uses TsunamiMods' curves at 0.2, 0.5, 1, 2 and
+3.5U (1-minute grid, 0-600 minutes) as the small-dose target. Those curves are an extrapolation
+of TsunamiMods' own fit to the same 7-30U EPAR data, not measurements. The three constants
+minimize the sum, over the 8 curves, of 1 - R^2 between each curve and the model's isolated
+single-dose activity curve at that dose, so each curve weighs the same. The fitted half-life is
+23.6 minutes. Against EPAR, R^2 is 0.983 / 0.973 / 0.938 per dose and 0.969 pooled (fit to raw
+EPAR alone: 0.982 / 0.976 / 0.940, pooled 0.970), and the EPAR residual sum of squares is 4.6%
+above that fit's. Against TsunamiMods' curve, R^2 over 0-600 minutes is 0.982 at 0.1U and
+0.990 at 0.3U, neither of which is in the fit, and 0.989-0.991 at the five fitted doses (fit to
+raw EPAR alone: 0.922 at 0.1U, 0.961 at 0.3U, 0.982 at 1U). With the small-dose set changed to
+0.5-3.5U or 0.2-5U, or with the three EPAR curves together weighted as much as all the
+small-dose curves together, the fitted half-life ranges from 23.6 to 27.2 minutes over the six
+combinations. The crowded stages hold 55.5% of the mean action time at 0.3U and 76.4% at 7U.
+
+Minutes until an isolated dose's cumulative activity reaches 50% / 90% of the dose (no basal,
+nothing else in the system):
+
+| Dose | Current fit | Fit to raw EPAR alone | Depot-only version | TsunamiMods |
+|------|-------------|-----------------------|--------------------|-------------|
+| 0.1U | 56 / 118    | 63 / 158              | 81 / 192           | 52 / 97     |
+| 0.3U | 68 / 137    | 73 / 169              | 85 / 195           | 65 / 122    |
+| 1U   | 85 / 169    | 88 / 191              | 93 / 204           | 84 / 158    |
+| 3U   | 106 / 212   | 108 / 222             | 107 / 223          | 106 / 200   |
+| 5U   | 119 / 239   | 120 / 243             | 116 / 239          | 119 / 223   |
+
+For an isolated dose, this model's 90% time is at least 1.99 times its 50% time (the minimum,
+reached when the crowded rate equals the active stage's), against 1.88 for TsunamiMods' curve.
+So with the 50% times at TsunamiMods' level, the 90% times stay later than TsunamiMods'.
 
 Replaying the engine with 0.5 U/h basal running, the cumulative activity added by a 0.3U SMB
-reaches 90% of the dose after 172 minutes (previously 195; TsunamiMods' isolated curve: 122).
-For a 12-SMB, 7.85U cascade, the IOB exceeds the sum of the SMBs' separate IOB contributions
-by up to 7.3% of the cascade total (previously 2.2%). Basal shares the crowded pool, so at
-higher basal rates the depot holds more insulin and an SMB on top acts more slowly: at 1 U/h,
-the 0.3U SMB takes 185 minutes to reach 90% (previously 197), and the cascade's excess is 6.3%
-(previously 2.8%).
+reaches 90% of the dose after 148 minutes (fit to raw EPAR alone: 172; depot-only version: 195;
+TsunamiMods' isolated curve: 122). For a 12-SMB, 7.85U cascade, the IOB exceeds the sum of the
+SMBs' separate IOB contributions by up to 10.6% of the cascade total (7.3%; 2.2%), and the
+cascade reaches 50% / 90% of its total activity 22.0 / 21.8 minutes later than the sum of its
+SMBs replayed separately (15.8 / 13.3; 4.0 / 2.4). Basal shares the crowded pool, so at higher
+basal rates the depot holds more insulin and an SMB on top acts more slowly: at 1 U/h, the 0.3U
+SMB takes 173 minutes to reach 90% (185; 197), and the cascade's excess is 8.4% (6.3%; 2.8%).
 
-The plots below were generated with the previous constants and have not been regenerated yet.
+The plots below were generated with the depot-only version's constants and have not been
+regenerated yet.
 
 ![Pool Compartment vs TsunamiMods vs conventional Tsunami vs EPAR clamp data](traffic_jam_comparison.svg)
 
@@ -84,7 +112,7 @@ described above with no knob present at all.
 
 ![Real 12-dose cascade replay: Pool Compartment vs TsunamiMods vs conventional Tsunami](traffic_jam_cascade.svg)
 
-(Numbers in this section are for the previous constants.) Replaying a real 6.85U/12-SMB sequence from an actual device log (each fork's own
+(Numbers in this section are for the depot-only version's constants.) Replaying a real 6.85U/12-SMB sequence from an actual device log (each fork's own
 crowding mechanism included — this fork's pooled-depot rate, TsunamiMods' pooled-SC
 time-warp) against the plain Tsunami model as a reference: this fork reaches a peak gap of
 0.654U (9.6% of the total dose delivered) around 3.3h into the sequence, versus 0.557U
