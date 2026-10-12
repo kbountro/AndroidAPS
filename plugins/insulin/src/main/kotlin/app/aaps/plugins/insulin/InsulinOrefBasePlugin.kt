@@ -196,9 +196,9 @@ abstract class InsulinOrefBasePlugin(
      */
     fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
         // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
-        val ke = 0.0227739 // active-stage clearance, fitted (t1/2 30.4 min) - NEVER scaled by speed
-        val k1B0 = 0.039043
-        val k1B1 = -0.326237
+        val ke = 0.0299001 // active-stage clearance, fitted (t1/2 23.2 min) - NEVER scaled by speed
+        val k1B0 = 0.032979
+        val k1B1 = -0.306177
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
         // directly): only the crowded depot/transit rate scales, never ke - see that key's doc
