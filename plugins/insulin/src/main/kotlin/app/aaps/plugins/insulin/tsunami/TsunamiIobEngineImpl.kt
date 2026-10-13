@@ -539,11 +539,12 @@ class TsunamiIobEngineImpl @Inject constructor(
      * Which pools crowd each other. Each group has its own shared depot/transit rate, driven by
      * the live depot mass of the group's own pools only:
      *  - [BOLUS]: boluses, SMBs and extended boluses crowd each other, so an SMB cascade jams.
-     *  - [BASAL]: delivered basal crowds only itself. Counted into the bolus group instead, the
-     *    basal depot mass slows every SMB on top of it, and no constants then fit both the EPAR
-     *    curves (no basal infused) and TsunamiMods' small-dose curves given on a basal rate: see
-     *    [PdModel]. Left out of crowding altogether, basal would sit at the rate of an empty depot
-     *    and reach 90% of a new steady state within about 15 minutes.
+     *  - [BASAL]: delivered basal crowds only itself, so a bolus no longer slows the delivered
+     *    basal pool and none of its effect is booked to net basal IOB. Counted into the bolus
+     *    group instead, the basal depot mass slows every SMB on top of it, and no constants then
+     *    fit both the EPAR curves (no basal infused) and TsunamiMods' small-dose curves given on
+     *    a basal rate: see [PdModel]. Left out of crowding altogether, basal would sit at the
+     *    rate of an empty depot and reach 90% of a new steady state within about 15 minutes.
      *  - [PROFILE]: the theoretical profile baseline, driven by the plain profile pool alone.
      *    autoProfileBasal (which scales with sensitivityRatio) must never feed back into it, or the
      *    "ground truth" profile curve would shift with autosens instead of reflecting only the
@@ -602,12 +603,14 @@ class TsunamiIobEngineImpl @Inject constructor(
      * Why the fit uses the live rate: the constants these replace were fitted with the rate held at
      * K(dose) for the whole dose, while this engine re-evaluates it from the live depot mass,
      * basal depot mass included. Run the way the engine runs them with no basal, those constants
-     * scored EPAR activity R^2 0.654 / 0.533 / 0.449 at 7 / 15 / 30U, and on 0.5 U/h basal a 0.3U
-     * dose reached 50% / 90% of its cumulative activity at 77 / 146 min (frozen-rate figure:
-     * 66 / 134). Fitted with the live rate and the basal depot mass counted in the same crowding
-     * mass, no constants fit both the EPAR curves and TsunamiMods' small-dose curves given on a
-     * basal rate: KE goes to the 5 /min search bound and the EPAR objective (below) is 4.46 times
-     * the Weibull form's at 0.5 U/h and 11.2 times at 1 U/h. Hence the separate crowding groups.
+     * scored EPAR activity R^2 0.654 / 0.533 / 0.449 at 7 / 15 / 30U, and on 0.5 U/h basal the
+     * activity a 0.3U dose added (its own pool plus the delivered basal it slowed, which was booked
+     * as net basal) reached 50% / 90% of the dose at 77 / 146 min (frozen-rate figure: 66 / 134).
+     * Fitted with the live rate and the basal depot mass counted in the same crowding mass, no
+     * constants fit both the EPAR curves and TsunamiMods' small-dose curves given on a basal
+     * rate: KE runs to the upper end of any search range, and the EPAR objective (below) stays
+     * near 4.5 times the Weibull form's at 0.5 U/h (11.2 times at 1 U/h). Hence the separate
+     * crowding groups.
      *
      * Fit: K1_B0, K1_B1 and KE free, with the rate re-evaluated every minute from the live depot
      * mass, with the objective TsunamiMods' Weibull constants were fitted with: activity and IOB
@@ -628,9 +631,11 @@ class TsunamiIobEngineImpl @Inject constructor(
      * constants with the rate held per dose, 2.55 times. R^2 activity / IOB on the truncated curves:
      * EPAR 0.985 / 0.998, 0.985 / 0.998, 0.978 / 0.999 at 7 / 15 / 30U; TsunamiMods 0.998 / 1.000
      * at each of 0.1, 0.3 and 5U (none of them in the fit) and 0.998 / 1.000 at the five fitted
-     * doses. Isolated dose, minutes until its cumulative activity reaches 50% / 90% of the dose
-     * (not truncated, as this engine computes it): 0.1U 52 / 96 (TsunamiMods 52 / 97), 0.3U 65 / 121
-     * (65 / 122), 1U 84 / 155 (84 / 158), 3U 106 / 196 (106 / 200), 5U 118 / 219 (119 / 223).
+     * doses. KE itself is loosely determined: the objective stays within about 3% of its minimum
+     * for KE half-lives of 1.0-2.3 min. Isolated dose, minutes until its cumulative activity
+     * reaches 50% / 90% of the dose (not truncated, as this engine computes it): 0.1U 52 / 96
+     * (TsunamiMods 52 / 97), 0.3U 65 / 121 (65 / 122), 1U 84 / 155 (84 / 158), 3U 106 / 196
+     * (106 / 200), 5U 118 / 219 (119 / 223).
      * Engine replay: a 12-SMB/7.85U cascade's IOB exceeds the sum of its SMBs' separate IOB
      * contributions by up to 23.1% of the cascade total (replaced constants on 0.5 U/h basal:
      * 10.9%), and the cascade reaches 50% / 90% of its total activity 46.5 / 71.1 min later than
@@ -685,7 +690,8 @@ class TsunamiIobEngineImpl @Inject constructor(
          * per-patient absorption [speedFactor] (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
          * directly - see that key's doc comment). Only this rate scales by it, never KE.
          */
-        fun rate(speedFactor: Double, depotMass: Double): Double = speedFactor * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
+        fun rate(speedFactor: Double, depotMass: Double): Double =
+            speedFactor * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
 
         /** An isolated dose's (D, X, A) at whole minutes 0..ISOLATED_GRID_MINUTES, per (amount, speedFactor). */
         private val isolatedGrids = object : LinkedHashMap<Pair<Double, Double>, Array<DoubleArray>>(64, 0.75f, true) {

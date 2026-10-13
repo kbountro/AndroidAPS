@@ -38,8 +38,9 @@ versions crowded depot and transit together, with the rate held at its value for
 amount for the whole dose, and fitted the active stage's clearance along with the two crowding
 constants. The engine, though, re-evaluates the rate from the live depot mass, basal included,
 whenever basal runs. Run that way with no basal, those constants matched the EPAR activity
-curves with R^2 0.654 / 0.533 / 0.449 at 7 / 15 / 30U, and on 0.5 U/h basal a 0.3U SMB reached
-50% / 90% of its cumulative activity after 77 / 146 minutes (as fitted: 66 / 134).
+curves with R^2 0.654 / 0.533 / 0.449 at 7 / 15 / 30U, and on 0.5 U/h basal the activity a
+0.3U SMB added (its own pool plus the basal it slowed, which the engine booked as net basal)
+reached 50% / 90% of the dose after 77 / 146 minutes (as fitted: 66 / 134).
 
 The constants are now fitted with the rate re-evaluated every minute from the live depot mass,
 as the engine runs it, and with the objective TsunamiMods' Weibull constants were fitted with:
@@ -60,8 +61,9 @@ are an extrapolation of TsunamiMods' own fit to the same 7-30U EPAR data, not me
 equally. The EPAR clamp studies infused no basal insulin, and since a dose's rate does not
 depend on basal, each dose's own curve is the same on any basal rate. With basal counted in the
 same crowding mass as the SMBs, no constants fit both the EPAR curves and TsunamiMods'
-small-dose curves given on a basal rate: on the EPAR curves the objective is 4.46 times the
-Weibull form's at 0.5 U/h and 11.2 times at 1 U/h. Hence basal crowding only itself.
+small-dose curves given on a basal rate: the active stage's rate runs to the end of any search
+range, and on the EPAR curves the objective stays near 4.5 times the Weibull form's at 0.5 U/h
+(11.2 times at 1 U/h). Hence basal crowding only itself.
 
 Fitted: K1_B0 0.017258, K1_B1 -0.215412 (depot and transit rate 0.017258 * M^-0.215412 per
 minute, M the depot mass in U), active-stage half-life 1.6 minutes. On the EPAR curves the
@@ -69,7 +71,9 @@ objective is 0.982 times that of TsunamiMods' Weibull form fitted the same way (
 constants, rate held per dose: 2.55). R^2 activity / IOB on the truncated curves:
 EPAR 0.985 / 0.998, 0.985 / 0.998, 0.978 / 0.999 at 7 / 15 / 30U; TsunamiMods 0.998 / 1.000 at
 0.1U, 0.3U and 5U, none of which is in the fit, and at each of the five fitted doses. With the
-active stage this fast, the timing is set by the depot and transit outflow. With the rate rising
+active stage this fast, the timing is set by the depot and transit outflow, and its half-life
+is loosely determined: the objective stays within about 3% of its minimum from 1.0 to 2.3
+minutes. With the rate rising
 as the depot empties, absorption speeds up late in each dose, which gives the flatter, more
 symmetric top of the EPAR curves; no chain of stages with its rates held fixed for the whole
 dose can produce that shape.
