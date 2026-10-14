@@ -62,14 +62,23 @@ enum class DoubleKey(
     ActivityScaleFactor("activity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
     InactivityScaleFactor("inactivity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
 
-    // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on the
-    // shared depot/transit rate (K1_B0), applied as-is - no derived "effective DIA" or other indirect
-    // framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no single
-    // duration number would actually be dose-independent or exact. 2.0 doubles that rate and 0.5
-    // halves it. Peak activity moves less, because the active stage is not scaled (1 U dose: peak
-    // at 40 / 71 / 134 min at 2.0 / 1.0 / 0.5). The active stage's exit rate (KE, PdModel in
-    // TsunamiIobEngineImpl) is never scaled by this: it describes the active stage, not the
-    // injection site. Default 1.0 reproduces the unscaled fitted constants.
+    // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on every
+    // stage's rate alike, the shared depot/transit rate (K1_B0) and the active stage's exit rate
+    // (KE, PdModel in TsunamiIobEngineImpl), applied as-is - no derived "effective DIA" or other
+    // indirect framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no
+    // single duration number would actually be dose-independent or exact. 2.0 doubles every rate and
+    // 0.5 halves it, which compresses or stretches the whole curve in time by that factor, up to the
+    // once-a-minute rate refresh (1 U dose: peak at 36 / 71 / 142 min at 2.0 / 1.0 / 0.5). Default
+    // 1.0 reproduces the unscaled fitted constants.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
+
+    // Traffic Jam crowding mix between boluses/SMBs (CrowdingGroup.BOLUS in TsunamiIobEngineImpl):
+    // each bolus's depot/transit rate follows (1 - mix) * (its own depot mass) + mix * (the whole
+    // bolus group's depot mass). 1.0 (default) crowds every bolus by the group's whole depot, as
+    // fitted: a 12-SMB cascade (7.85 U over 160 min) reaches 50% / 90% of (delivered - IOB) 46.5 /
+    // 68.9 min later than the same SMBs computed separately. 0.5: 32.0 / 45.3; 0.3: 23.4 / 32.4;
+    // 0.1: 10.9 / 15.1; 0.0: each bolus crowded only by its own depot, 0 / 0. Not fitted (the EPAR
+    // data has single doses only); a dose with no other bolus insulin on board is the same at every value.
+    InsulinTrafficJamMixing("insulin_traffic_jam_mixing", 1.0, 0.0, 1.0, hideParentScreenIfHidden = true),
 
 }

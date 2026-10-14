@@ -23,8 +23,10 @@
     <!-- NEW: Traffic Jam Model -->
     <string name="lyumjev_U100_Traffic_Jam">Lyumjev U100 (Tsunami Traffic Jam)</string>
     <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 8-hour analytic depot pool to calculate dynamic Subcutaneous accumulation.</string>
-    <string name="insulin_traffic_jam_speed_settings">Absorption Speed</string>
+    <string name="insulin_traffic_jam_speed_settings">Absorption Speed and Crowding</string>
     <string name="insulin_traffic_jam_speed_multiplier_title">Absorption Speed [x]</string>
-    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard insulin leaves the injection site. At 2, a 1 U dose\'s activity peaks after about 40 minutes instead of 71; at 0.5, after about 134 minutes. This does not change how fast insulin leaves the active stage.</string>
+    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard insulin acts. Every stage, from the injection site to the active stage, speeds up or slows down by this factor. At 2, a 1 U dose\'s activity peaks after about 36 minutes instead of 71; at 0.5, after about 142 minutes.</string>
+    <string name="insulin_traffic_jam_mixing_title">Crowding Between Doses [0-1]</string>
+    <string name="insulin_traffic_jam_mixing_summary">How much boluses and SMBs still being absorbed slow each other down. At 1, each dose absorbs at the pace of all bolus insulin still at the injection site: 12 SMBs of 7.85 U in total over 160 minutes reach half their effect 47 minutes later than if each were alone. At 0.5: 32 minutes later; at 0.3: 23; at 0.1: 11; at 0, each dose absorbs as if it were alone. A dose given with no other bolus insulin on board is the same at every value.</string>
 
 </resources>

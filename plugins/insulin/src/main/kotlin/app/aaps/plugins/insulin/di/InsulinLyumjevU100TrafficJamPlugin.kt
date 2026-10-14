@@ -40,10 +40,12 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
     override fun configuration(): JSONObject =
         JSONObject()
             .put(DoubleKey.InsulinTrafficJamSpeedMultiplier, preferences)
+            .put(DoubleKey.InsulinTrafficJamMixing, preferences)
 
     override fun applyConfiguration(configuration: JSONObject) {
         configuration
             .store(DoubleKey.InsulinTrafficJamSpeedMultiplier, preferences)
+            .store(DoubleKey.InsulinTrafficJamMixing, preferences)
     }
 
     override fun commentStandardText(): String = rh.gs(R.string.lyumjev_U100_Traffic_Jam)
@@ -70,6 +72,12 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
                 AdaptiveDoublePreference(
                     ctx = context, doubleKey = DoubleKey.InsulinTrafficJamSpeedMultiplier,
                     dialogMessage = R.string.insulin_traffic_jam_speed_multiplier_summary, title = R.string.insulin_traffic_jam_speed_multiplier_title
+                )
+            )
+            addPreference(
+                AdaptiveDoublePreference(
+                    ctx = context, doubleKey = DoubleKey.InsulinTrafficJamMixing,
+                    dialogMessage = R.string.insulin_traffic_jam_mixing_summary, title = R.string.insulin_traffic_jam_mixing_title
                 )
             )
         }

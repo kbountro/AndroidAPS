@@ -59,7 +59,7 @@ abstract class InsulinOrefBasePlugin(
         private const val TRAFFIC_JAM_HORIZON_MINUTES = 480.0
 
         // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
-        private const val TRAFFIC_JAM_KE = 0.1297809 // active-stage clearance, fitted (t1/2 5.3 min) - NEVER scaled by speed
+        private const val TRAFFIC_JAM_KE = 0.1297809 // active-stage clearance, fitted (t1/2 5.3 min); scaled by speed like every rate
         private const val TRAFFIC_JAM_K1_B0 = 0.01784168
         private const val TRAFFIC_JAM_K1_B1 = -0.2224188
     }
@@ -210,8 +210,8 @@ abstract class InsulinOrefBasePlugin(
         if (bolus.amount <= 0.0) return result
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
-        // directly): only the crowded depot/transit rate scales, never ke - see that key's doc
-        // comment for why.
+        // directly to every stage's rate, ke included). The crowding mix between boluses does not
+        // apply here: a dose alone is the same at every mix.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val grid = trafficJamGrid(bolus.amount, speedFactor)
         val (d, x, a) = trafficJamState(grid, speedFactor, t)
@@ -220,7 +220,7 @@ abstract class InsulinOrefBasePlugin(
         // exactly zero there instead of a visible cliff where the caller stops calling this at all.
         val (dH, xH, aH) = trafficJamState(grid, speedFactor, TRAFFIC_JAM_HORIZON_MINUTES)
 
-        result.activityContrib = TRAFFIC_JAM_KE * a
+        result.activityContrib = speedFactor * TRAFFIC_JAM_KE * a
         result.iobContrib = (d + x + a) - (dH + xH + aH)
 
         return result
@@ -244,7 +244,7 @@ abstract class InsulinOrefBasePlugin(
             d[0] = amount
             for (i in 1 until n) {
                 val k1 = trafficJamRate(speedFactor, d[i - 1])
-                val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, 1.0)
+                val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, 1.0)
                 d[i] = nd; x[i] = nx; a[i] = na
             }
             arrayOf(d, x, a)
@@ -256,13 +256,12 @@ abstract class InsulinOrefBasePlugin(
         if (t <= 0.0) return Triple(grid[0][0], 0.0, 0.0)
         val i = min(t.toInt(), grid[0].size - 1)
         val k1 = trafficJamRate(speedFactor, grid[0][i])
-        return trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, t - i)
+        return trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, speedFactor * TRAFFIC_JAM_KE, t - i)
     }
 
-    /** Exact propagation of (D, X, A) by [dt] minutes with depot and transit at [k1] and the active stage at ke. */
-    private fun trafficJamPropagate(d0: Double, x0: Double, a0: Double, k1: Double, dt: Double): Triple<Double, Double, Double> {
+    /** Exact propagation of (D, X, A) by [dt] minutes with depot and transit at [k1] and the active stage at [ke]. */
+    private fun trafficJamPropagate(d0: Double, x0: Double, a0: Double, k1: Double, ke: Double, dt: Double): Triple<Double, Double, Double> {
         if (dt <= 0.0) return Triple(d0, x0, a0)
-        val ke = TRAFFIC_JAM_KE
         val d = d0 * exp(-k1 * dt)
         val x = x0 * exp(-k1 * dt) + d0 * chainStage2(k1, k1, dt)
         val a = a0 * exp(-ke * dt) + x0 * chainStage2(k1, ke, dt) + d0 * threeStageA(k1, k1, ke, dt)

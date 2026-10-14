@@ -23,9 +23,10 @@ bolus, from the insulin then in the depot, and held in between. Boluses, SMBs an
 boluses crowd each other: a cascade of SMBs slows every earlier SMB still in the depot or in
 transit (which drains at the depot's rate). Delivered basal crowds only itself, so a basal rate
 does not slow the SMBs on top of it. Crowding stays within one infusion site: insulin given
-before a cannula/site change never crowds insulin given after it. With the fitted constants
-(below) the shared rate is 0.0298 per minute with 0.1U in the depot, 0.0178 with 1U and 0.0116
-with 7U.
+before a cannula/site change never crowds insulin given after it. How strongly boluses crowd
+each other is a setting, the crowding mix (see "Crowding between doses" below); at its default
+of 1 they all share one rate, as described here. With the fitted constants (below) the shared
+rate is 0.0298 per minute with 0.1U in the depot, 0.0178 with 1U and 0.0116 with 7U.
 
 A new dose goes into the depot, and the depot and transit rate is re-evaluated right after it with
 the dose included, so from then on it slows insulin still in the depot or transit. The dose adds
@@ -105,10 +106,11 @@ on any basal rate; the other columns are each version's own figures with the rat
 The current fit's 90% time is 1.76-1.81 times its 50% time at these doses, against 1.88 for
 TsunamiMods' curve. The engine drops a dose 480 minutes after it is given. At absorption speed
 1.0, at most 1.1e-8% of a dose up to 7U and 0.09% of a 30U dose are still on board by then; at
-absorption speed 0.5, 0.009% of a 1U dose, 1.9% of 3U and 4.9% of 5U.
+absorption speed 0.5, 0.038% of a 1U dose, 2.3% of 3U and 5.5% of 5U.
 
 A Python replica of the engine without its 480-minute window (equal to the engine's Kotlin code
-run on the JVM within 3.1e-8U of IOB over the first 480 minutes) gives the following. For a
+run on the JVM within 4.1e-8U of IOB over the first 480 minutes, at crowding mix 0 to 1 and
+absorption speed 0.5 to 2) gives the following, at the default crowding mix of 1. For a
 cascade of 12 SMBs totalling 7.85U (0.9, 0.6, 1.3, 0.4, 0.7, 0.5, 0.3, 0.8, 0.5, 0.4, 0.55 and
 0.9U at minutes 0, 10, 20, 35, 45, 60, 75, 90, 105, 120, 140 and 160; not the 6.85U device-log
 sequence further below), the cascade's IOB exceeds the sum of the SMBs' separate IOB
@@ -131,22 +133,48 @@ and the real data.
 
 ## Per-patient absorption speed
 
-A preference (Insulin settings → Absorption Speed, `DoubleKey.InsulinTrafficJamSpeedMultiplier`,
-range 0.2-5.0, default 1.0) multiplies the shared depot/transit rate: 2.0 makes insulin leave the
-depot and transit twice as fast as standard, 0.5 half as fast. Peak activity moves by less,
-because the active stage is not scaled: a 1U dose's activity peaks after 40 minutes at 2.0, 71 at
-1.0 and 134 at 0.5. It's a direct multiplier applied as-is, not a derived "effective
-DIA" or other indirect framing, since this model's decay is dose-dependent (crowding) and
-asymptotic, so no single duration number would actually be dose-independent or exact.
+A preference (Insulin settings → Absorption Speed and Crowding → Absorption Speed,
+`DoubleKey.InsulinTrafficJamSpeedMultiplier`, range 0.2-5.0, default 1.0) multiplies every
+stage's rate alike: the shared depot/transit rate and the active stage's rate. 2.0 makes insulin
+go through every stage twice as fast as standard, 0.5 half as fast, so the whole curve is
+compressed or stretched in time by that factor, up to the once-a-minute rate refresh: a 1U dose's
+activity peaks after 36 minutes at 2.0, 71 at 1.0 and 142 at 0.5, and 1 - IOB/dose reaches 0.5 /
+0.9 after 43 / 78 minutes at 2.0 (default: 86 / 155) and 173 / 309 at 0.5. It's a direct
+multiplier applied as-is, not a derived "effective DIA" or other indirect framing, since this
+model's decay is dose-dependent (crowding) and asymptotic, so no single duration number would
+actually be dose-independent or exact.
 
-The active stage's rate is deliberately never multiplied by this knob, since the knob describes
-the injection site. At 2.0, 1 - IOB/dose of a 1U dose reaches 0.5 / 0.9 after 47 / 82 minutes
-(default: 86 / 155); at 0.5, after 165 / 300.
-
-At the default 1.0, this is an exact no-op: the depot/transit rate is multiplied by `1.0` (the
-active stage's rate is never multiplied), which is
+At the default 1.0, this is an exact no-op: every rate is multiplied by `1.0`, which is
 bit-for-bit identical to the unscaled rate, so the default behaves exactly like the fit
 described above with no knob present at all.
+
+## Crowding between doses
+
+A second preference (Insulin settings → Absorption Speed and Crowding → Crowding Between Doses,
+`DoubleKey.InsulinTrafficJamMixing`, range 0-1, default 1.0) sets how much boluses and SMBs still
+being absorbed slow each other down. Each bolus/SMB keeps its own depot, transit and active
+stage, and its depot/transit rate follows its crowding mass, (1 - mix) × its own depot mass + mix ×
+the depot mass of all boluses, SMBs and extended boluses at that site. At 1 every dose gets the
+rate of the whole depot, which is exactly the one shared pool fitted above. At 0 each dose is
+crowded only by its own depot, so a cascade is the sum of its SMBs' separate curves. A dose given
+with no other bolus insulin on board is the same at every value, so the fit to the EPAR curves
+(single doses only) does not depend on it, and it is not fitted. Basal is not affected.
+
+The 12-SMB cascade above, in the Python replica, minutes by which its delivered insulin minus IOB
+reaches 50% / 90% of 7.85U later than for the same SMBs computed one at a time, and the largest
+excess of its IOB over theirs:
+
+| Crowding mix | Delay at 50% / 90% | Largest extra IOB |
+|---|---|---|
+| 1 (default) | 46.5 / 68.9 | 23.2% of 7.85U |
+| 0.5 | 32.0 / 45.3 | 16.8% |
+| 0.3 | 23.4 / 32.4 | 12.8% |
+| 0.1 | 10.9 / 15.1 | 6.5% |
+| 0 | 0 / 0 | 0% |
+
+Per-dose bookkeeping is used only below 1: at 1 the engine keeps one pool for all boluses, as
+before. Below 1, a dose whose own depot and transit hold less than 1e-6U is merged into one shared
+pool for retired doses, so the number of pools stays at the number of doses still being absorbed.
 
 ## Real multi-dose behavior
 
