@@ -59,9 +59,12 @@ abstract class InsulinOrefBasePlugin(
         private const val TRAFFIC_JAM_HORIZON_MINUTES = 480.0
 
         // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
-        private const val TRAFFIC_JAM_KE = 0.4389397 // active-stage clearance, fitted (t1/2 1.6 min) - NEVER scaled by speed
-        private const val TRAFFIC_JAM_K1_B0 = 0.017258
-        private const val TRAFFIC_JAM_K1_B1 = -0.215412
+        private const val TRAFFIC_JAM_K1_B0 = 0.01617986
+        private const val TRAFFIC_JAM_K1_B1 = -0.03676295
+
+        // Active-stage exit rate KE_E0 * A^KE_E1 (A in U) - NEVER scaled by speed
+        private const val TRAFFIC_JAM_KE_E0 = 0.0427785
+        private const val TRAFFIC_JAM_KE_E1 = -0.4966087
     }
 
     private var lastWarned: Long = 0
@@ -197,8 +200,9 @@ abstract class InsulinOrefBasePlugin(
      * private and this path is decoupled from the pooled engine.
      *
      * As in the engine, the shared depot/transit rate is re-evaluated every minute from the dose's
-     * own live depot mass (the constants are fitted that way), so the curve is tabulated once per
-     * (amount, speed) on a 1-min grid and evaluated in between by exact propagation.
+     * own live depot mass, and the active stage's exit rate from its own live active mass (the
+     * constants are fitted that way), so the curve is tabulated once per (amount, speed) on a 1-min
+     * grid and evaluated in between by exact propagation with both rates held.
      *
      * Note this also fixes a pre-existing bug in the previous Weibull version of this function:
      * activityContrib was never scaled by bolus.amount here (unlike iobContrib, and unlike the
@@ -215,12 +219,15 @@ abstract class InsulinOrefBasePlugin(
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val grid = trafficJamGrid(bolus.amount, speedFactor)
         val (d, x, a) = trafficJamState(grid, speedFactor, t)
+        // Exit rate held since the last whole minute, as in the engine, so activity is the active
+        // stage's outflow at t.
+        val ke = trafficJamExitRate(grid[2][trafficJamIndex(grid, t)])
 
         // Subtract the (small, non-zero) residual right at the gating horizon so IOB reaches
         // exactly zero there instead of a visible cliff where the caller stops calling this at all.
         val (dH, xH, aH) = trafficJamState(grid, speedFactor, TRAFFIC_JAM_HORIZON_MINUTES)
 
-        result.activityContrib = TRAFFIC_JAM_KE * a
+        result.activityContrib = ke * a
         result.iobContrib = (d + x + a) - (dH + xH + aH)
 
         return result
@@ -229,6 +236,10 @@ abstract class InsulinOrefBasePlugin(
     // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
     private fun trafficJamRate(speedFactor: Double, depotMass: Double): Double =
         speedFactor * TRAFFIC_JAM_K1_B0 * max(depotMass, 1e-6).pow(TRAFFIC_JAM_K1_B1)
+
+    // Must match TsunamiIobEngineImpl.PdModel.exitRate - never scaled by speed.
+    private fun trafficJamExitRate(activeMass: Double): Double =
+        TRAFFIC_JAM_KE_E0 * max(activeMass, 1e-6).pow(TRAFFIC_JAM_KE_E1)
 
     /** (D, X, A) in U of an isolated dose of [amount] at whole minutes 0..TRAFFIC_JAM_HORIZON_MINUTES. */
     private val trafficJamGrids = object : LinkedHashMap<Pair<Double, Double>, Array<DoubleArray>>(64, 0.75f, true) {
@@ -244,7 +255,8 @@ abstract class InsulinOrefBasePlugin(
             d[0] = amount
             for (i in 1 until n) {
                 val k1 = trafficJamRate(speedFactor, d[i - 1])
-                val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, 1.0)
+                val ke = trafficJamExitRate(a[i - 1])
+                val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, ke, 1.0)
                 d[i] = nd; x[i] = nx; a[i] = na
             }
             arrayOf(d, x, a)
@@ -254,15 +266,18 @@ abstract class InsulinOrefBasePlugin(
     /** The dose's (D, X, A) [t] minutes after it: the grid point at or before [t], then exact propagation. */
     private fun trafficJamState(grid: Array<DoubleArray>, speedFactor: Double, t: Double): Triple<Double, Double, Double> {
         if (t <= 0.0) return Triple(grid[0][0], 0.0, 0.0)
-        val i = min(t.toInt(), grid[0].size - 1)
+        val i = trafficJamIndex(grid, t)
         val k1 = trafficJamRate(speedFactor, grid[0][i])
-        return trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, t - i)
+        val ke = trafficJamExitRate(grid[2][i])
+        return trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, ke, t - i)
     }
 
-    /** Exact propagation of (D, X, A) by [dt] minutes with depot and transit at [k1] and the active stage at ke. */
-    private fun trafficJamPropagate(d0: Double, x0: Double, a0: Double, k1: Double, dt: Double): Triple<Double, Double, Double> {
+    /** The grid point at or before [t] (0 for t <= 0, the last point past the grid). */
+    private fun trafficJamIndex(grid: Array<DoubleArray>, t: Double): Int = min(max(t, 0.0).toInt(), grid[0].size - 1)
+
+    /** Exact propagation of (D, X, A) by [dt] minutes with depot and transit at [k1] and the active stage at [ke]. */
+    private fun trafficJamPropagate(d0: Double, x0: Double, a0: Double, k1: Double, ke: Double, dt: Double): Triple<Double, Double, Double> {
         if (dt <= 0.0) return Triple(d0, x0, a0)
-        val ke = TRAFFIC_JAM_KE
         val d = d0 * exp(-k1 * dt)
         val x = x0 * exp(-k1 * dt) + d0 * chainStage2(k1, k1, dt)
         val a = a0 * exp(-ke * dt) + x0 * chainStage2(k1, ke, dt) + d0 * threeStageA(k1, k1, ke, dt)
@@ -286,8 +301,9 @@ abstract class InsulinOrefBasePlugin(
             k1k2 && k1ke -> k1 * k1 * t * t / 2.0 * exp(-k1 * t)
             k1k2         -> {
                 val q = ke - k1
-                // Series near q*t -> 0: the closed form cancels catastrophically there, and the
-                // shared crowded rate crosses ke at a common pool mass.
+                // Series near q*t -> 0: the closed form cancels catastrophically there, and ke,
+                // following the active mass, can cross the shared crowded rate: no isolated dose up
+                // to 30U reaches that at speed 1.0, but larger speed factors do.
                 if (abs(q * t) < 1e-3) k1 * k1 * exp(-k1 * t) * t * t * (0.5 - q * t / 6.0 + q * q * t * t / 24.0)
                 else k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
             }
