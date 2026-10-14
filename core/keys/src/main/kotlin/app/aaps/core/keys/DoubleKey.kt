@@ -67,9 +67,9 @@ enum class DoubleKey(
     // framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no single
     // duration number would actually be dose-independent or exact. 2.0 doubles that rate and 0.5
     // halves it. Peak activity moves less, because the active stage is not scaled (1 U dose: peak
-    // at 44 / 71 / 130 min at 2.0 / 1.0 / 0.5). The active stage's exit rate (KE_E0 * A^KE_E1,
-    // PdModel.exitRate in TsunamiIobEngineImpl) is never scaled by this: it describes the active
-    // stage, not the injection site. Default 1.0 reproduces the unscaled fitted constants.
+    // at 40 / 71 / 134 min at 2.0 / 1.0 / 0.5). The active stage's exit rate (KE, PdModel in
+    // TsunamiIobEngineImpl) is never scaled by this: it describes the active stage, not the
+    // injection site. Default 1.0 reproduces the unscaled fitted constants.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
 
 }

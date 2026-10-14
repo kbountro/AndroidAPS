@@ -25,6 +25,6 @@
     <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 8-hour analytic depot pool to calculate dynamic Subcutaneous accumulation.</string>
     <string name="insulin_traffic_jam_speed_settings">Absorption Speed</string>
     <string name="insulin_traffic_jam_speed_multiplier_title">Absorption Speed [x]</string>
-    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard insulin leaves the injection site. At 2, a 1 U dose\'s activity peaks after about 44 minutes instead of 71; at 0.5, after about 130 minutes. This does not change how fast insulin leaves the active stage, which depends only on how much insulin is in it.</string>
+    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard insulin leaves the injection site. At 2, a 1 U dose\'s activity peaks after about 40 minutes instead of 71; at 0.5, after about 134 minutes. This does not change how fast insulin leaves the active stage.</string>
 
 </resources>
