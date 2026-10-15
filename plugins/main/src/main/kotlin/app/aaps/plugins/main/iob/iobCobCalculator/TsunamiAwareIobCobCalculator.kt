@@ -11,11 +11,13 @@ import app.aaps.core.interfaces.aps.AutosensResult
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.aps.MealData
 import app.aaps.core.interfaces.insulin.TsunamiIobEngine
+import app.aaps.core.interfaces.insulin.TsunamiIobResult
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.objects.extensions.combine
+import app.aaps.core.objects.extensions.plus
 import app.aaps.core.objects.extensions.round
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -136,24 +138,26 @@ class TsunamiAwareIobCobCalculator @Inject constructor(
     }
 
     /** Combines bolus/basal totals from the Tsunami engine into a final, rounded IobTotal with zero-temp projection. */
+    /**
+     * IOB = all insulin on board at the site (boluses, SMBs, extended boluses and delivered basal) minus
+     * the profile baseline (the profile basal alone), both from the engine's site model. The zero-temp
+     * IOB is the same quantity from the engine run with delivered basal set to zero from one minute
+     * after [now]: every part of it, IOB and activity alike, comes from that run, since with basal in
+     * the crowding mix a zero temp also changes how fast the boluses absorb.
+     */
     private fun composeTsunamiResult(time: Long, sensitivityRatio: Double, now: Long, useAutoBasal: Boolean = false): IobTotal {
-        val normalRes = tsunamiIobEngine.resultAt(time, sensitivityRatio)
-        val bolusIob = IobTotal.combine(normalRes.bolusTotal, normalRes.extBolusTotal)
-        val basalIob = if (useAutoBasal) normalRes.basalNetAutoTotal else normalRes.basalNetTotal
-
-        val basalIobWithZeroTemp = basalIob.copy()
+        val iobTotal = totalMinusProfile(tsunamiIobEngine.resultAt(time, sensitivityRatio), useAutoBasal)
         val zeroTempStart = now + 60 * 1000L
-        if (zeroTempStart < time) {
-            val zeroRes = tsunamiIobEngine.resultAt(time, sensitivityRatio, assumeZeroTempAfter = zeroTempStart)
-            val zeroBasal = if (useAutoBasal) zeroRes.basalNetAutoTotal else zeroRes.basalNetTotal
-            basalIobWithZeroTemp.basaliob = zeroBasal.basaliob
-            basalIobWithZeroTemp.netbasalinsulin = zeroBasal.netbasalinsulin
-            basalIobWithZeroTemp.hightempinsulin = zeroBasal.hightempinsulin
-        }
-
-        basalIobWithZeroTemp.iobWithZeroTemp = IobTotal.combine(bolusIob, basalIobWithZeroTemp).round()
-        val iobTotal = IobTotal.combine(bolusIob, basalIob).round()
-        iobTotal.iobWithZeroTemp = basalIobWithZeroTemp.iobWithZeroTemp
+        iobTotal.iobWithZeroTemp =
+            if (zeroTempStart < time) totalMinusProfile(tsunamiIobEngine.resultAt(time, sensitivityRatio, assumeZeroTempAfter = zeroTempStart), useAutoBasal)
+            else iobTotal.copy()
         return iobTotal
+    }
+
+    private fun totalMinusProfile(res: TsunamiIobResult, useAutoBasal: Boolean): IobTotal {
+        // copy() first: the engine's result objects are shared with its cache.
+        val bolusIob = res.bolusTotal.copy().plus(res.extBolusTotal)
+        val basalIob = if (useAutoBasal) res.basalNetAutoTotal else res.basalNetTotal
+        return IobTotal.combine(bolusIob, basalIob).round()
     }
 }

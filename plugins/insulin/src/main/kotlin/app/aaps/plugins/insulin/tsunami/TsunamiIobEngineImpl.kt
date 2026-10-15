@@ -13,8 +13,8 @@ import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
-import app.aaps.core.objects.extensions.combine
 import app.aaps.core.objects.extensions.convertedToAbsolute
+import app.aaps.core.objects.extensions.plus
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
@@ -82,7 +82,9 @@ class TsunamiIobEngineImpl @Inject constructor(
         val res = resultAt(toTime, 1.0)
         val pumpInterface = activePlugin.activePump
         return if (!pumpInterface.isFakingTempsByExtendedBoluses) {
-            IobTotal.combine(res.bolusTotal, res.extBolusTotal)
+            // Summed like stock AAPS (IobTotal.combine would take only the extended bolus's basaliob, 0).
+            // copy() first: the result objects are shared with the cache.
+            res.bolusTotal.copy().plus(res.extBolusTotal)
         } else {
             res.bolusTotal
         }
@@ -588,10 +590,11 @@ class TsunamiIobEngineImpl @Inject constructor(
      *    with sensitivityRatio) must never feed back into it, or the "ground truth" profile curve
      *    would shift with autosens instead of reflecting only the programmed rate. With no temp
      *    basal and no other insulin on board the delivered and profile basal pools evolve
-     *    identically and net basal IOB stays zero. At m > 0 boluses, SMBs and extended boluses slow
-     *    the delivered basal, and the basal they hold back in the depot (and its lower activity) is
-     *    booked to net basal IOB, even with no temp running: that is basal still on board beyond what
-     *    the programmed rate would leave on board on its own.
+     *    identically and net basal IOB stays zero. The loop's IOB, bolus + extended bolus + net basal
+     *    (TsunamiAwareIobCobCalculator), is then the total on board of all [DELIVERED] pools minus this
+     *    profile baseline. At m > 0 boluses, SMBs and extended boluses slow the delivered basal; the
+     *    basal they hold back in the depot (and its lower activity) is part of that total, and shows
+     *    under net basal IOB even with no temp running.
      */
     private enum class CrowdingGroup { DELIVERED, PROFILE }
 
