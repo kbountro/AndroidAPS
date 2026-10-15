@@ -156,9 +156,12 @@ being absorbed slow each other down. Each bolus/SMB keeps its own depot, transit
 stage, and its depot/transit rate follows its crowding mass, (1 - mix) × its own depot mass + mix ×
 the depot mass of all boluses, SMBs and extended boluses at that site. At 1 every dose gets the
 rate of the whole depot, which is exactly the one shared pool fitted above. At 0 each dose is
-crowded only by its own depot, so a cascade is the sum of its SMBs' separate curves. A dose given
-with no other bolus insulin on board is the same at every value, so the fit to the EPAR curves
-(single doses only) does not depend on it, and it is not fitted. Basal is not affected.
+crowded only by its own depot, so a cascade is the sum of its SMBs' separate curves, up to the
+rate refresh: every bolus's timestamp is also a refresh point for the others (the 12-SMB cascade
+given 22 s past each minute: within 2.7e-4U of IOB at speed 1; exact with every SMB on a whole
+minute). A dose given with no other bolus insulin on board is the same at every value, so the fit
+to the EPAR curves (single doses only) does not depend on it, and it is not fitted. Basal is not
+affected.
 
 The 12-SMB cascade above, in the Python replica, minutes by which its delivered insulin minus IOB
 reaches 50% / 90% of 7.85U later than for the same SMBs computed one at a time, and the largest

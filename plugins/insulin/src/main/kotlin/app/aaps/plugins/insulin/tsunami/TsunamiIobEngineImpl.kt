@@ -573,8 +573,10 @@ class TsunamiIobEngineImpl @Inject constructor(
      *    (1 - m) * (its own depot mass) + m * (the group's whole depot mass) ([PdModel.crowdingMass]).
      *    At m = 1 (default) every pool gets the rate of the group's whole depot mass, i.e. one pooled
      *    (D, X, A) exactly as fitted, which the engine then runs as one pool; at m = 0 each bolus is
-     *    crowded only by its own depot, so a cascade is the sum of its SMBs' separate curves. A dose
-     *    with no other bolus-group insulin on board is the same at every m.
+     *    crowded only by its own depot, so a cascade is the sum of its SMBs' separate curves, up to
+     *    the rate refresh: every bolus timestamp is also a refresh point for the other pools (12-SMB
+     *    cascade given 22 s past each minute: within 2.7e-4U of IOB at speed 1; exact with SMBs on
+     *    whole minutes). A dose with no other bolus-group insulin on board is the same at every m.
      *  - [BASAL]: delivered basal crowds only itself, so a bolus no longer slows the delivered
      *    basal pool and none of its effect is booked to net basal IOB. Counted into the bolus
      *    group instead, the basal depot mass slows every SMB on top of it, and no constants then
