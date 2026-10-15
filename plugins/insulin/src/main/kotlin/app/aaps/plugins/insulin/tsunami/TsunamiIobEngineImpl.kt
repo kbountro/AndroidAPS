@@ -722,10 +722,11 @@ class TsunamiIobEngineImpl @Inject constructor(
      * fitted law's extrapolation. Isolated dose with no basal at speed 1.0, minutes until 1 -
      * IOB/dose reaches 0.5 / 0.9 (whole curve, not cut at 480 min): 0.1U 55 / 97 (TsunamiMods
      * 52 / 97), 0.3U 68 / 121 (65 / 122), 1U 86 / 155 (84 / 158), 3U 108 / 195 (106 / 200), 5U
-     * 120 / 217 (119 / 223). Given on a steady basal rate, the basal depot crowds the dose (see
-     * CrowdingGroup.DELIVERED; same at mix 0, slower above): on 0.5 / 1 U/h, 0.3U 90 / 192 and
-     * 104 / 227, 1U 100 / 206 and 110 / 236, 3U 116 / 230 and 123 / 253 at mix 1; 0.3U 77 / 158 and
-     * 86 / 181, 1U 91 / 177 and 96 / 195, 3U 111 / 208 and 113 / 220 at mix 0.3. Still on board at the 480-min horizon, where the engine drops a dose: at speed
+     * 120 / 217 (119 / 223). Given on a steady basal rate, the basal depot slows the dose (see
+     * CrowdingGroup.DELIVERED; as with no basal at dose interaction 0, slower above): on 0.5 / 1
+     * U/h, 0.3U 90 / 192 and 104 / 227, 1U 100 / 206 and 110 / 236, 3U 116 / 230 and 123 / 253 at
+     * dose interaction 1; 0.3U 76 / 152 and 82 / 172, 1U 90 / 174 and 94 / 188, 3U 110 / 206 and
+     * 112 / 216 at 0.3. Still on board at the 480-min horizon, where the engine drops a dose: at speed
      * 1.0, at most 1.1e-8% of a dose up to 7U and 0.09% of 30U; at speed 0.5 (every stage at half
      * its rate), 0.038% of 1U, 2.3% of 3U, 5.5% of 5U and 28% of 30U.
      * Python replica of this engine without its 480-min window (equal to this file run on the JVM
@@ -739,9 +740,9 @@ class TsunamiIobEngineImpl @Inject constructor(
      * 23.7 min). That is at the default dose interaction of 1 (CrowdingGroup); at 0.5 /
      * 0.3 / 0.1 / 0 (replica, one pool per SMB): up to 16.8 / 12.8 / 6.5 / 0% of 7.85U, and 32.0 /
      * 45.3, 23.4 / 32.4, 10.9 / 15.1 and 0 / 0 min later. On a steady 0.5 / 1 U/h basal rate, against
-     * the same reference: 52.6 / 92.5 and 58.2 / 110.7 min later at mix 1, 27.2 / 45.1 and 31.1 /
-     * 56.6 at mix 0.3, 0 / 0 at mix 0. A basal rate started with no other insulin on board
-     * (rate/60 U at the end of every minute) reaches 50% / 90% of its steady-state activity after
+     * the same reference: 52.6 / 92.5 and 58.2 / 110.7 min later at dose interaction 1, 26.8 / 43.8
+     * and 30.1 / 53.5 at 0.3, 0 / 0 at 0. At dose interaction 1, a basal rate started with no other
+     * insulin on board (rate/60 U at the end of every minute) reaches 50% / 90% of its steady-state activity after
      * 81 / 196 min at 0.5 U/h and 96 / 237 min at 1 U/h (previous constants: 106 / 246 and 113 /
      * 262).
      *

@@ -36,7 +36,7 @@ cascade activity can still dip slightly, as each SMB slows the insulin feeding t
 in the 12-SMB cascade further below, by at most 0.7% of its peak from one minute to the next
 (Python replica of the engine).
 
-Profile basal (the true baseline, evaluated as if nothing else was happening) is tracked independently as usual, but following the same mechanism: it crowds only itself, as delivered basal does with nothing else on board, so with no temp basal and no other insulin running the two evolve identically, and it is the same every day for the same profile. The IOB the loop uses (bolus IOB + net basal IOB) is total IOB minus profile basal IOB, where total IOB is all insulin on board at the site (boluses, SMBs, extended boluses and delivered basal), computed every minute as above. Above a crowding mix of 0, boluses, SMBs and extended boluses also slow the delivered basal; the basal they hold back is part of total IOB, and AAPS shows it under net basal IOB even with no temp running (largest for a 1U dose on a steady 1 U/h: 0.119U at mix 1, 0.040U at mix 0.3; Python model). The zero-temp IOB used for the zero-temp prediction is the same difference from a run with delivered basal stopped one minute from now, IOB and activity both.
+Profile basal (the true baseline, evaluated as if nothing else was happening) is tracked independently as usual, following the same mechanism among its own doses only: each minute of profile basal interacts with the rest of the profile basal by the dose interaction value (see below), never with delivered insulin, so with no temp basal and no other insulin running it evolves identically to delivered basal, and it is the same every day for the same profile. The IOB the loop uses (bolus IOB + net basal IOB) is total IOB minus profile basal IOB, where total IOB is all insulin on board at the site (boluses, SMBs, extended boluses and delivered basal), computed every minute as above. Above a dose interaction of 0, boluses, SMBs and extended boluses also slow the delivered basal; the basal they hold back is part of total IOB, and AAPS shows it under net basal IOB even with no temp running (for a 1U dose on a steady 1 U/h, at most 0.119U at dose interaction 1 and 0.120U at 0.3; 0 at 0; Python model). The zero-temp IOB used for the zero-temp prediction is the same difference from a run with delivered basal stopped one minute from now, IOB and activity both.
 
 ## Absorption rates and the fit
 
@@ -115,8 +115,8 @@ cascade of 12 SMBs totalling 7.85U (0.9, 0.6, 1.3, 0.4, 0.7, 0.5, 0.3, 0.8, 0.5,
 sequence further below), the cascade's IOB exceeds the sum of the SMBs' separate IOB
 contributions by up to 23.2% of 7.85U, and its delivered insulin minus IOB reaches 50% / 90% of
 7.85U 46.5 / 68.9 minutes later than for the same SMBs computed one at a time and summed, with no
-basal (previous fit: 9.7% and 22.8 / 23.7 minutes). A basal rate started with no insulin on
-board (rate/60 U delivered at the end of every minute) reaches 50% / 90% of its steady-state
+basal (previous fit: 9.7% and 22.8 / 23.7 minutes). At the default dose interaction of 1, a basal
+rate started with no insulin on board (rate/60 U delivered at the end of every minute) reaches 50% / 90% of its steady-state
 activity after 81 / 196 minutes at 0.5 U/h and 96 / 237 minutes at 1 U/h (previous fit: 106 /
 246 and 113 / 262).
 
@@ -180,23 +180,23 @@ excess of its IOB over theirs:
 On a steady basal rate (on for 24 hours before; Python model, same reference: the SMBs computed one
 at a time with no basal), delay at 50% / 90%:
 
-| Crowding mix | 0.5 U/h | 1 U/h |
+| Dose interaction | 0.5 U/h | 1 U/h |
 |---|---|---|
 | 1 (default) | 52.6 / 92.5 | 58.2 / 110.7 |
-| 0.5 | 36.7 / 62.1 | 41.2 / 76.3 |
-| 0.3 | 27.2 / 45.1 | 31.1 / 56.6 |
+| 0.5 | 36.5 / 61.2 | 40.6 / 74.2 |
+| 0.3 | 26.8 / 43.8 | 30.1 / 53.5 |
 | 0 | 0 / 0 | 0 / 0 |
 
 A single dose on a steady basal rate, minutes until 1 - (its own IOB)/dose reaches 0.5 / 0.9
-(Python model; no basal: 0.3U 68 / 121, 1U 86 / 155, 3U 108 / 195 at every mix):
+(DI: dose interaction; Python model; with no basal, and on any basal rate at dose interaction 0: 0.1U 55 / 97, 0.3U 68 / 121, 1U 86 / 155, 3U 108 / 195, 5U 120 / 217):
 
-| Dose | Mix 1, 0.5 U/h | Mix 1, 1 U/h | Mix 0.5, 0.5 U/h | Mix 0.5, 1 U/h | Mix 0.3, 0.5 U/h | Mix 0.3, 1 U/h |
+| Dose | DI 1, 0.5 U/h | DI 1, 1 U/h | DI 0.5, 0.5 U/h | DI 0.5, 1 U/h | DI 0.3, 0.5 U/h | DI 0.3, 1 U/h |
 |---|---|---|---|---|---|---|
-| 0.1U | 86 / 187 | 102 / 224 | 77 / 163 | 89 / 194 | 71 / 149 | 81 / 176 |
-| 0.3U | 90 / 192 | 104 / 227 | 82 / 170 | 92 / 198 | 77 / 158 | 86 / 181 |
-| 1U | 100 / 206 | 110 / 236 | 94 / 187 | 101 / 210 | 91 / 177 | 96 / 195 |
-| 3U | 116 / 230 | 123 / 253 | 112 / 215 | 116 / 231 | 111 / 208 | 113 / 220 |
-| 5U | 126 / 246 | 132 / 266 | 123 / 233 | 126 / 247 | 122 / 227 | 124 / 237 |
+| 0.1U | 86 / 187 | 102 / 224 | 74 / 158 | 86 / 187 | 68 / 141 | 77 / 165 |
+| 0.3U | 90 / 192 | 104 / 227 | 80 / 166 | 90 / 192 | 76 / 152 | 82 / 172 |
+| 1U | 100 / 206 | 110 / 236 | 93 / 184 | 99 / 205 | 90 / 174 | 94 / 188 |
+| 3U | 116 / 230 | 123 / 253 | 112 / 213 | 115 / 228 | 110 / 206 | 112 / 216 |
+| 5U | 126 / 246 | 132 / 266 | 123 / 232 | 126 / 244 | 122 / 226 | 123 / 234 |
 
 Per-dose bookkeeping is used only below 1: at 1 the engine keeps one pool per category for all
 doses, as before. Below 1, a dose whose own depot and transit hold less than 1e-6U is merged into its
