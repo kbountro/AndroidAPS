@@ -27,6 +27,6 @@
     <string name="insulin_traffic_jam_speed_multiplier_title">Absorption Speed [x]</string>
     <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard insulin acts. Every stage, from the injection site to the active stage, speeds up or slows down by this factor, so the time to the activity peak is divided by it and the peak height multiplied by it.</string>
     <string name="insulin_traffic_jam_mixing_title">Dose Interaction [0-1]</string>
-    <string name="insulin_traffic_jam_mixing_summary">How much insulin still being absorbed at the injection site slows other insulin down: boluses, SMBs, extended boluses and basal, temp basals included. 0 turns this off: no insulin interacts with any other, and every dose, each minute of basal included, absorbs on its own. 1: all insulin follows the same path, absorbing at the pace set by all insulin at the injection site.</string>
+    <string name="insulin_traffic_jam_mixing_summary">The share of every dose that absorbs together with all insulin at the injection site and is slowed by it: boluses, SMBs, extended boluses and basal, temp basals included. The rest of each dose absorbs on its own. 0 turns this off: no insulin interacts with any other, and every dose, each minute of basal included, absorbs on its own. 1: all insulin follows the same path, absorbing at the pace set by all insulin at the injection site.</string>
 
 </resources>

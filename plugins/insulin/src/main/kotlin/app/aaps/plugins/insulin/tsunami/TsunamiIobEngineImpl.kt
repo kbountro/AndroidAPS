@@ -139,9 +139,10 @@ class TsunamiIobEngineImpl @Inject constructor(
     // Five attribution categories (bolus, extended bolus, absolute temp-basal delivery,
     // profile basal, autosens-adjusted profile basal) each carry their own persistent
     // 3-compartment pool (depot -> transit -> active, see [PdModel]) so IOB/activity can
-    // still be broken down the same way AAPS expects. Bolus, extBolus and basalAbs crowd each
-    // other at the dose interaction setting, and profileBasal crowds only itself the same way, with
-    // autoProfileBasal moving at its rate - see [CrowdingGroup].
+    // still be broken down the same way AAPS expects. These pools hold the shared branch of every
+    // dose: bolus, extBolus and basalAbs crowd each other, and profileBasal crowds only itself, with
+    // autoProfileBasal moving at its rate. Below a dose interaction of 1 the rest of every dose
+    // absorbs on its own, from its isolated curve - see [CrowdingGroup].
     // Every dose is an impulse added straight into its category's depot mass; nothing
     // about any other category's or any earlier dose's state is ever rewritten - only each
     // group's absorption rate constant is updated, once a minute from its live depot mass,
@@ -196,78 +197,45 @@ class TsunamiIobEngineImpl @Inject constructor(
             .filter { it <= horizonTime }
 
         // One persistent set of pools (and crowding rates) per site generation, never shared
-        // across generations. One pool per category, plus, at a dose interaction below 1, one pool per
-        // dose still absorbing (see [CrowdingGroup.DELIVERED]).
+        // across generations: the shared branch of every dose, one pool per category (see [CrowdingGroup]).
         class SiteState {
 
-            // At a dose interaction of 1 every dose goes straight into its category's pool, exact since
-            // all of a group's doses share one rate then. Below 1 these pools hold only doses retired
-            // from [own].
+            // All of a group's shared branches share one rate, so one pool per category holds them exactly.
             val pools = Array(Category.entries.size) { Pool() }
-
-            /**
-             * One pool per dose still absorbing, at a dose interaction below 1: every bolus/SMB, and each
-             * event's extended-bolus, delivered-basal and profile-basal delivery (one per minute).
-             */
-            val own = ArrayList<OwnPool>()
-
-            fun inject(cat: Category, amount: Double, autoAmount: Double = 0.0) {
-                if (mixing >= 1.0) {
-                    pools[cat.ordinal].D += amount
-                    if (autoAmount > 0.0) pools[Category.AUTO_PROFILE_BASAL.ordinal].D += autoAmount
-                } else {
-                    own.add(OwnPool(cat, Pool(D = amount), if (cat == Category.PROFILE_BASAL) Pool(D = autoAmount) else null))
-                }
-            }
 
             fun propagateInPlace(dtMinutes: Double) {
                 for (p in pools) p.propagateInPlace(ke, dtMinutes)
-                for (o in own) {
-                    o.pool.propagateInPlace(ke, dtMinutes)
-                    o.auto?.propagateInPlace(ke, dtMinutes)
-                }
             }
 
-            /**
-             * Every pool's depot/transit rate from the live depot masses (see [CrowdingGroup]). A dose
-             * whose own depot and transit hold less than [PdModel.RETIRED_MASS] first joins its
-             * category's pool: from then on its own crowding mass, and so its rate, only matters for
-             * that much insulin, and the per-dose pools stay as many as the doses still absorbing.
-             */
+            /** Every pool's depot/transit rate from its group's live depot mass (see [CrowdingGroup]). */
             fun refreshRates() {
-                val iter = own.iterator()
-                while (iter.hasNext()) {
-                    val o = iter.next()
-                    val auto = o.auto
-                    if (o.pool.D + o.pool.X < PdModel.RETIRED_MASS && (auto == null || auto.D + auto.X < PdModel.RETIRED_MASS)) {
-                        pools[o.cat.ordinal].add(o.pool)
-                        if (auto != null) pools[Category.AUTO_PROFILE_BASAL.ordinal].add(auto)
-                        iter.remove()
-                    }
-                }
-                var deliveredDepot = groupDepotMass(pools, CrowdingGroup.DELIVERED)
-                var profileDepot = groupDepotMass(pools, CrowdingGroup.PROFILE)
-                for (o in own) {
-                    if (o.cat.group == CrowdingGroup.DELIVERED) deliveredDepot += o.pool.D else profileDepot += o.pool.D
-                }
-                fun groupDepot(group: CrowdingGroup) = if (group == CrowdingGroup.DELIVERED) deliveredDepot else profileDepot
+                val deliveredDepot = groupDepotMass(pools, CrowdingGroup.DELIVERED)
+                val profileDepot = groupDepotMass(pools, CrowdingGroup.PROFILE)
                 for (cat in Category.entries) {
                     if (!cat.drivesGroupRate) continue
-                    val pool = pools[cat.ordinal]
-                    pool.k = PdModel.rate(speedFactor, PdModel.crowdingMass(pool.D, groupDepot(cat.group), mixing))
+                    val groupDepot = if (cat.group == CrowdingGroup.DELIVERED) deliveredDepot else profileDepot
+                    pools[cat.ordinal].k = PdModel.rate(speedFactor, groupDepot)
                 }
                 // autoProfileBasal moves at the profile basal's rate, never at its own.
                 pools[Category.AUTO_PROFILE_BASAL.ordinal].k = pools[Category.PROFILE_BASAL.ordinal].k
-                for (o in own) {
-                    o.pool.k = PdModel.rate(speedFactor, PdModel.crowdingMass(o.pool.D, groupDepot(o.cat.group), mixing))
-                    o.auto?.k = o.pool.k
-                }
             }
         }
 
         val sites = HashMap<Int, SiteState>()
         fun siteFor(gen: Int): SiteState = sites.getOrPut(gen) { SiteState() }
         var lastTime = startTime
+
+        // The individual branch of every dose given so far, at a dose interaction below 1: its isolated
+        // curve, tabulated once per amount ([PdModel.isolatedGrid]). A profile-basal dose also carries
+        // its autoProfileBasal twin, which moves at the profile basal's rate and so is the same curve
+        // scaled by [IndividualDose.autoScale].
+        val individualDoses = ArrayList<IndividualDose>()
+        val gridsByAmount = HashMap<Double, Array<DoubleArray>>()
+        fun addIndividual(timestamp: Long, cat: Category, amount: Double, autoScale: Double = 0.0) {
+            val grid = gridsByAmount.getOrPut(amount) { PdModel.isolatedGrid(amount, speedFactor) }
+            individualDoses.add(IndividualDose(timestamp, cat, grid, autoScale))
+        }
+        val isolated = DoubleArray(3)
 
         // Sorted once so the snooze/lastBolusTime bookkeeping below can sweep forward with
         // monotonically advancing indices instead of rescanning every bolus for every snapshot.
@@ -310,36 +278,54 @@ class TsunamiIobEngineImpl @Inject constructor(
                 }
             }
 
-            // Sums every still-live site generation's own peeked pools, per-dose pools included -
-            // crowding never crosses generations, but the reported total is their combined
-            // IOB/activity.
-            fun peekSum(cat: Category): Pool {
+            // Shared branches: sums every still-live site generation's own peeked pools - crowding
+            // never crosses generations, but the reported total is their combined IOB/activity.
+            val iob = DoubleArray(Category.entries.size)
+            val act = DoubleArray(Category.entries.size)
+            for (cat in Category.entries) {
                 val sum = Pool()
-                for (site in sites.values) {
-                    sum.add(site.pools[cat.ordinal].propagated(ke, dtPeek))
-                    for (o in site.own) {
-                        if (o.cat == cat) sum.add(o.pool.propagated(ke, dtPeek))
-                        else if (cat == Category.AUTO_PROFILE_BASAL) o.auto?.let { sum.add(it.propagated(ke, dtPeek)) }
-                    }
-                }
-                return sum
+                for (site in sites.values) sum.add(site.pools[cat.ordinal].propagated(ke, dtPeek))
+                iob[cat.ordinal] = sum.iob()
+                act[cat.ordinal] = sum.activity(ke)
             }
 
-            val bolusP = peekSum(Category.BOLUS)
-            val extBolusP = peekSum(Category.EXT_BOLUS)
-            val basalAbsP = peekSum(Category.BASAL_ABS)
-            val profileP = peekSum(Category.PROFILE_BASAL)
-            val autoProfileP = peekSum(Category.AUTO_PROFILE_BASAL)
+            // m times the shared branches, which the pools hold as they would at m = 1, plus 1 - m times
+            // the individual branches, i.e. the doses' isolated curves (see [CrowdingGroup]).
+            if (mixing < 1.0) {
+                val indIob = DoubleArray(Category.entries.size)
+                val indAct = DoubleArray(Category.entries.size)
+                for (dose in individualDoses) {
+                    PdModel.isolatedStateOnGrid(dose.grid, (tTarget - dose.timestamp) / 60000.0, speedFactor, isolated)
+                    val doseIob = isolated[0] + isolated[1] + isolated[2]
+                    val doseAct = ke * isolated[2]
+                    indIob[dose.cat.ordinal] += doseIob
+                    indAct[dose.cat.ordinal] += doseAct
+                    if (dose.autoScale > 0.0) {
+                        indIob[Category.AUTO_PROFILE_BASAL.ordinal] += dose.autoScale * doseIob
+                        indAct[Category.AUTO_PROFILE_BASAL.ordinal] += dose.autoScale * doseAct
+                    }
+                }
+                for (i in iob.indices) {
+                    iob[i] = mixing * iob[i] + (1.0 - mixing) * indIob[i]
+                    act[i] = mixing * act[i] + (1.0 - mixing) * indAct[i]
+                }
+            }
 
-            val bnIob = basalAbsP.iob() - profileP.iob()
-            val bnAct = basalAbsP.activity(ke) - profileP.activity(ke)
-            val bnaIob = basalAbsP.iob() - autoProfileP.iob()
-            val bnaAct = basalAbsP.activity(ke) - autoProfileP.activity(ke)
+            val bolus = Category.BOLUS.ordinal
+            val extBolus = Category.EXT_BOLUS.ordinal
+            val basalAbs = Category.BASAL_ABS.ordinal
+            val profile = Category.PROFILE_BASAL.ordinal
+            val autoProfile = Category.AUTO_PROFILE_BASAL.ordinal
+
+            val bnIob = iob[basalAbs] - iob[profile]
+            val bnAct = act[basalAbs] - act[profile]
+            val bnaIob = iob[basalAbs] - iob[autoProfile]
+            val bnaAct = act[basalAbs] - act[autoProfile]
 
             return TsunamiIobResult(
-                bolusTotal = mapToTotal(bolusP.iob(), bolusP.activity(ke), "bolus", lastBolusTimeSeen, bSnooze),
-                extBolusTotal = mapToTotal(extBolusP.iob(), extBolusP.activity(ke), "extBolus"),
-                profileBaselineTotal = mapToTotal(profileP.iob(), profileP.activity(ke), "profile"),
+                bolusTotal = mapToTotal(iob[bolus], act[bolus], "bolus", lastBolusTimeSeen, bSnooze),
+                extBolusTotal = mapToTotal(iob[extBolus], act[extBolus], "extBolus"),
+                profileBaselineTotal = mapToTotal(iob[profile], act[profile], "profile"),
                 basalNetTotal = mapToTotal(bnIob, bnAct, "netBasal"),
                 basalNetAutoTotal = mapToTotal(bnaIob, bnaAct, "netBasal")
             )
@@ -381,11 +367,25 @@ class TsunamiIobEngineImpl @Inject constructor(
 
             val site = siteFor(siteGenerationFor(dose.timestamp, siteChangeBoundaries))
 
-            if (dose.bolusAmt > 0.0) site.inject(Category.BOLUS, dose.bolusAmt)
-            if (dose.extBolusAmt > 0.0) site.inject(Category.EXT_BOLUS, dose.extBolusAmt)
-            if (dose.basalAbsAmt > 0.0) site.inject(Category.BASAL_ABS, dose.basalAbsAmt)
-            // autoProfileBasal is the profile basal scaled by sensitivityRatio, so it comes with it.
-            if (dose.profileBasalAmt > 0.0) site.inject(Category.PROFILE_BASAL, dose.profileBasalAmt, dose.autoProfileBasalAmt)
+            // Shared branches, held in the pools as they would be at m = 1 (see [CrowdingGroup]).
+            if (dose.bolusAmt > 0.0) site.pools[Category.BOLUS.ordinal].D += dose.bolusAmt
+            if (dose.extBolusAmt > 0.0) site.pools[Category.EXT_BOLUS.ordinal].D += dose.extBolusAmt
+            if (dose.basalAbsAmt > 0.0) site.pools[Category.BASAL_ABS.ordinal].D += dose.basalAbsAmt
+            if (dose.profileBasalAmt > 0.0) {
+                site.pools[Category.PROFILE_BASAL.ordinal].D += dose.profileBasalAmt
+                if (dose.autoProfileBasalAmt > 0.0) site.pools[Category.AUTO_PROFILE_BASAL.ordinal].D += dose.autoProfileBasalAmt
+            }
+
+            // Individual branches, below m = 1.
+            if (mixing < 1.0) {
+                if (dose.bolusAmt > 0.0) addIndividual(dose.timestamp, Category.BOLUS, dose.bolusAmt)
+                if (dose.extBolusAmt > 0.0) addIndividual(dose.timestamp, Category.EXT_BOLUS, dose.extBolusAmt)
+                if (dose.basalAbsAmt > 0.0) addIndividual(dose.timestamp, Category.BASAL_ABS, dose.basalAbsAmt)
+                // autoProfileBasal is the profile basal scaled by sensitivityRatio, so it comes with it.
+                if (dose.profileBasalAmt > 0.0) {
+                    addIndividual(dose.timestamp, Category.PROFILE_BASAL, dose.profileBasalAmt, dose.autoProfileBasalAmt / dose.profileBasalAmt)
+                }
+            }
 
             // Every rate follows its group's live depot mass, so it is re-evaluated at every event,
             // whether or not this event injected anything into that group: buildDoseEventTimeline
@@ -426,7 +426,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     /**
      * Mass still sitting in one site's category pools' depots for one crowding [group] (see
-     * [CrowdingGroup] for which pools crowd which; per-dose pools are added by the caller). Deliberately D only, never D+X: X is mass that has already left
+     * [CrowdingGroup] for which pools crowd which). Deliberately D only, never D+X: X is mass that has already left
      * the depot (past the crowding-limited step, in transit toward the active/eliminated stage),
      * so it no longer competes for SC depot space and must not inflate the rate that governs the
      * depot's own outflow. Getting this wrong compounds under sustained dosing - X never fully
@@ -596,16 +596,21 @@ class TsunamiIobEngineImpl @Inject constructor(
      * Which pools crowd each other, and how much: the dose interaction m
      * (DoubleKey.InsulinTrafficJamMixing, 0 to 1, not fitted - the EPAR data has single doses with no
      * basal only). Every delivery is one dose: each bolus/SMB, and each event's (each minute's)
-     * delivered basal, extended bolus and profile basal. Below m = 1 each dose keeps its own (D, X, A)
-     * pool, and its depot/transit rate follows its crowding mass (1 - m) * (its own depot mass) + m *
-     * (its group's whole depot mass) ([PdModel.crowdingMass]). At m = 1 (default) every dose gets the
-     * rate of its group's whole depot mass, i.e. one pooled (D, X, A) per group exactly as fitted,
-     * which the engine then runs as one pool per category. At m = 0 no dose interacts with any other:
-     * each absorbs as an isolated dose of its own size (a basal minute as a dose of rate/60 U), so a
-     * cascade is the sum of its SMBs' separate curves, on any basal rate, up to the rate refresh:
-     * every bolus timestamp is also a refresh point for the other pools (12-SMB cascade given 22 s
-     * past each minute: within 2.7e-4U of IOB at speed 1; exact with SMBs on whole minutes). The
-     * groups:
+     * delivered basal, extended bolus and profile basal. Each dose is split into two branches, each a
+     * depot -> transit -> active chain:
+     *  - a shared branch, m of the dose, absorbing together with the shared branches of all the other
+     *    doses of its group. Its rate follows the group's whole depot mass as if all of that insulin
+     *    were in the shared branches, so together they are m times the one pooled (D, X, A) per group
+     *    that the engine runs at m = 1, one pool per category, exactly as fitted.
+     *  - an individual branch, 1 - m of the dose, absorbing on its own. Its rate follows its own depot
+     *    mass as if the whole dose were in it, so it is 1 - m times the dose's isolated curve
+     *    ([PdModel.isolatedState]), which depends on the dose's amount alone and is tabulated once per
+     *    amount.
+     * Every IOB and activity is therefore m times its value at m = 1 plus 1 - m times the sum of the
+     * doses' isolated curves, and a dose with no other insulin on board follows the fitted curve at
+     * every m. At m = 1 (default) all insulin follows the same path. At m = 0 no dose interacts with
+     * any other: each absorbs as an isolated dose of its own size (a basal minute as a dose of rate/60
+     * U), so a cascade is exactly the sum of its SMBs' isolated curves, on any basal rate. The groups:
      *  - [DELIVERED]: all insulin actually delivered - boluses, SMBs, extended boluses and basal
      *    (profile rate, temp basals, zero temps and temps faked by extended boluses alike) - so an
      *    SMB cascade jams and a basal rate slows the doses given on top of it.
@@ -613,12 +618,12 @@ class TsunamiIobEngineImpl @Inject constructor(
      *    autoProfileBasal (which scales with sensitivityRatio) moves at the profile basal's rate and
      *    must never feed back into it, or the "ground truth" profile curve would shift with autosens
      *    instead of reflecting only the programmed rate. With no temp basal and no other insulin on
-     *    board the delivered and profile basal pools evolve identically and net basal IOB stays zero.
+     *    board the delivered and profile basal evolve identically and net basal IOB stays zero.
      *    The loop's IOB, bolus + extended bolus + net basal (TsunamiAwareIobCobCalculator), is then
-     *    the total on board of all [DELIVERED] pools minus this profile baseline. At m > 0 boluses,
-     *    SMBs and extended boluses slow the delivered basal; the basal they hold back in the depot
-     *    (and its lower activity) is part of that total, and shows under net basal IOB even with no
-     *    temp running.
+     *    the total on board of all [DELIVERED] insulin minus this profile baseline. At m > 0 boluses,
+     *    SMBs and extended boluses slow the delivered basal's shared branch; the basal they hold back
+     *    in the depot (and its lower activity) is part of that total, and shows under net basal IOB
+     *    even with no temp running.
      */
     private enum class CrowdingGroup { DELIVERED, PROFILE }
 
@@ -654,10 +659,12 @@ class TsunamiIobEngineImpl @Inject constructor(
     }
 
     /**
-     * One dose's own pool, at a dose interaction below 1. For a profile-basal delivery, [auto] is the
-     * matching autoProfileBasal delivery, moved at the profile basal's rate.
+     * One dose's individual branch, at a dose interaction below 1: its isolated curve ([grid], see
+     * [PdModel.isolatedGrid]) from [timestamp] on, in [cat]. For a profile-basal dose, [autoScale] is
+     * the matching autoProfileBasal amount over the profile amount (its twin moves at the profile
+     * basal's rate, so its curve is the same scaled), otherwise 0.
      */
-    private class OwnPool(val cat: Category, val pool: Pool, val auto: Pool?)
+    private class IndividualDose(val timestamp: Long, val cat: Category, val grid: Array<DoubleArray>, val autoScale: Double)
 
     private data class DoseEvent(
         val timestamp: Long,
@@ -674,9 +681,11 @@ class TsunamiIobEngineImpl @Inject constructor(
      *
      * Depot and transit share ONE crowding-dependent rate, K(M) = K1_B0 * M^K1_B1 ([rate]), where M
      * is the live depot mass of the dose's crowding group (D only - see groupDepotMass and
-     * CrowdingGroup; at a dose interaction below 1, [crowdingMass]). It is re-evaluated at
+     * CrowdingGroup; at a dose interaction below 1, this is the shared branch, and the individual
+     * branch is the dose's isolated curve, with M its own depot mass). It is re-evaluated at
      * every event (every whole minute and every bolus timestamp, right after that event's doses
-     * enter D) and held until the next, and each interval is solved exactly. [KE] is fixed and
+     * enter D; for an isolated curve, every whole minute of the dose's age) and held until the next,
+     * and each interval is solved exactly. [KE] is fixed and
      * never touched by crowding (only the speed setting scales it, like every other rate), so
      * activity = KE*A stays exactly continuous through every dose event: a new dose slows mass
      * still in the depot or transit, never mass already in the active stage. With K1_B1 < 0 the
@@ -725,23 +734,22 @@ class TsunamiIobEngineImpl @Inject constructor(
      * 120 / 217 (119 / 223). Given on a steady basal rate, the basal depot slows the dose (see
      * CrowdingGroup.DELIVERED; as with no basal at dose interaction 0, slower above): on 0.5 / 1
      * U/h, 0.3U 90 / 192 and 104 / 227, 1U 100 / 206 and 110 / 236, 3U 116 / 230 and 123 / 253 at
-     * dose interaction 1; 0.3U 76 / 152 and 82 / 172, 1U 90 / 174 and 94 / 188, 3U 110 / 206 and
-     * 112 / 216 at 0.3. Still on board at the 480-min horizon, where the engine drops a dose: at speed
+     * dose interaction 1; 0.3U 73 / 140 and 75 / 150, 1U 90 / 168 and 92 / 176, 3U 110 / 204 and
+     * 112 / 210 at 0.3. Still on board at the 480-min horizon, where the engine drops a dose: at speed
      * 1.0, at most 1.1e-8% of a dose up to 7U and 0.09% of 30U; at speed 0.5 (every stage at half
      * its rate), 0.038% of 1U, 2.3% of 3U, 5.5% of 5U and 28% of 30U.
      * Python replica of this engine without its 480-min window (equal to this file run on the JVM
-     * within 4.1e-8U of IOB over the first 480 min of the doses below, at dose interaction 0 to 1 and
-     * speed 0.5 to 2), 12 SMBs
+     * within 4.1e-8U of IOB over the first 480 min of the doses below, at speed 0.5 to 2), 12 SMBs
      * totalling 7.85U in one group (0.9U at 0 min, 0.6 at 10, 1.3 at 20, 0.4 at 35, 0.7 at 45, 0.5
      * at 60, 0.3 at 75, 0.8 at 90, 0.5 at 105, 0.4 at 120, 0.55 at 140, 0.9 at 160): the cascade's
      * IOB exceeds the sum of its SMBs' separate IOB contributions by up to 23.2% of 7.85U, and its
      * delivered insulin minus IOB reaches 50% / 90% of 7.85U 46.5 / 68.9 min later than for the
      * same SMBs computed separately and summed, with no basal (previous constants: 9.7%, 22.8 /
-     * 23.7 min). That is at the default dose interaction of 1 (CrowdingGroup); at 0.5 /
-     * 0.3 / 0.1 / 0 (replica, one pool per SMB): up to 16.8 / 12.8 / 6.5 / 0% of 7.85U, and 32.0 /
-     * 45.3, 23.4 / 32.4, 10.9 / 15.1 and 0 / 0 min later. On a steady 0.5 / 1 U/h basal rate, against
-     * the same reference: 52.6 / 92.5 and 58.2 / 110.7 min later at dose interaction 1, 26.8 / 43.8
-     * and 30.1 / 53.5 at 0.3, 0 / 0 at 0. At dose interaction 1, a basal rate started with no other
+     * 23.7 min). That is at the default dose interaction of 1 (CrowdingGroup); at 0.5 / 0.3 / 0.1 /
+     * 0 (that times the extra IOB, by the two branches): up to 11.6 / 7.0 / 2.3 / 0% of 7.85U, and
+     * 20.1 / 40.9, 11.3 / 25.6, 3.5 / 8.6 and 0 / 0 min later. On a steady 0.5 / 1 U/h basal rate,
+     * against the same reference: 52.6 / 92.5 and 58.2 / 110.7 min later at dose interaction 1, 12.5
+     * / 31.7 and 13.6 / 37.0 at 0.3, 0 / 0 at 0. At dose interaction 1, a basal rate started with no other
      * insulin on board (rate/60 U at the end of every minute) reaches 50% / 90% of its steady-state activity after
      * 81 / 196 min at 0.5 U/h and 96 / 237 min at 1 U/h (previous constants: 106 / 246 and 113 /
      * 262).
@@ -767,13 +775,6 @@ class TsunamiIobEngineImpl @Inject constructor(
         /** Never feed a literal zero into the negative-exponent power law. */
         private const val MASS_FLOOR = 1e-6
 
-        /**
-         * A per-dose pool whose own depot and transit hold less than this (U) joins its category's
-         * pool (SiteState.refreshRates): only that much insulin then moves on at that pool's rate
-         * instead of its own.
-         */
-        const val RETIRED_MASS = 1e-6
-
         /** Isolated single-dose state is tabulated on a 1-min grid this long. */
         private const val ISOLATED_GRID_MINUTES = 600
 
@@ -797,26 +798,19 @@ class TsunamiIobEngineImpl @Inject constructor(
         }
 
         /**
-         * Depot/transit rate of a pool whose crowding mass is [depotMass] ([crowdingMass]), at the
+         * Depot/transit rate of a pool whose crowding mass is [depotMass], at the
          * per-patient absorption [speedFactor] (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
          * directly - see that key's doc comment). KE is scaled by the same factor at every caller.
          */
         fun rate(speedFactor: Double, depotMass: Double): Double =
             speedFactor * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
 
-        /**
-         * Crowding mass of a pool with [ownDepot] U in its own depot, when its whole group's depots
-         * hold [groupDepot] U, at dose interaction [mixing] (see CrowdingGroup).
-         */
-        fun crowdingMass(ownDepot: Double, groupDepot: Double, mixing: Double): Double =
-            (1.0 - mixing) * ownDepot + mixing * groupDepot
-
         /** An isolated dose's (D, X, A) at whole minutes 0..ISOLATED_GRID_MINUTES, per (amount, speedFactor). */
         private val isolatedGrids = object : LinkedHashMap<Pair<Double, Double>, Array<DoubleArray>>(64, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Double, Double>, Array<DoubleArray>>?): Boolean = size > 256
         }
 
-        private fun isolatedGrid(amount: Double, speedFactor: Double): Array<DoubleArray> = synchronized(isolatedGrids) {
+        fun isolatedGrid(amount: Double, speedFactor: Double): Array<DoubleArray> = synchronized(isolatedGrids) {
             isolatedGrids.getOrPut(Pair(amount, speedFactor)) {
                 val n = ISOLATED_GRID_MINUTES + 1
                 val d = DoubleArray(n)
@@ -839,10 +833,29 @@ class TsunamiIobEngineImpl @Inject constructor(
          */
         fun isolatedState(tElapsed: Double, amount: Double, speedFactor: Double): Triple<Double, Double, Double> {
             if (tElapsed <= 0.0) return Triple(amount, 0.0, 0.0)
-            val g = isolatedGrid(amount, speedFactor)
+            val out = DoubleArray(3)
+            isolatedStateOnGrid(isolatedGrid(amount, speedFactor), tElapsed, speedFactor, out)
+            return Triple(out[0], out[1], out[2])
+        }
+
+        /**
+         * [isolatedState] of the dose tabulated in [grid] ([isolatedGrid]), written into [out] as (D, X, A).
+         * On a whole minute of the table no propagation is needed (it would be by 0 minutes).
+         */
+        fun isolatedStateOnGrid(grid: Array<DoubleArray>, tElapsed: Double, speedFactor: Double, out: DoubleArray) {
+            if (tElapsed <= 0.0) {
+                out[0] = grid[0][0]; out[1] = 0.0; out[2] = 0.0
+                return
+            }
             val i = min(tElapsed.toInt(), ISOLATED_GRID_MINUTES)
-            val k1 = rate(speedFactor, g[0][i])
-            return propagate(g[0][i], g[1][i], g[2][i], k1, k1, speedFactor * KE, tElapsed - i)
+            val dt = tElapsed - i
+            if (dt == 0.0) {
+                out[0] = grid[0][i]; out[1] = grid[1][i]; out[2] = grid[2][i]
+                return
+            }
+            val k1 = rate(speedFactor, grid[0][i])
+            val (d, x, a) = propagate(grid[0][i], grid[1][i], grid[2][i], k1, k1, speedFactor * KE, dt)
+            out[0] = d; out[1] = x; out[2] = a
         }
 
         /** Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single dose. */

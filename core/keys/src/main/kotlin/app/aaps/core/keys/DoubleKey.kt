@@ -74,10 +74,12 @@ enum class DoubleKey(
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
 
     // Traffic Jam dose interaction (shown as "Dose Interaction"; CrowdingGroup in TsunamiIobEngineImpl):
-    // how much insulin still being absorbed at the site slows other insulin down. Every delivery is
+    // the share of every dose that absorbs together with all insulin at the site. Every delivery is
     // one dose - each bolus/SMB and each minute's basal (temps included), extended-bolus and profile-
-    // basal delivery - and each dose's depot/transit rate follows (1 - value) * (its own depot mass) +
-    // value * (the depot mass of its whole group: all delivered insulin, or the profile baseline).
+    // basal delivery - split into a shared branch, value of it, crowded by its whole group's depot (all
+    // delivered insulin, or the profile baseline) as at 1.0, and an individual branch, 1 - value of it,
+    // absorbing as an isolated dose. Every IOB is then value * (its value at 1.0) + (1 - value) * (the
+    // doses' isolated curves, summed), and a lone dose follows the fitted curve at every value.
     // 0.0 turns it off: no dose interacts with any other. 1.0 (default): all insulin follows the same
     // path, one pooled depot, as fitted. Not fitted (the EPAR data has single doses with no basal only).
     InsulinTrafficJamMixing("insulin_traffic_jam_mixing", 1.0, 0.0, 1.0, hideParentScreenIfHidden = true),

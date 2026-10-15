@@ -210,8 +210,8 @@ abstract class InsulinOrefBasePlugin(
         if (bolus.amount <= 0.0) return result
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
-        // directly to every stage's rate, ke included). The crowding mix between boluses does not
-        // apply here: a dose alone is the same at every mix.
+        // directly to every stage's rate, ke included). The dose interaction does not apply here: a
+        // dose alone is the same at every value.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val grid = trafficJamGrid(bolus.amount, speedFactor)
         val (d, x, a) = trafficJamState(grid, speedFactor, t)
