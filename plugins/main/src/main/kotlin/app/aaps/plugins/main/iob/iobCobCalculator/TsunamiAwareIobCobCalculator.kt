@@ -141,8 +141,8 @@ class TsunamiAwareIobCobCalculator @Inject constructor(
      * IOB = all insulin on board at the site (boluses, SMBs, extended boluses and delivered basal) minus
      * the profile baseline (the profile basal alone), both from the engine's site model. The zero-temp
      * IOB is the same quantity from the engine run with delivered basal set to zero from one minute
-     * after [now]: every part of it, IOB and activity alike, comes from that run, since with basal in
-     * the crowding mix a zero temp also changes how fast the boluses absorb.
+     * after [now]: every part of it, IOB and activity alike, comes from that run, since with basal
+     * interacting with the other doses a zero temp also changes how fast the boluses absorb.
      */
     private fun composeTsunamiResult(time: Long, sensitivityRatio: Double, now: Long, useAutoBasal: Boolean = false): IobTotal {
         val iobTotal = totalMinusProfile(tsunamiIobEngine.resultAt(time, sensitivityRatio), useAutoBasal)

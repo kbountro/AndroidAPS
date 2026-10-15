@@ -68,20 +68,18 @@ enum class DoubleKey(
     // indirect framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no
     // single duration number would actually be dose-independent or exact. 2.0 doubles every rate and
     // 0.5 halves it, which compresses or stretches the whole curve in time by that factor, up to the
-    // once-a-minute rate refresh (1 U dose: peak at 36 / 71 / 142 min at 2.0 / 1.0 / 0.5). Default
-    // 1.0 reproduces the unscaled fitted constants.
+    // once-a-minute rate refresh: the time to the activity peak is divided by it and the peak height
+    // multiplied by it (single doses of 0.1-10 U: within 0.6 min and 0.4% at 0.5-2, 1.5 min and
+    // 1.5% at 0.2-5). Default 1.0 reproduces the unscaled fitted constants.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
 
-    // Traffic Jam crowding mix between all delivered insulin - boluses, SMBs, extended boluses and
-    // basal including temps (CrowdingGroup.DELIVERED in TsunamiIobEngineImpl): each bolus's, the
-    // extended boluses' and the basal's depot/transit rate follows (1 - mix) * (its own depot mass)
-    // + mix * (the whole delivered depot mass); the basal's own depot is all of its basal. 1.0
-    // (default) crowds every dose by the whole depot, as fitted: a 12-SMB cascade (7.85 U over 160
-    // min, no basal) reaches 50% / 90% of (delivered - IOB) 46.5 / 68.9 min later than the same SMBs
-    // computed separately. 0.5: 32.0 / 45.3; 0.3: 23.4 / 32.4; 0.1: 10.9 / 15.1; 0.0: each dose
-    // crowded only by its own depot, 0 / 0. On a steady 1 U/h basal: 58.2 / 110.7 at 1.0, 31.1 /
-    // 56.6 at 0.3. Not fitted (the EPAR data has single doses with no basal only); a dose with no
-    // other insulin on board, basal included, is the same at every value.
+    // Traffic Jam dose interaction (shown as "Dose Interaction"; CrowdingGroup in TsunamiIobEngineImpl):
+    // how much insulin still being absorbed at the site slows other insulin down. Every delivery is
+    // one dose - each bolus/SMB and each minute's basal (temps included), extended-bolus and profile-
+    // basal delivery - and each dose's depot/transit rate follows (1 - value) * (its own depot mass) +
+    // value * (the depot mass of its whole group: all delivered insulin, or the profile baseline).
+    // 0.0 turns it off: no dose interacts with any other. 1.0 (default): all insulin follows the same
+    // path, one pooled depot, as fitted. Not fitted (the EPAR data has single doses with no basal only).
     InsulinTrafficJamMixing("insulin_traffic_jam_mixing", 1.0, 0.0, 1.0, hideParentScreenIfHidden = true),
 
 }

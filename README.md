@@ -24,8 +24,8 @@ boluses and delivered basal (the profile rate, temp basals and zero temps alike)
 other: a cascade of SMBs slows every earlier SMB still in the depot or in transit (which drains
 at the depot's rate), and a basal rate slows the doses given on top of it. Crowding stays within
 one infusion site: insulin given before a cannula/site change never crowds insulin given after
-it. How strongly doses crowd each other is a setting, the crowding mix (see "Crowding between
-doses" below); at its default of 1 they all share one rate, as described here. With the fitted constants (below) the shared
+it. How strongly doses crowd each other is a setting, the dose interaction (see "Dose
+interaction" below); at its default of 1 they all share one rate, as described here. With the fitted constants (below) the shared
 rate is 0.0298 per minute with 0.1U in the depot, 0.0178 with 1U and 0.0116 with 7U.
 
 A new dose goes into the depot, and the depot and transit rate is re-evaluated right after it with
@@ -54,7 +54,7 @@ measurements): K1_B0 0.017258, K1_B1 -0.215412, active-stage half-life 1.6 minut
 counted in full in the same crowding mass as the SMBs, no such constants fit both the EPAR curves
 (no basal infused) and TsunamiMods' small-dose curves placed on top of a basal rate. The current
 constants are fitted to the EPAR curves alone, with no basal; how much a basal rate slows the
-doses on it is set by the crowding mix (see "Crowding between doses" below).
+doses on it is set by the dose interaction (see "Dose interaction" below).
 
 The next version also gave the active stage a crowding-dependent rate of its own (0.0427785 *
 A^-0.4966087, A the active mass) and fitted four constants directly to the EPAR curves. Its
@@ -92,7 +92,7 @@ law's extrapolation.
 
 Minutes until 1 - IOB/dose of an isolated dose reaches 0.5 / 0.9 (nothing else in the system, no
 basal, absorption speed 1.0, whole curve, not cut at 480 minutes). The other columns are each
-version's own figures with the rate held per dose (on a basal rate, see "Crowding between doses"):
+version's own figures with the rate held per dose (on a basal rate, see "Dose interaction"):
 
 | Dose | Current fit (two steps, fixed active-stage rate) | Previous fit (crowded active stage) | Fit before that (fixed active-stage rate; EPAR plus TsunamiMods' small-dose curves) | Fit with the rate held per dose | Fit to raw EPAR activity alone (rate held per dose) | Depot-only version | TsunamiMods |
 |------|---------------------------------------------------|-------------------------------------|---------------------------------------------------------------------------------------|---------------------------------|-----------------------------------------------------|--------------------|-------------|
@@ -108,8 +108,8 @@ TsunamiMods' curve. The engine drops a dose 480 minutes after it is given. At ab
 absorption speed 0.5, 0.038% of a 1U dose, 2.3% of 3U and 5.5% of 5U.
 
 A Python replica of the engine without its 480-minute window (equal to the engine's Kotlin code
-run on the JVM within 4.1e-8U of IOB over the first 480 minutes, at crowding mix 0 to 1 and
-absorption speed 0.5 to 2) gives the following, at the default crowding mix of 1. For a
+run on the JVM within 4.1e-8U of IOB over the first 480 minutes, at dose interaction 0 to 1 and
+absorption speed 0.5 to 2) gives the following, at the default dose interaction of 1. For a
 cascade of 12 SMBs totalling 7.85U (0.9, 0.6, 1.3, 0.4, 0.7, 0.5, 0.3, 0.8, 0.5, 0.4, 0.55 and
 0.9U at minutes 0, 10, 20, 35, 45, 60, 75, 90, 105, 120, 140 and 160; not the 6.85U device-log
 sequence further below), the cascade's IOB exceeds the sum of the SMBs' separate IOB
@@ -132,13 +132,13 @@ and the real data.
 
 ## Per-patient absorption speed
 
-A preference (Insulin settings → Absorption Speed and Crowding → Absorption Speed,
+A preference (Insulin settings → Absorption Speed and Dose Interaction → Absorption Speed,
 `DoubleKey.InsulinTrafficJamSpeedMultiplier`, range 0.2-5.0, default 1.0) multiplies every
 stage's rate alike: the shared depot/transit rate and the active stage's rate. 2.0 makes insulin
 go through every stage twice as fast as standard, 0.5 half as fast, so the whole curve is
-compressed or stretched in time by that factor, up to the once-a-minute rate refresh: a 1U dose's
-activity peaks after 36 minutes at 2.0, 71 at 1.0 and 142 at 0.5, and 1 - IOB/dose reaches 0.5 /
-0.9 after 43 / 78 minutes at 2.0 (default: 86 / 155) and 173 / 309 at 0.5. It's a direct
+compressed or stretched in time by that factor, up to the once-a-minute rate refresh: the time to
+the activity peak is divided by it and the peak height multiplied by it (single doses of 0.1-10U:
+within 0.6 minutes and 0.4% at 0.5-2, 1.5 minutes and 1.5% at 0.2-5; Python replica). It's a direct
 multiplier applied as-is, not a derived "effective DIA" or other indirect framing, since this
 model's decay is dose-dependent (crowding) and asymptotic, so no single duration number would
 actually be dose-independent or exact.
@@ -147,29 +147,29 @@ At the default 1.0, this is an exact no-op: every rate is multiplied by `1.0`, w
 bit-for-bit identical to the unscaled rate, so the default behaves exactly like the fit
 described above with no knob present at all.
 
-## Crowding between doses
+## Dose interaction
 
-A second preference (Insulin settings → Absorption Speed and Crowding → Crowding Between Doses,
+A second preference (Insulin settings → Absorption Speed and Dose Interaction → Dose Interaction,
 `DoubleKey.InsulinTrafficJamMixing`, range 0-1, default 1.0) sets how much insulin still being
-absorbed slows other insulin down: boluses, SMBs, extended boluses and delivered basal (profile
-rate, temp basals, zero temps and temps faked by extended boluses). Each bolus/SMB keeps its own
-depot, transit and active stage, the extended boluses and the delivered basal one each, and each
-one's depot/transit rate follows its crowding mass, (1 - mix) × its own depot mass + mix × the
-depot mass of all delivered insulin at that site. The basal's own depot is all of its basal, so
-basal still crowds itself as before. At 1 every dose gets the rate of the whole depot, which is
-exactly the one shared pool fitted above. At 0 each dose is crowded only by its own depot, so a
+absorbed slows other insulin down. Every delivery is one dose: each bolus or SMB, and each minute's
+delivered basal (profile rate, temp basals, zero temps and temps faked by extended boluses),
+extended bolus and profile basal. Below 1 each dose keeps its own depot, transit and active stage,
+and its depot/transit rate follows its crowding mass, (1 - value) × its own depot mass + value ×
+the depot mass of its whole group at that site: all delivered insulin, or, for the profile
+baseline, all profile basal. At 0 the feature is off: no dose interacts with any other, each
+absorbs as an isolated dose of its own size (a minute of basal as a dose of rate/60 U), and a
 cascade is the sum of its SMBs' separate curves on any basal rate, up to the rate refresh: every
 bolus's timestamp is also a refresh point for the others (the 12-SMB cascade given 22 s past each
-minute: within 2.7e-4U of IOB at speed 1; exact with every SMB on a whole minute). A dose given
-with no other insulin on board, basal included, is the same at every value, so the fit to the
-EPAR curves (single doses, no basal) does not depend on it, and it is not fitted. The profile
-baseline still crowds only itself (see above).
+minute: within 2.7e-4U of IOB at speed 1; exact with every SMB on a whole minute). At 1 all insulin
+follows the same path: every dose gets the rate of the whole depot, which is exactly the one shared
+pool fitted above. It is not fitted: the EPAR curves are single doses with no basal, which absorb
+the same at every value.
 
 The 12-SMB cascade above, in the Python replica, minutes by which its delivered insulin minus IOB
 reaches 50% / 90% of 7.85U later than for the same SMBs computed one at a time, and the largest
 excess of its IOB over theirs:
 
-| Crowding mix | Delay at 50% / 90% | Largest extra IOB |
+| Dose interaction | Delay at 50% / 90% | Largest extra IOB |
 |---|---|---|
 | 1 (default) | 46.5 / 68.9 | 23.2% of 7.85U |
 | 0.5 | 32.0 / 45.3 | 16.8% |
@@ -198,9 +198,12 @@ A single dose on a steady basal rate, minutes until 1 - (its own IOB)/dose reach
 | 3U | 116 / 230 | 123 / 253 | 112 / 215 | 116 / 231 | 111 / 208 | 113 / 220 |
 | 5U | 126 / 246 | 132 / 266 | 123 / 233 | 126 / 247 | 122 / 227 | 124 / 237 |
 
-Per-dose bookkeeping is used only below 1: at 1 the engine keeps one pool for all boluses, as
-before. Below 1, a dose whose own depot and transit hold less than 1e-6U is merged into one shared
-pool for retired doses, so the number of pools stays at the number of doses still being absorbed.
+Per-dose bookkeeping is used only below 1: at 1 the engine keeps one pool per category for all
+doses, as before. Below 1, a dose whose own depot and transit hold less than 1e-6U is merged into its
+category's pool for retired doses, so the number of pools stays at the number of doses still being
+absorbed. That includes every minute of basal and profile basal still absorbing, so below 1 one
+simulation of the IOB window (480 minutes back to 480 minutes ahead) takes longer: 133-146 ms at
+0.3-0.7 and 28 ms at 0, against 4-5 ms at 1 (JVM on the cloud test machine, not a phone).
 
 ## Real multi-dose behavior
 
