@@ -62,13 +62,26 @@ enum class DoubleKey(
     ActivityScaleFactor("activity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
     InactivityScaleFactor("inactivity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
 
-    // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on the
-    // shared depot/transit rate (K1_B0), applied as-is - no derived "effective DIA" or other indirect
-    // framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no single
-    // duration number would actually be dose-independent or exact. 2.0 means absorption - and
-    // therefore roughly peak activity timing - is twice as fast as standard; 0.5 means half as
-    // fast. Elimination (KE) is deliberately never scaled by this - see PdModel in
-    // TsunamiIobEngineImpl for why. Default 1.0 reproduces the unscaled fitted constants.
+    // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on every
+    // stage's rate alike, the shared depot/transit rate (K1_B0) and the active stage's exit rate
+    // (KE, PdModel in TsunamiIobEngineImpl), applied as-is - no derived "effective DIA" or other
+    // indirect framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no
+    // single duration number would actually be dose-independent or exact. 2.0 doubles every rate and
+    // 0.5 halves it, which compresses or stretches the whole curve in time by that factor, up to the
+    // once-a-minute rate refresh: the time to the activity peak is divided by it and the peak height
+    // multiplied by it (single doses of 0.1-10 U: within 0.6 min and 0.4% at 0.5-2, 1.5 min and
+    // 1.5% at 0.2-5). Default 1.0 reproduces the unscaled fitted constants.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
+
+    // Traffic Jam dose interaction (shown as "Dose Interaction"; CrowdingGroup in TsunamiIobEngineImpl):
+    // the share of every dose that absorbs together with all insulin at the site. Every delivery is
+    // one dose - each bolus/SMB and each minute's basal (temps included), extended-bolus and profile-
+    // basal delivery - split into a shared branch, value of it, crowded by its whole group's depot (all
+    // delivered insulin, or the profile baseline) as at 1.0, and an individual branch, 1 - value of it,
+    // absorbing as an isolated dose. Every IOB is then value * (its value at 1.0) + (1 - value) * (the
+    // doses' isolated curves, summed), and a lone dose follows the fitted curve at every value.
+    // 0.0 turns it off: no dose interacts with any other. 1.0 (default): all insulin follows the same
+    // path, one pooled depot, as fitted. Not fitted (the EPAR data has single doses with no basal only).
+    InsulinTrafficJamMixing("insulin_traffic_jam_mixing", 1.0, 0.0, 1.0, hideParentScreenIfHidden = true),
 
 }

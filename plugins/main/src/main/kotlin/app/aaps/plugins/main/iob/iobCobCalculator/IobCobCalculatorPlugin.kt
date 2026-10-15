@@ -139,10 +139,11 @@ class IobCobCalculatorPlugin @Inject constructor(
                                event.isChanged(IntKey.InsulinOrefPeak.key) ||
                                // The Traffic Jam/Pool Compartment engine (TsunamiIobEngineImpl) caches
                                // simulated results per timestamp across calls - unlike the stock
-                               // per-call calculators, a change to either of these two inputs needs an
+                               // per-call calculators, a change to any of these inputs needs an
                                // explicit cache invalidation here or it keeps serving pre-computed,
                                // now-stale results until something else happens to clear the cache.
                                event.isChanged(DoubleKey.InsulinTrafficJamSpeedMultiplier.key) ||
+                               event.isChanged(DoubleKey.InsulinTrafficJamMixing.key) ||
                                event.isChanged(DoubleKey.ApsAmaBolusSnoozeDivisor.key)
                            ) {
                                resetDataAndRunCalculation("onEventPreferenceChange", event)

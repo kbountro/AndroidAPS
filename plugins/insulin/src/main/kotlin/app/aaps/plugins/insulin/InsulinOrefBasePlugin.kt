@@ -22,6 +22,8 @@ import app.aaps.core.keys.interfaces.Preferences
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 
 /**
@@ -55,6 +57,11 @@ abstract class InsulinOrefBasePlugin(
         // Must match TsunamiIobEngineImpl's DIA horizon (8h) - kept separate since that
         // engine constant is private and this preview path is decoupled from the pooled engine.
         private const val TRAFFIC_JAM_HORIZON_MINUTES = 480.0
+
+        // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
+        private const val TRAFFIC_JAM_KE = 0.1297809 // active-stage clearance, fitted (t1/2 5.3 min); scaled by speed like every rate
+        private const val TRAFFIC_JAM_K1_B0 = 0.01784168
+        private const val TRAFFIC_JAM_K1_B1 = -0.2224188
     }
 
     private var lastWarned: Long = 0
@@ -189,41 +196,76 @@ abstract class InsulinOrefBasePlugin(
      * which is out of scope here. Kept as a separate copy since that engine's constants are
      * private and this path is decoupled from the pooled engine.
      *
+     * As in the engine, the shared depot/transit rate is re-evaluated every minute from the dose's
+     * own live depot mass (the constants are fitted that way), so the curve is tabulated once per
+     * (amount, speed) on a 1-min grid and evaluated in between by exact propagation.
+     *
      * Note this also fixes a pre-existing bug in the previous Weibull version of this function:
      * activityContrib was never scaled by bolus.amount here (unlike iobContrib, and unlike the
      * sibling pdModelIobCalculation above), silently under-reporting activity by a factor of the
      * dose size wherever this path was actually reached.
      */
     fun trafficJamPdModelIobCalculation(bolus: BS, t: Double): Iob {
-        // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
-        val ke = 0.0315818 // active-stage clearance, fitted (t1/2 21.9 min) - NEVER scaled by speed
-        val k1B0 = 0.032072
-        val k1B1 = -0.303093
+        val result = Iob()
+        if (bolus.amount <= 0.0) return result
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
-        // directly): only the crowded depot/transit rate scales, never ke - see that key's doc
-        // comment for why.
+        // directly to every stage's rate, ke included). The dose interaction does not apply here: a
+        // dose alone is the same at every value.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
-        // Depot and transit share one crowding-dependent rate (unpooled: driven by this dose's own amount).
-        val k1 = speedFactor * k1B0 * bolus.amount.pow(k1B1)
-        val k2 = k1
-        val result = Iob()
-
-        val d = exp(-k1 * t)
-        val x = chainStage2(k1, k2, t)
-        val a = threeStageA(k1, k2, ke, t)
+        val grid = trafficJamGrid(bolus.amount, speedFactor)
+        val (d, x, a) = trafficJamState(grid, speedFactor, t)
 
         // Subtract the (small, non-zero) residual right at the gating horizon so IOB reaches
         // exactly zero there instead of a visible cliff where the caller stops calling this at all.
-        val horizon = TRAFFIC_JAM_HORIZON_MINUTES
-        val dH = exp(-k1 * horizon)
-        val xH = chainStage2(k1, k2, horizon)
-        val aH = threeStageA(k1, k2, ke, horizon)
+        val (dH, xH, aH) = trafficJamState(grid, speedFactor, TRAFFIC_JAM_HORIZON_MINUTES)
 
-        result.activityContrib = bolus.amount * ke * a
-        result.iobContrib = bolus.amount * ((d + x + a) - (dH + xH + aH))
+        result.activityContrib = speedFactor * TRAFFIC_JAM_KE * a
+        result.iobContrib = (d + x + a) - (dH + xH + aH)
 
         return result
+    }
+
+    // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
+    private fun trafficJamRate(speedFactor: Double, depotMass: Double): Double =
+        speedFactor * TRAFFIC_JAM_K1_B0 * max(depotMass, 1e-6).pow(TRAFFIC_JAM_K1_B1)
+
+    /** (D, X, A) in U of an isolated dose of [amount] at whole minutes 0..TRAFFIC_JAM_HORIZON_MINUTES. */
+    private val trafficJamGrids = object : LinkedHashMap<Pair<Double, Double>, Array<DoubleArray>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Double, Double>, Array<DoubleArray>>?): Boolean = size > 256
+    }
+
+    private fun trafficJamGrid(amount: Double, speedFactor: Double): Array<DoubleArray> = synchronized(trafficJamGrids) {
+        trafficJamGrids.getOrPut(Pair(amount, speedFactor)) {
+            val n = TRAFFIC_JAM_HORIZON_MINUTES.toInt() + 1
+            val d = DoubleArray(n)
+            val x = DoubleArray(n)
+            val a = DoubleArray(n)
+            d[0] = amount
+            for (i in 1 until n) {
+                val k1 = trafficJamRate(speedFactor, d[i - 1])
+                val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, 1.0)
+                d[i] = nd; x[i] = nx; a[i] = na
+            }
+            arrayOf(d, x, a)
+        }
+    }
+
+    /** The dose's (D, X, A) [t] minutes after it: the grid point at or before [t], then exact propagation. */
+    private fun trafficJamState(grid: Array<DoubleArray>, speedFactor: Double, t: Double): Triple<Double, Double, Double> {
+        if (t <= 0.0) return Triple(grid[0][0], 0.0, 0.0)
+        val i = min(t.toInt(), grid[0].size - 1)
+        val k1 = trafficJamRate(speedFactor, grid[0][i])
+        return trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, speedFactor * TRAFFIC_JAM_KE, t - i)
+    }
+
+    /** Exact propagation of (D, X, A) by [dt] minutes with depot and transit at [k1] and the active stage at [ke]. */
+    private fun trafficJamPropagate(d0: Double, x0: Double, a0: Double, k1: Double, ke: Double, dt: Double): Triple<Double, Double, Double> {
+        if (dt <= 0.0) return Triple(d0, x0, a0)
+        val d = d0 * exp(-k1 * dt)
+        val x = x0 * exp(-k1 * dt) + d0 * chainStage2(k1, k1, dt)
+        val a = a0 * exp(-ke * dt) + x0 * chainStage2(k1, ke, dt) + d0 * threeStageA(k1, k1, ke, dt)
+        return Triple(d, x, a)
     }
 
     /** Second stage of a unit-dose 2-compartment chain entering at rate [r1], draining at [r2]. */
