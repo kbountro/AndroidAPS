@@ -137,7 +137,6 @@ class TsunamiAwareIobCobCalculator @Inject constructor(
         return sensitivityRatio
     }
 
-    /** Combines bolus/basal totals from the Tsunami engine into a final, rounded IobTotal with zero-temp projection. */
     /**
      * IOB = all insulin on board at the site (boluses, SMBs, extended boluses and delivered basal) minus
      * the profile baseline (the profile basal alone), both from the engine's site model. The zero-temp
