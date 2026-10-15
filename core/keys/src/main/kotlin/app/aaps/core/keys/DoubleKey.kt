@@ -72,13 +72,16 @@ enum class DoubleKey(
     // 1.0 reproduces the unscaled fitted constants.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
 
-    // Traffic Jam crowding mix between boluses/SMBs (CrowdingGroup.BOLUS in TsunamiIobEngineImpl):
-    // each bolus's depot/transit rate follows (1 - mix) * (its own depot mass) + mix * (the whole
-    // bolus group's depot mass). 1.0 (default) crowds every bolus by the group's whole depot, as
-    // fitted: a 12-SMB cascade (7.85 U over 160 min) reaches 50% / 90% of (delivered - IOB) 46.5 /
-    // 68.9 min later than the same SMBs computed separately. 0.5: 32.0 / 45.3; 0.3: 23.4 / 32.4;
-    // 0.1: 10.9 / 15.1; 0.0: each bolus crowded only by its own depot, 0 / 0. Not fitted (the EPAR
-    // data has single doses only); a dose with no other bolus insulin on board is the same at every value.
+    // Traffic Jam crowding mix between all delivered insulin - boluses, SMBs, extended boluses and
+    // basal including temps (CrowdingGroup.DELIVERED in TsunamiIobEngineImpl): each bolus's, the
+    // extended boluses' and the basal's depot/transit rate follows (1 - mix) * (its own depot mass)
+    // + mix * (the whole delivered depot mass); the basal's own depot is all of its basal. 1.0
+    // (default) crowds every dose by the whole depot, as fitted: a 12-SMB cascade (7.85 U over 160
+    // min, no basal) reaches 50% / 90% of (delivered - IOB) 46.5 / 68.9 min later than the same SMBs
+    // computed separately. 0.5: 32.0 / 45.3; 0.3: 23.4 / 32.4; 0.1: 10.9 / 15.1; 0.0: each dose
+    // crowded only by its own depot, 0 / 0. On a steady 1 U/h basal: 58.2 / 110.7 at 1.0, 31.1 /
+    // 56.6 at 0.3. Not fitted (the EPAR data has single doses with no basal only); a dose with no
+    // other insulin on board, basal included, is the same at every value.
     InsulinTrafficJamMixing("insulin_traffic_jam_mixing", 1.0, 0.0, 1.0, hideParentScreenIfHidden = true),
 
 }

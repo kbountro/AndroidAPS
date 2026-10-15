@@ -20,12 +20,12 @@ The depot and transit stages share one drain rate, and the more insulin sits in 
 slower that rate gets. The active stage drains at a fixed rate (half-life 5.3 minutes) that
 nothing changes. The shared rate is re-evaluated at every whole minute and right after every
 bolus, from the insulin then in the depot, and held in between. Boluses, SMBs and extended
-boluses crowd each other: a cascade of SMBs slows every earlier SMB still in the depot or in
-transit (which drains at the depot's rate). Delivered basal crowds only itself, so a basal rate
-does not slow the SMBs on top of it. Crowding stays within one infusion site: insulin given
-before a cannula/site change never crowds insulin given after it. How strongly boluses crowd
-each other is a setting, the crowding mix (see "Crowding between doses" below); at its default
-of 1 they all share one rate, as described here. With the fitted constants (below) the shared
+boluses and delivered basal (the profile rate, temp basals and zero temps alike) crowd each
+other: a cascade of SMBs slows every earlier SMB still in the depot or in transit (which drains
+at the depot's rate), and a basal rate slows the doses given on top of it. Crowding stays within
+one infusion site: insulin given before a cannula/site change never crowds insulin given after
+it. How strongly doses crowd each other is a setting, the crowding mix (see "Crowding between
+doses" below); at its default of 1 they all share one rate, as described here. With the fitted constants (below) the shared
 rate is 0.0298 per minute with 0.1U in the depot, 0.0178 with 1U and 0.0116 with 7U.
 
 A new dose goes into the depot, and the depot and transit rate is re-evaluated right after it with
@@ -36,7 +36,7 @@ cascade activity can still dip slightly, as each SMB slows the insulin feeding t
 in the 12-SMB cascade further below, by at most 0.7% of its peak from one minute to the next
 (Python replica of the engine).
 
-Profile basal (the true baseline, evaluated as if nothing else was happening) is tracked independently as usual, but following the same mechanism: it crowds only itself, like delivered basal, so with no temp basal running the two evolve identically.
+Profile basal (the true baseline, evaluated as if nothing else was happening) is tracked independently as usual, but following the same mechanism: it crowds only itself, as delivered basal does with nothing else on board, so with no temp basal and no other insulin running the two evolve identically. Above a crowding mix of 0, boluses, SMBs and extended boluses also slow the delivered basal, and the basal they hold back is booked to net basal IOB even with no temp running: it is basal still on board beyond what the programmed rate would leave on board on its own (largest for a 1U dose on a steady 1 U/h: 0.119U at mix 1, 0.040U at mix 0.3; Python model).
 
 ## Absorption rates and the fit
 
@@ -51,10 +51,10 @@ matched the EPAR activity curves with R^2 0.654 / 0.533 / 0.449 at 7 / 15 / 30U.
 constants were fitted with the live rate, to the EPAR curves plus TsunamiMods' curves at 0.2,
 0.5, 1, 2 and 3.5U (an extrapolation of TsunamiMods' own fit to the 7-30U EPAR data, not
 measurements): K1_B0 0.017258, K1_B1 -0.215412, active-stage half-life 1.6 minutes. With basal
-counted in the same crowding mass as the SMBs, no such constants fit both the EPAR curves (no
-basal infused) and TsunamiMods' small-dose curves placed on top of a basal rate, hence basal
-crowding only itself. That was found with those constants; the current constants, fitted to the
-EPAR curves alone, have not been tested with basal in the bolus group.
+counted in full in the same crowding mass as the SMBs, no such constants fit both the EPAR curves
+(no basal infused) and TsunamiMods' small-dose curves placed on top of a basal rate. The current
+constants are fitted to the EPAR curves alone, with no basal; how much a basal rate slows the
+doses on it is set by the crowding mix (see "Crowding between doses" below).
 
 The next version also gave the active stage a crowding-dependent rate of its own (0.0427785 *
 A^-0.4966087, A the active mass) and fitted four constants directly to the EPAR curves. Its
@@ -88,12 +88,11 @@ TsunamiMods' small-dose curves) 0.0572; TsunamiMods' Weibull form fitted directl
 (a0 69.944 minutes, a1 0.2177, p 1.9017, within 2.0% of TsunamiMods' 70.884 / 0.2134 / 1.9002).
 R^2 activity / IOB on the truncated curves: 0.982 / 0.997, 0.988 / 0.999, 0.969 / 0.998 at 7 /
 15 / 30U. No curve below 7U is in the fit, so the times below for smaller doses are the fitted
-law's extrapolation. Since a dose's rate does not depend on basal, each dose's own curve is the
-same on any basal rate.
+law's extrapolation.
 
-Minutes until 1 - IOB/dose of an isolated dose reaches 0.5 / 0.9 (nothing else in the system,
-absorption speed 1.0, whole curve, not cut at 480 minutes). The first three columns' times hold
-on any basal rate; the other columns are each version's own figures with the rate held per dose:
+Minutes until 1 - IOB/dose of an isolated dose reaches 0.5 / 0.9 (nothing else in the system, no
+basal, absorption speed 1.0, whole curve, not cut at 480 minutes). The other columns are each
+version's own figures with the rate held per dose (on a basal rate, see "Crowding between doses"):
 
 | Dose | Current fit (two steps, fixed active-stage rate) | Previous fit (crowded active stage) | Fit before that (fixed active-stage rate; EPAR plus TsunamiMods' small-dose curves) | Fit with the rate held per dose | Fit to raw EPAR activity alone (rate held per dose) | Depot-only version | TsunamiMods |
 |------|---------------------------------------------------|-------------------------------------|---------------------------------------------------------------------------------------|---------------------------------|-----------------------------------------------------|--------------------|-------------|
@@ -115,8 +114,8 @@ cascade of 12 SMBs totalling 7.85U (0.9, 0.6, 1.3, 0.4, 0.7, 0.5, 0.3, 0.8, 0.5,
 0.9U at minutes 0, 10, 20, 35, 45, 60, 75, 90, 105, 120, 140 and 160; not the 6.85U device-log
 sequence further below), the cascade's IOB exceeds the sum of the SMBs' separate IOB
 contributions by up to 23.2% of 7.85U, and its delivered insulin minus IOB reaches 50% / 90% of
-7.85U 46.5 / 68.9 minutes later than for the same SMBs computed one at a time and summed, on any
-basal rate (previous fit: 9.7% and 22.8 / 23.7 minutes). A basal rate started with no insulin on
+7.85U 46.5 / 68.9 minutes later than for the same SMBs computed one at a time and summed, with no
+basal (previous fit: 9.7% and 22.8 / 23.7 minutes). A basal rate started with no insulin on
 board (rate/60 U delivered at the end of every minute) reaches 50% / 90% of its steady-state
 activity after 81 / 196 minutes at 0.5 U/h and 96 / 237 minutes at 1 U/h (previous fit: 106 /
 246 and 113 / 262).
@@ -151,17 +150,20 @@ described above with no knob present at all.
 ## Crowding between doses
 
 A second preference (Insulin settings → Absorption Speed and Crowding → Crowding Between Doses,
-`DoubleKey.InsulinTrafficJamMixing`, range 0-1, default 1.0) sets how much boluses and SMBs still
-being absorbed slow each other down. Each bolus/SMB keeps its own depot, transit and active
-stage, and its depot/transit rate follows its crowding mass, (1 - mix) × its own depot mass + mix ×
-the depot mass of all boluses, SMBs and extended boluses at that site. At 1 every dose gets the
-rate of the whole depot, which is exactly the one shared pool fitted above. At 0 each dose is
-crowded only by its own depot, so a cascade is the sum of its SMBs' separate curves, up to the
-rate refresh: every bolus's timestamp is also a refresh point for the others (the 12-SMB cascade
-given 22 s past each minute: within 2.7e-4U of IOB at speed 1; exact with every SMB on a whole
-minute). A dose given with no other bolus insulin on board is the same at every value, so the fit
-to the EPAR curves (single doses only) does not depend on it, and it is not fitted. Basal is not
-affected.
+`DoubleKey.InsulinTrafficJamMixing`, range 0-1, default 1.0) sets how much insulin still being
+absorbed slows other insulin down: boluses, SMBs, extended boluses and delivered basal (profile
+rate, temp basals, zero temps and temps faked by extended boluses). Each bolus/SMB keeps its own
+depot, transit and active stage, the extended boluses and the delivered basal one each, and each
+one's depot/transit rate follows its crowding mass, (1 - mix) × its own depot mass + mix × the
+depot mass of all delivered insulin at that site. The basal's own depot is all of its basal, so
+basal still crowds itself as before. At 1 every dose gets the rate of the whole depot, which is
+exactly the one shared pool fitted above. At 0 each dose is crowded only by its own depot, so a
+cascade is the sum of its SMBs' separate curves on any basal rate, up to the rate refresh: every
+bolus's timestamp is also a refresh point for the others (the 12-SMB cascade given 22 s past each
+minute: within 2.7e-4U of IOB at speed 1; exact with every SMB on a whole minute). A dose given
+with no other insulin on board, basal included, is the same at every value, so the fit to the
+EPAR curves (single doses, no basal) does not depend on it, and it is not fitted. The profile
+baseline still crowds only itself (see above).
 
 The 12-SMB cascade above, in the Python replica, minutes by which its delivered insulin minus IOB
 reaches 50% / 90% of 7.85U later than for the same SMBs computed one at a time, and the largest
@@ -174,6 +176,27 @@ excess of its IOB over theirs:
 | 0.3 | 23.4 / 32.4 | 12.8% |
 | 0.1 | 10.9 / 15.1 | 6.5% |
 | 0 | 0 / 0 | 0% |
+
+On a steady basal rate (on for 24 hours before; Python model, same reference: the SMBs computed one
+at a time with no basal), delay at 50% / 90%:
+
+| Crowding mix | 0.5 U/h | 1 U/h |
+|---|---|---|
+| 1 (default) | 52.6 / 92.5 | 58.2 / 110.7 |
+| 0.5 | 36.7 / 62.1 | 41.2 / 76.3 |
+| 0.3 | 27.2 / 45.1 | 31.1 / 56.6 |
+| 0 | 0 / 0 | 0 / 0 |
+
+A single dose on a steady basal rate, minutes until 1 - (its own IOB)/dose reaches 0.5 / 0.9
+(Python model; no basal: 0.3U 68 / 121, 1U 86 / 155, 3U 108 / 195 at every mix):
+
+| Dose | Mix 1, 0.5 U/h | Mix 1, 1 U/h | Mix 0.5, 0.5 U/h | Mix 0.5, 1 U/h | Mix 0.3, 0.5 U/h | Mix 0.3, 1 U/h |
+|---|---|---|---|---|---|---|
+| 0.1U | 86 / 187 | 102 / 224 | 77 / 163 | 89 / 194 | 71 / 149 | 81 / 176 |
+| 0.3U | 90 / 192 | 104 / 227 | 82 / 170 | 92 / 198 | 77 / 158 | 86 / 181 |
+| 1U | 100 / 206 | 110 / 236 | 94 / 187 | 101 / 210 | 91 / 177 | 96 / 195 |
+| 3U | 116 / 230 | 123 / 253 | 112 / 215 | 116 / 231 | 111 / 208 | 113 / 220 |
+| 5U | 126 / 246 | 132 / 266 | 123 / 233 | 126 / 247 | 122 / 227 | 124 / 237 |
 
 Per-dose bookkeeping is used only below 1: at 1 the engine keeps one pool for all boluses, as
 before. Below 1, a dose whose own depot and transit hold less than 1e-6U is merged into one shared

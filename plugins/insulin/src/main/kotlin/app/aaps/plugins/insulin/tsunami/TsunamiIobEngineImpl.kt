@@ -137,9 +137,9 @@ class TsunamiIobEngineImpl @Inject constructor(
     // Five attribution categories (bolus, extended bolus, absolute temp-basal delivery,
     // profile basal, autosens-adjusted profile basal) each carry their own persistent
     // 3-compartment pool (depot -> transit -> active, see [PdModel]) so IOB/activity can
-    // still be broken down the same way AAPS expects. Bolus/extBolus share one crowding
-    // rate, basalAbs has its own, and profileBasal/autoProfileBasal share one driven by the
-    // plain profile pool - see [CrowdingGroup] for why basal crowds only itself.
+    // still be broken down the same way AAPS expects. Bolus, extBolus and basalAbs crowd each
+    // other at the crowding mix, and profileBasal/autoProfileBasal share one rate driven by the
+    // plain profile pool alone - see [CrowdingGroup].
     // Every dose is an impulse added straight into its category's depot mass; nothing
     // about any other category's or any earlier dose's state is ever rewritten - only each
     // group's absorption rate constant is updated, once a minute from its live depot mass,
@@ -176,7 +176,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier): scales
         // every stage's rate alike, the crowded depot/transit rate and KE, so the whole curve
         // stretches or compresses in time. Crowding mix between boluses
-        // (DoubleKey.InsulinTrafficJamMixing, see [CrowdingGroup.BOLUS]). Both read once per
+        // (DoubleKey.InsulinTrafficJamMixing, see [CrowdingGroup.DELIVERED]). Both read once per
         // simulated window, like the fitted constants are effectively constant - a mid-window
         // change to either preference is not retroactively applied to the past, same as those.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
@@ -195,7 +195,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         // One persistent set of pools (and crowding rates) per site generation, never shared
         // across generations. One pool per category, plus, at a crowding mix below 1, one pool per
-        // bolus/SMB event still absorbing (see [CrowdingGroup.BOLUS]).
+        // bolus/SMB event still absorbing (see [CrowdingGroup.DELIVERED]).
         class SiteState {
 
             // At a mix of 1 every bolus goes straight into the BOLUS pool, exact since all of them
@@ -225,14 +225,14 @@ class TsunamiIobEngineImpl @Inject constructor(
                         retired.add(b); iter.remove()
                     }
                 }
-                val bolusGroupDepot = groupDepotMass(pools, CrowdingGroup.BOLUS) + bolusPools.sumOf { it.D }
+                val deliveredDepot = groupDepotMass(pools, CrowdingGroup.DELIVERED) + bolusPools.sumOf { it.D }
                 for (cat in Category.entries) {
                     val pool = pools[cat.ordinal]
-                    val mass = if (cat.group == CrowdingGroup.BOLUS) PdModel.crowdingMass(pool.D, bolusGroupDepot, mixing)
+                    val mass = if (cat.group == CrowdingGroup.DELIVERED) PdModel.crowdingMass(pool.D, deliveredDepot, mixing)
                     else groupDepotMass(pools, cat.group)
                     pool.k = PdModel.rate(speedFactor, mass)
                 }
-                for (b in bolusPools) b.k = PdModel.rate(speedFactor, PdModel.crowdingMass(b.D, bolusGroupDepot, mixing))
+                for (b in bolusPools) b.k = PdModel.rate(speedFactor, PdModel.crowdingMass(b.D, deliveredDepot, mixing))
             }
         }
 
@@ -566,35 +566,37 @@ class TsunamiIobEngineImpl @Inject constructor(
     /**
      * Which pools crowd each other. Each group's depot/transit rates are driven by the live depot
      * mass of the group's own pools only:
-     *  - [BOLUS]: boluses, SMBs and extended boluses crowd each other, so an SMB cascade jams. How
-     *    much is the crowding mix m (DoubleKey.InsulinTrafficJamMixing, 0 to 1, not fitted - the
-     *    EPAR data has single doses only): each bolus/SMB event keeps its own (D, X, A) pool, the
-     *    extended-bolus pool counts as one more, and each pool's rate follows its crowding mass
-     *    (1 - m) * (its own depot mass) + m * (the group's whole depot mass) ([PdModel.crowdingMass]).
+     *  - [DELIVERED]: all insulin actually delivered - boluses, SMBs, extended boluses and basal
+     *    (profile rate, temp basals, zero temps and temps faked by extended boluses alike) - crowd
+     *    each other, so an SMB cascade jams and a basal rate slows the doses given on top of it.
+     *    How much is the crowding mix m (DoubleKey.InsulinTrafficJamMixing, 0 to 1, not fitted -
+     *    the EPAR data has single doses with no basal only): each bolus/SMB event keeps its own
+     *    (D, X, A) pool, the extended-bolus pool and the delivered-basal pool count as one more each,
+     *    and each pool's rate follows its crowding mass (1 - m) * (its own depot mass) + m * (the
+     *    group's whole depot mass) ([PdModel.crowdingMass]). The delivered-basal pool's own depot
+     *    is all of its basal, so basal crowds itself exactly as before, plus m times everything else.
      *    At m = 1 (default) every pool gets the rate of the group's whole depot mass, i.e. one pooled
-     *    (D, X, A) exactly as fitted, which the engine then runs as one pool; at m = 0 each bolus is
-     *    crowded only by its own depot, so a cascade is the sum of its SMBs' separate curves, up to
+     *    (D, X, A) exactly as fitted (bolus pools then run as one pool, still kept apart from the
+     *    extended-bolus and basal pools only for attribution); at m = 0 each pool is crowded only by
+     *    its own depot, so a cascade is the sum of its SMBs' separate curves, on any basal rate, up to
      *    the rate refresh: every bolus timestamp is also a refresh point for the other pools (12-SMB
      *    cascade given 22 s past each minute: within 2.7e-4U of IOB at speed 1; exact with SMBs on
-     *    whole minutes). A dose with no other bolus-group insulin on board is the same at every m.
-     *  - [BASAL]: delivered basal crowds only itself, so a bolus no longer slows the delivered
-     *    basal pool and none of its effect is booked to net basal IOB. Counted into the bolus
-     *    group instead, the basal depot mass slows every SMB on top of it, and no constants then
-     *    fit both the EPAR curves (no basal infused) and TsunamiMods' small-dose curves given on
-     *    a basal rate: see [PdModel] (found with earlier constants; not tested with the current
-     *    ones). Left out of crowding altogether, basal would sit at the rate of an empty depot and
-     *    reach 50% / 90% of a new steady state after 11 / 25 min (crowding only itself: 81 / 196
-     *    min at 0.5 U/h).
-     *  - [PROFILE]: the theoretical profile baseline, driven by the plain profile pool alone.
-     *    autoProfileBasal (which scales with sensitivityRatio) must never feed back into it, or the
-     *    "ground truth" profile curve would shift with autosens instead of reflecting only the
-     *    programmed rate. It follows the same rule as [BASAL], so with no temp basal running the
-     *    delivered and profile basal pools evolve identically and net basal IOB stays zero.
+     *    whole minutes). A dose with no other delivered insulin on board (no basal either) is the same
+     *    at every m.
+     *  - [PROFILE]: the theoretical profile baseline, driven by the plain profile pool alone, exactly
+     *    as delivered basal crowds itself with nothing else on board. autoProfileBasal (which scales
+     *    with sensitivityRatio) must never feed back into it, or the "ground truth" profile curve
+     *    would shift with autosens instead of reflecting only the programmed rate. With no temp
+     *    basal and no other insulin on board the delivered and profile basal pools evolve
+     *    identically and net basal IOB stays zero. At m > 0 boluses, SMBs and extended boluses slow
+     *    the delivered basal, and the basal they hold back in the depot (and its lower activity) is
+     *    booked to net basal IOB, even with no temp running: that is basal still on board beyond what
+     *    the programmed rate would leave on board on its own.
      */
-    private enum class CrowdingGroup { BOLUS, BASAL, PROFILE }
+    private enum class CrowdingGroup { DELIVERED, PROFILE }
 
     private enum class Category(val group: CrowdingGroup, val drivesGroupRate: Boolean = true) {
-        BOLUS(CrowdingGroup.BOLUS), EXT_BOLUS(CrowdingGroup.BOLUS), BASAL_ABS(CrowdingGroup.BASAL),
+        BOLUS(CrowdingGroup.DELIVERED), EXT_BOLUS(CrowdingGroup.DELIVERED), BASAL_ABS(CrowdingGroup.DELIVERED),
         PROFILE_BASAL(CrowdingGroup.PROFILE), AUTO_PROFILE_BASAL(CrowdingGroup.PROFILE, drivesGroupRate = false)
     }
 
@@ -639,7 +641,7 @@ class TsunamiIobEngineImpl @Inject constructor(
      *
      * Depot and transit share ONE crowding-dependent rate, K(M) = K1_B0 * M^K1_B1 ([rate]), where M
      * is the live depot mass of the dose's crowding group (D only - see groupDepotMass and
-     * CrowdingGroup; for boluses at a crowding mix below 1, [crowdingMass]). It is re-evaluated at
+     * CrowdingGroup; for delivered insulin at a crowding mix below 1, [crowdingMass]). It is re-evaluated at
      * every event (every whole minute and every bolus timestamp, right after that event's doses
      * enter D) and held until the next, and each interval is solved exactly. [KE] is fixed and
      * never touched by crowding (only the speed setting scales it, like every other rate), so
@@ -657,12 +659,12 @@ class TsunamiIobEngineImpl @Inject constructor(
      * Why the rate is live: earlier constants were fitted with the rate held at K(dose) for the
      * whole dose, while this engine re-evaluates it from the live depot mass. Run the way the
      * engine runs them with no basal, those constants scored EPAR activity R^2 0.654 / 0.533 /
-     * 0.449 at 7 / 15 / 30U. With the basal depot mass counted in the same crowding mass as the
-     * SMBs, no constants fit both the EPAR curves and TsunamiMods' small-dose curves given on a
-     * basal rate (KE ran to the upper end of any search range, and the EPAR objective defined
-     * below stayed near 0.26 at 0.5 U/h). Hence the separate crowding groups. That was found with
-     * constants fitted to EPAR plus TsunamiMods' small-dose curves; the current constants have not
-     * been tested with basal in the bolus group.
+     * 0.449 at 7 / 15 / 30U. When constants were fitted to EPAR plus TsunamiMods' small-dose curves
+     * given on a basal rate, with the basal depot mass counted in full in the SMBs' crowding mass
+     * (crowding mix 1), no constants fitted both (KE ran to the upper end of any search range, and
+     * the EPAR objective defined below stayed near 0.26 at 0.5 U/h). The current constants are
+     * fitted to EPAR alone, with no basal; how much a basal rate slows the doses given on it is set
+     * by the crowding mix (see below).
      *
      * Fit, in two steps, to the digitized EPAR GIR clamp curves (Lyumjev/LY900014, 7/15/30U, points
      * up to 480 min, no basal insulin infused). Both steps use curves truncated at 480 min: every
@@ -684,11 +686,13 @@ class TsunamiIobEngineImpl @Inject constructor(
      * Weibull form fitted directly to it: 0.0582, a0 69.944 min, a1 0.2177, p 1.9017, within 2.0%
      * of TsunamiMods' constants). R^2 activity / IOB: 0.982 / 0.997, 0.988 / 0.999, 0.969 / 0.998
      * at 7 / 15 / 30U. No curve below 7U is in the fit, so the small-dose timing below is the
-     * fitted law's extrapolation. Since a dose's rate does not depend on basal, each dose's own
-     * curve is the same on any basal rate. Isolated dose at speed 1.0, minutes until 1 - IOB/dose
-     * reaches 0.5 / 0.9 (whole curve, not cut at 480 min): 0.1U 55 / 97 (TsunamiMods 52 / 97),
-     * 0.3U 68 / 121 (65 / 122), 1U 86 / 155 (84 / 158), 3U 108 / 195 (106 / 200), 5U 120 / 217
-     * (119 / 223). Still on board at the 480-min horizon, where the engine drops a dose: at speed
+     * fitted law's extrapolation. Isolated dose with no basal at speed 1.0, minutes until 1 -
+     * IOB/dose reaches 0.5 / 0.9 (whole curve, not cut at 480 min): 0.1U 55 / 97 (TsunamiMods
+     * 52 / 97), 0.3U 68 / 121 (65 / 122), 1U 86 / 155 (84 / 158), 3U 108 / 195 (106 / 200), 5U
+     * 120 / 217 (119 / 223). Given on a steady basal rate, the basal depot crowds the dose (see
+     * CrowdingGroup.DELIVERED; same at mix 0, slower above): on 0.5 / 1 U/h, 0.3U 90 / 192 and
+     * 104 / 227, 1U 100 / 206 and 110 / 236, 3U 116 / 230 and 123 / 253 at mix 1; 0.3U 77 / 158 and
+     * 86 / 181, 1U 91 / 177 and 96 / 195, 3U 111 / 208 and 113 / 220 at mix 0.3. Still on board at the 480-min horizon, where the engine drops a dose: at speed
      * 1.0, at most 1.1e-8% of a dose up to 7U and 0.09% of 30U; at speed 0.5 (every stage at half
      * its rate), 0.038% of 1U, 2.3% of 3U, 5.5% of 5U and 28% of 30U.
      * Python replica of this engine without its 480-min window (equal to this file run on the JVM
@@ -698,10 +702,12 @@ class TsunamiIobEngineImpl @Inject constructor(
      * at 60, 0.3 at 75, 0.8 at 90, 0.5 at 105, 0.4 at 120, 0.55 at 140, 0.9 at 160): the cascade's
      * IOB exceeds the sum of its SMBs' separate IOB contributions by up to 23.2% of 7.85U, and its
      * delivered insulin minus IOB reaches 50% / 90% of 7.85U 46.5 / 68.9 min later than for the
-     * same SMBs computed separately and summed, on any basal rate (previous constants: 9.7%, 22.8 /
-     * 23.7 min). That is at the default crowding mix of 1 (CrowdingGroup.BOLUS); at a mix of 0.5 /
+     * same SMBs computed separately and summed, with no basal (previous constants: 9.7%, 22.8 /
+     * 23.7 min). That is at the default crowding mix of 1 (CrowdingGroup.DELIVERED); at a mix of 0.5 /
      * 0.3 / 0.1 / 0 (replica, one pool per SMB): up to 16.8 / 12.8 / 6.5 / 0% of 7.85U, and 32.0 /
-     * 45.3, 23.4 / 32.4, 10.9 / 15.1 and 0 / 0 min later. With basal crowding only itself, a basal rate started with no insulin on board
+     * 45.3, 23.4 / 32.4, 10.9 / 15.1 and 0 / 0 min later. On a steady 0.5 / 1 U/h basal rate, against
+     * the same reference: 52.6 / 92.5 and 58.2 / 110.7 min later at mix 1, 27.2 / 45.1 and 31.1 /
+     * 56.6 at mix 0.3, 0 / 0 at mix 0. A basal rate started with no other insulin on board
      * (rate/60 U at the end of every minute) reaches 50% / 90% of its steady-state activity after
      * 81 / 196 min at 0.5 U/h and 96 / 237 min at 1 U/h (previous constants: 106 / 246 and 113 /
      * 262).
@@ -765,8 +771,9 @@ class TsunamiIobEngineImpl @Inject constructor(
             speedFactor * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
 
         /**
-         * Crowding mass of a bolus-group pool with [ownDepot] U in its own depot, when the whole
-         * group's depots hold [groupDepot] U, at crowding mix [mixing] (see CrowdingGroup.BOLUS).
+         * Crowding mass of a delivered-insulin pool with [ownDepot] U in its own depot, when the
+         * whole group's depots hold [groupDepot] U, at crowding mix [mixing] (see
+         * CrowdingGroup.DELIVERED).
          */
         fun crowdingMass(ownDepot: Double, groupDepot: Double, mixing: Double): Double =
             (1.0 - mixing) * ownDepot + mixing * groupDepot
