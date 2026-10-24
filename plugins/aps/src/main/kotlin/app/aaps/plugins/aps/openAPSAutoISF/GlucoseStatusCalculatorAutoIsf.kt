@@ -52,7 +52,11 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val fslValue = fsl.raw
         val fslRaw = fsl.noise
         val fslSmooth = fsl.value
-        val fslReally = cgm.text=="Libre2" || cgm.text=="Libre2 Native" || cgm.text=="Libre3"   // || cgm.text=="G7"
+        // Force1MinuteRaw only widens eligibility to the empirical timing check just below
+        // (orig[0]-orig[2] under 3 minutes) - it does not skip that check, so a sensor that
+        // isn't actually sampling faster than 5 minutes still falls back to bucketed data.
+        val fslReally = cgm.text=="Libre2" || cgm.text=="Libre2 Native" || cgm.text=="Libre3" ||   // || cgm.text=="G7"
+            preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)
         var fslMinDur = 15
         if (sizeRecords == 1) {
             aapsLogger.debug(LTag.GLUCOSE, "sizeRecords==1")
