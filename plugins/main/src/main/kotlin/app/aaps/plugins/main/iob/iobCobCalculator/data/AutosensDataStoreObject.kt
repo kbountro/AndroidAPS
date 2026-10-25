@@ -47,12 +47,13 @@ class AutosensDataStoreObject : AutosensDataStore {
                 it.bgReadings = this.bgReadings.toMutableList()
                 it.autosensDataTable = LongSparseArray<AutosensData>(this.autosensDataTable.size).apply { putAll(this@AutosensDataStoreObject.autosensDataTable) }
                 it.bucketedData = this.bucketedData?.toMutableList()
-                // Workers reassign iobCobCalculator.ads to this clone once they're done ("work on
-                // a local copy and set back when finished") - carrying these over is what makes that
-                // swap transparent. Without it, referenceTime silently resets to -1 on every such
-                // reassignment, so the 5-minute grid in createBucketedDataRecalculated() never gets
-                // to keep its anchor and ends up re-anchoring to raw CGM timestamps every cycle instead.
-                it.referenceTime = this.referenceTime
+                // referenceTime is deliberately not carried over. Workers reassign iobCobCalculator.ads
+                // to this clone every cycle, so the grid in createBucketedDataRecalculated() re-anchors
+                // on the newest reading and bucketedData[0] stays the newest 1-minute value.
+                // InvokeLoopWorker triggers the loop off that value (the Overview shows it too); with a
+                // carried-over anchor, 1-minute CGMs loop only every 5 minutes. lastUsed5minCalculation
+                // is carried over so createBucketedData() still notices a 5min/1min mode change and
+                // drops the cache.
                 it.lastUsed5minCalculation = this.lastUsed5minCalculation
             }
         }

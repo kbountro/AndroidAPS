@@ -59,9 +59,9 @@ class UnscentedKalmanFilterPluginTest {
     @Test
     fun interleavedDenseAndBucketedCallsDoNotResetLearning() {
         // One loop cycle on the raw path: the dense raw window, then the bucketed grid (whose newest
-        // point trails the newest raw reading by up to ~5 minutes), then the next minute's dense
-        // window. Each reset bumps the persisted session id: the very first call legitimately takes
-        // it to 1, and nothing here should take it to 2.
+        // point can trail the newest raw reading), then the next minute's dense window. Each reset
+        // bumps the persisted session id: the very first call legitimately takes it to 1, and nothing
+        // here should take it to 2.
         ukf.smooth(series(newest = T0, count = 60, stepMinutes = 1))
         ukf.smooth(series(newest = T0 - 3 * MIN, count = 12, stepMinutes = 5))
         ukf.smooth(series(newest = T0 + MIN, count = 60, stepMinutes = 1))

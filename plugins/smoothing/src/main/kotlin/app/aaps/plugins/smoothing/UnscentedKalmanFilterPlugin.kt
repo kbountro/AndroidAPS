@@ -301,10 +301,10 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
         val timeDiffMinutes = (currentTimestamp - lastProcessedTimestamp) / millisPerMinute
 
-        // This singleton is fed by two callers each loop when AutoISF's raw path is active:
-        // LoadBgDataWorker with the bucketed 5-minute grid, and GlucoseStatusCalculatorAutoIsf with
-        // the dense raw window, whose newest point is up to ~5 minutes newer than the grid's. Treating
-        // that as "went backwards" would wipe learned R on every single cycle.
+        // This singleton is fed by two callers when AutoISF's raw path is active: LoadBgDataWorker
+        // with the bucketed 5-minute grid and GlucoseStatusCalculatorAutoIsf with the dense raw
+        // window, from several threads. Their newest points can be a reading or two apart in either
+        // order; treating that as "went backwards" would wipe learned R.
         if (timeDiffMinutes < -backwardsToleranceMinutes) {
             aapsLogger.info(LTag.GLUCOSE, "UKF: Timestamp went backwards, resetting learning")
             return true

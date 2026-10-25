@@ -55,10 +55,10 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         // preferences is only consulted when there really is dense data from a non-Libre sensor.
         val use1MinuteRaw = orig.size > 2 && orig[0].timestamp - orig[2].timestamp < 3 * 60000 &&
             (isLibre || preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw))
-        // On the raw path "now" is the newest raw reading, not the newest bucketed grid point, which
-        // trails it by up to ~5 minutes (AutosensDataStoreObject.adjustToReferenceTime). glucose, date
-        // and the staleness check follow that same instant, as do the sliding delta and the parabola
-        // fit below - otherwise eventualBG would pair a BG up to 5 minutes old with a current delta,
+        // On the raw path "now" is the newest raw reading. The bucketed grid re-anchors on it every
+        // cycle (see AutosensDataStoreObject.clone()), but taking it from orig directly keeps glucose,
+        // date, the staleness check, the sliding delta and the parabola fit on that same instant even
+        // if the grid ever lags it - otherwise eventualBG would pair an older BG with a current delta,
         // overestimating BG while it falls.
         val statusDate = if (use1MinuteRaw) orig[0].timestamp else nowDate
         if (statusDate < dateUtil.now() - 7 * 60 * 1000L && !allowOldData) {
@@ -96,12 +96,9 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         }
 
         val deltaResult = deltaCalculator.calculateDeltas(data)
-        // When eligible for the raw path, delta comes from a smoothed, continuously-sliding
-        // 5-minutes-ago comparison instead of the bucketed grid's staircase (that grid only advances
-        // once every ~5 real minutes no matter how often this function re-runs). shortAvgDelta and
-        // longAvgDelta stay on the bucketed path: they only meet delta through min()/max() in
-        // determine_basal, where a few minutes' staleness errs conservative - a stale average damps a
-        // rise, while a fall is still caught by the current delta.
+        // When eligible for the raw path, delta is a sliding 5-minutes-ago comparison on the raw
+        // window as smoothed now, rather than on the bucketed grid, whose points are interpolated
+        // from raw readings before smoothing. shortAvgDelta and longAvgDelta stay on the bucketed path.
         val fitValueAt = { i: Int -> smoothedRawWindow.getOrNull(i)?.recalculated ?: orig[i].value }
         val delta = (if (use1MinuteRaw) slidingDelta(smoothedRawWindow) else null) ?: deltaResult.delta
 

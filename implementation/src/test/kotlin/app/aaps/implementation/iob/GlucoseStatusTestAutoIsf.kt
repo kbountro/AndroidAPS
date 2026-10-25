@@ -230,10 +230,10 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     }
 
     @Test fun rawPathJudgesStalenessByNewestRawReading() {
-        // On the raw path the bucketed grid trails the newest raw reading by up to ~5 minutes. Here the
-        // grid's newest point is 7.5 min old (past the 7-minute staleness limit) while the newest raw
-        // reading is 2.5 min old - e.g. after a brief stream hiccup with an unlucky grid phase. Fresh
-        // raw data must not be dropped because of the grid's own lag.
+        // If the bucketed grid ever lags the newest raw reading, the raw path must still judge
+        // staleness by the raw reading. Here the grid's newest point is 7.5 min old (past the 7-minute
+        // staleness limit) while the newest raw reading is 2.5 min old: fresh raw data must not be
+        // dropped because of the grid's lag.
         whenever(dateUtil.now()).thenReturn(1514766900000L + T.secs(150).msecs())
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences

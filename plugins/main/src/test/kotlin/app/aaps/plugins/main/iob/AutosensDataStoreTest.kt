@@ -24,22 +24,35 @@ class AutosensDataStoreTest : TestBaseWithProfile() {
     }
 
     @Test
-    fun cloneShouldPreserveReferenceTimeAndLastUsed5minCalculation() {
-        // IobCobOrefWorker/IobCobOref1Worker call ads.clone(), compute on the copy, then reassign
-        // iobCobCalculator.ads to it ("work on a local copy and set back when finished") every
-        // single cycle. If clone() drops these two fields, referenceTime silently resets to -1 on
-        // every such reassignment, which defeats the 5-minute grid anchor in
-        // createBucketedDataRecalculated() - see that field's own "once referenceTime != null..."
-        // comment - and makes bucketedData[0] track the raw CGM timestamp every cycle instead of a
-        // stable grid.
-        autosensDataStore.referenceTime = T.mins(37).msecs()
-        autosensDataStore.lastUsed5minCalculation = false
+    fun newestBucketFollowsNewestOneMinuteReadingAcrossClones() {
+        // IobCobOrefWorker/IobCobOref1Worker replace iobCobCalculator.ads with ads.clone() every cycle,
+        // and InvokeLoopWorker starts a loop run only when bucketedData[0] has a newer timestamp than
+        // the last run. If the clone kept the 5-minute grid anchor, bucketedData[0] would stay on that
+        // grid and 1-minute CGM data would loop only every 5 minutes.
+        autosensDataStore.bgReadings = oneMinuteReadings(newest = T.mins(60).msecs())
+        autosensDataStore.createBucketedData(aapsLogger, dateUtil)
+        assertThat(autosensDataStore.bucketedData!![0].timestamp).isEqualTo(T.mins(60).msecs())
 
-        val cloned = autosensDataStore.clone() as AutosensDataStoreObject
+        val nextCycle = autosensDataStore.clone() as AutosensDataStoreObject
+        // carried over so createBucketedData() still notices a 5min/1min mode change
+        assertThat(nextCycle.lastUsed5minCalculation).isEqualTo(false)
+        nextCycle.bgReadings = oneMinuteReadings(newest = T.mins(61).msecs())
+        nextCycle.createBucketedData(aapsLogger, dateUtil)
 
-        assertThat(cloned.referenceTime).isEqualTo(T.mins(37).msecs())
-        assertThat(cloned.lastUsed5minCalculation).isEqualTo(false)
+        assertThat(nextCycle.bucketedData!![0].timestamp).isEqualTo(T.mins(61).msecs())
     }
+
+    private fun oneMinuteReadings(newest: Long): MutableList<GV> =
+        MutableList(30) { i ->
+            GV(
+                raw = 0.0,
+                noise = 0.0,
+                value = 100.0 + i,
+                timestamp = newest - T.mins(i.toLong()).msecs(),
+                sourceSensor = SourceSensor.UNKNOWN,
+                trendArrow = TrendArrow.FLAT
+            )
+        }
 
     @Test
     fun isAbout5minDataTest() {
