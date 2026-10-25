@@ -355,24 +355,12 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
     private fun findDataSegments(data: List<InMemoryGlucoseValue>): List<DataSegment> {
         if (data.size < 2) return emptyList()
-        val gaps = (0 until data.size - 1).map { (data[it].timestamp - data[it + 1].timestamp) / millisPerMinute }
-        // The lower bound used to be a flat 2.0, which assumes ~5-minute-spaced input: anything
-        // tighter was treated as a suspicious near-duplicate and forced a segment break. Fed a
-        // genuinely ~1-minute-cadence stream (dense raw data, not the bucketed 5-min grid), that
-        // flat 2.0 would break every single consecutive pair into its own one-point "segment",
-        // which processSegment() treats as too small to filter and just passes through unsmoothed
-        // (segmentSize < 2 below) - silently disabling the UKF entirely on exactly the input it's
-        // meant to help with. Scaling the bound to the data's own typical gap keeps today's
-        // 5-minute behavior identical (typicalGap~5 -> minGap~2.0, unchanged) while admitting a
-        // ~1-minute cadence as normal (typicalGap~1 -> minGap~0.5).
-        val typicalGap = gaps.sorted().let { it[it.size / 2] }
-        val minGap = (typicalGap * 0.4).coerceIn(0.5, 2.0)
         val segments = mutableListOf<DataSegment>()
         var segmentStart = 0
 
         for (i in 0 until data.size - 1) {
-            val timeDiff = gaps[i]
-            if (timeDiff !in minGap..majorGapThreshold || data[i].value == 38.0) {
+            val timeDiff = (data[i].timestamp - data[i + 1].timestamp) / millisPerMinute
+            if (timeDiff !in 2.0..majorGapThreshold || data[i].value == 38.0) {
                 if (i - segmentStart >= 2) {
                     segments.add(DataSegment(segmentStart, i))
                 }
@@ -449,13 +437,7 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
         if (endIdx > 0) {
             val dt = (data[endIdx - 1].timestamp - data[endIdx].timestamp) / millisPerMinute
-            // Same ~5-minute assumption as findDataSegments' old flat lower bound. Widened the same
-            // way so a ~1-minute cadence still gets a real initial rate estimate at the start of the
-            // segment instead of defaulting to 0.0 - minor on its own (only the oldest point in the
-            // segment, corrected by subsequent updates well before reaching the recent end callers
-            // actually care about), but no reason to leave it wrong for free. 5-minute cadence (dt~5)
-            // is unaffected either way.
-            if (dt in 0.4..7.0) {
+            if (dt in 3.0..7.0) {
                 initialRate = (data[endIdx - 1].value - data[endIdx].value) / dt
                 initialRate = initialRate.coerceIn(-4.0, 4.0)
             }
