@@ -98,6 +98,55 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.corrSqu).isWithin(0.0006).of(0.9430) // parabola fit quality
     }
 
+    @Test fun calculateValidForced1MinuteRawGlucoseStatusAutoIsf() {
+        // Same data as calculateValidLibreGlucoseStatusAutoIsf above, byte-for-byte, except the
+        // sensor is SYAI_TAG - not on the hardcoded Libre allowlist - and ApsAutoIsfForce1MinuteRaw
+        // is on instead. If the flag genuinely widens eligibility for the raw-data path (rather than,
+        // say, silently no-oping), this must produce the exact same fit results as that Libre test.
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        calculator.preferences = preferences
+        whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
+        whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
+        whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
+        whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyNonLibreData())
+        whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidNonLibreRawData())
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+        assertThat(glucoseStatus.parabolaMinutes).isWithin(0.1).of(14.0) // raw-path window, not the bucketed 35.0
+        assertThat(glucoseStatus.deltaPl).isWithin(0.0001).of(-1.7157)
+        assertThat(glucoseStatus.deltaPn).isWithin(0.0001).of(0.4255)
+        assertThat(glucoseStatus.bgAcceleration).isWithin(0.0001).of(2.1413)
+        assertThat(glucoseStatus.a0).isWithin(0.1).of(113.7)
+        assertThat(glucoseStatus.a1).isWithin(0.0001).of(-0.6451)
+        assertThat(glucoseStatus.a2).isWithin(0.0001).of(1.0706)
+        assertThat(glucoseStatus.corrSqu).isWithin(0.0006).of(0.9430)
+    }
+
+    @Test fun nonLibreSensorWithoutForceFlagShouldUseBucketedPath() {
+        // Identical non-Libre data to the test above, but the flag is explicitly off. Must match
+        // calculateValidGlucoseStatusAutoIsf's bucketed-path numbers exactly, not the raw-path ones -
+        // confirms the gate actually gates, rather than the raw path leaking through some other way.
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        calculator.preferences = preferences
+        whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
+        whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
+        whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
+        whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(false)
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyNonLibreData())
+        whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidNonLibreRawData())
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+        assertThat(glucoseStatus.duraISFminutes).isEqualTo(35.0)
+        assertThat(glucoseStatus.duraISFaverage).isWithin(0.1).of(221.5)
+        assertThat(glucoseStatus.parabolaMinutes).isWithin(0.1).of(35.0) // bucketed-path window, not the raw 14.0
+        assertThat(glucoseStatus.deltaPl).isWithin(0.1).of(-2.56)
+        assertThat(glucoseStatus.deltaPn).isWithin(0.1).of(-2.77)
+        assertThat(glucoseStatus.bgAcceleration).isWithin(0.01).of(-0.21)
+        assertThat(glucoseStatus.a0).isWithin(0.1).of(214.0)
+        assertThat(glucoseStatus.a1).isWithin(0.0001).of(-2.6786)
+        assertThat(glucoseStatus.a2).isWithin(0.0001).of(-0.1071)
+        assertThat(glucoseStatus.corrSqu).isWithin(0.0001).of(0.9643)
+    }
+
     @Test fun recentCalibrationShouldReturnNoFit() {
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
@@ -277,6 +326,42 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         origData.add(GV(value = 122.0, timestamp = 1514766120000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.LIBRE_2))
         origData.add(GV(value = 124.0, timestamp = 1514766060000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.LIBRE_2))
         origData.add(GV(value = 123.0, timestamp = 1514766000000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.LIBRE_2))
+        return origData
+    }
+
+    // Byte-for-byte copies of generateDummyBgData()/generateValidLibreData() above, except the
+    // sensor is SYAI_TAG - not on the hardcoded Libre allowlist - for the Force1MinuteRaw tests.
+    private fun generateDummyNonLibreData(): MutableList<InMemoryGlucoseValue> {
+        val list: MutableList<InMemoryGlucoseValue> = ArrayList()
+        list.add(InMemoryGlucoseValue(value = 214.0, timestamp = 1514766900000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        list.add(InMemoryGlucoseValue(value = 216.0, timestamp = 1514766600000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        list.add(InMemoryGlucoseValue(value = 219.0, timestamp = 1514766300000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        list.add(InMemoryGlucoseValue(value = 223.0, timestamp = 1514766000000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        list.add(InMemoryGlucoseValue(value = 222.0, timestamp = 1514765700000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        list.add(InMemoryGlucoseValue(value = 224.0, timestamp = 1514765400000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        list.add(InMemoryGlucoseValue(value = 226.0, timestamp = 1514765100000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        list.add(InMemoryGlucoseValue(value = 228.0, timestamp = 1514764800000, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        return list
+    }
+
+    private fun generateValidNonLibreRawData(): MutableList<GV> {
+        val origData: MutableList<GV> = ArrayList()
+        origData.add(GV(value = 114.0, timestamp = 1514766900000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 113.0, timestamp = 1514766840000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 114.0, timestamp = 1514766780000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 116.0, timestamp = 1514766720000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 114.0, timestamp = 1514766660000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 116.0, timestamp = 1514766600000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 116.0, timestamp = 1514766540000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 117.0, timestamp = 1514766480000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 118.0, timestamp = 1514766420000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 117.0, timestamp = 1514766360000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 119.0, timestamp = 1514766300000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 120.0, timestamp = 1514766240000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 123.0, timestamp = 1514766180000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 122.0, timestamp = 1514766120000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 124.0, timestamp = 1514766060000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 123.0, timestamp = 1514766000000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
         return origData
     }
 
