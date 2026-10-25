@@ -83,7 +83,10 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyBgData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidLibreData())
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
-        assertThat(glucoseStatus.glucose).isWithin(0.001).of(214.0)
+        // Raw path: glucose is the newest (smoothed) raw reading, not the bucketed grid point. The two
+        // fixtures here were never consistent with each other (214... bucketed vs 114... raw) - that
+        // didn't matter while only the parabola fit read the raw data.
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(114.0)
         assertThat(glucoseStatus.delta).isWithin(0.001).of(-2.0)
         assertThat(glucoseStatus.shortAvgDelta).isWithin(0.001).of(-2.5) // -2 -2.5 -3 deltas are relative to current value
         assertThat(glucoseStatus.longAvgDelta).isWithin(0.001).of(-2.0) // -2 -2 -2 -2
@@ -117,6 +120,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyNonLibreData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidNonLibreRawData())
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(114.0) // newest raw reading, as in the Libre test
         assertThat(glucoseStatus.delta).isWithin(0.0001).of(-2.0) // sliding delta: same fixture as calculateValidLibreGlucoseStatusAutoIsf's -2.0
         assertThat(glucoseStatus.parabolaMinutes).isWithin(0.1).of(14.0) // raw-path window, not the bucketed 35.0
         assertThat(glucoseStatus.deltaPl).isWithin(0.0001).of(-1.7157)
@@ -172,6 +176,10 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
 
         assertThat(glucoseStatus.delta).isWithin(0.001).of(20.0)
+        // glucose/date must share the delta's "now" - the newest raw reading (120), not the bucketed
+        // grid point (200) - or eventualBG would mix two different instants.
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(120.0)
+        assertThat(glucoseStatus.date).isEqualTo(1514766900000L)
     }
 
     @Test fun bucketedDeltaWhenForce1MinuteRawDisabled() {
@@ -191,6 +199,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
 
         assertThat(glucoseStatus.delta).isWithin(0.001).of(10.0)
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(200.0) // bucketed path keeps the bucketed BG
     }
 
     @Test fun slidingDeltaReflectsSmoothedNotRawValues() {
@@ -217,6 +226,44 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
 
         assertThat(glucoseStatus.delta).isWithin(0.001).of(0.0)
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(500.0) // glucose is the smoothed value too
+    }
+
+    @Test fun rawPathJudgesStalenessByNewestRawReading() {
+        // On the raw path the bucketed grid trails the newest raw reading by up to ~5 minutes. Here the
+        // grid's newest point is 7.5 min old (past the 7-minute staleness limit) while the newest raw
+        // reading is 2.5 min old - e.g. after a brief stream hiccup with an unlucky grid phase. Fresh
+        // raw data must not be dropped because of the grid's own lag.
+        whenever(dateUtil.now()).thenReturn(1514766900000L + T.secs(150).msecs())
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        calculator.preferences = preferences
+        calculator.activePlugin = activePlugin
+        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
+        whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
+        whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
+        whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
+        whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData().drop(1).toMutableList())
+        whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSlidingDeltaRawData())
+
+        val glucoseStatus = calculator.getGlucoseStatusData(false)
+
+        assertThat(glucoseStatus).isNotNull()
+        assertThat(glucoseStatus!!.date).isEqualTo(1514766900000L)
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(120.0)
+        assertThat(glucoseStatus.delta).isWithin(0.001).of(20.0)
+    }
+
+    @Test fun bucketedPathStillRejectsStaleGrid() {
+        // Same fixtures and clock as above, flag off: no raw path, so the grid's own age decides, as before.
+        whenever(dateUtil.now()).thenReturn(1514766900000L + T.secs(150).msecs())
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        calculator.preferences = preferences
+        whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(false)
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData().drop(1).toMutableList())
+        whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSlidingDeltaRawData())
+
+        assertThat(calculator.getGlucoseStatusData(false)).isNull()
     }
 
     @Test fun recentCalibrationShouldReturnNoFit() {

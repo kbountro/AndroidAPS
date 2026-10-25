@@ -102,6 +102,10 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     private val majorGapThreshold = 60.0
     private val rateDecayTimeConstant = 30.0
 
+    // Backward timestamp steps up to this size don't count as a "timestamp went backwards" reset -
+    // see shouldResetLearning().
+    private val backwardsToleranceMinutes = 10.0
+
     private val millisPerMinute = 1000.0 * 60.0
 
     private fun rateDamp(dt: Double): Double = exp(-dt / rateDecayTimeConstant)
@@ -297,7 +301,11 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
         val timeDiffMinutes = (currentTimestamp - lastProcessedTimestamp) / millisPerMinute
 
-        if (timeDiffMinutes < 0) {
+        // This singleton is fed by two callers each loop when AutoISF's raw path is active:
+        // LoadBgDataWorker with the bucketed 5-minute grid, and GlucoseStatusCalculatorAutoIsf with
+        // the dense raw window, whose newest point is up to ~5 minutes newer than the grid's. Treating
+        // that as "went backwards" would wipe learned R on every single cycle.
+        if (timeDiffMinutes < -backwardsToleranceMinutes) {
             aapsLogger.info(LTag.GLUCOSE, "UKF: Timestamp went backwards, resetting learning")
             return true
         }
@@ -342,6 +350,10 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     // MAIN FILTERING API
     // ============================================================
 
+    // Synchronized: besides LoadBgDataWorker, AutoISF's raw path now calls this from
+    // getGlucoseStatusData(), which UI, widget, wear, automation and loop code all hit on their own
+    // threads - and the learned-R state and innovation deques below aren't thread-safe.
+    @Synchronized
     override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
         if (data.isEmpty()) return data
         try {
@@ -386,7 +398,8 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     }
 
     private fun smoothInternal(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
-        if (shouldResetLearning(data[0].timestamp)) {
+        val reset = shouldResetLearning(data[0].timestamp)
+        if (reset) {
             resetLearning()
         }
 
@@ -398,7 +411,10 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
         }
 
         val previousTimestamp = lastProcessedTimestamp
-        lastProcessedTimestamp = data[0].timestamp
+        // Kept monotonic across the two interleaved callers (see shouldResetLearning) so the one that
+        // runs second doesn't count readings the other already processed as new again. A real reset
+        // adopts the new timeline as-is.
+        lastProcessedTimestamp = if (reset) data[0].timestamp else max(lastProcessedTimestamp, data[0].timestamp)
 
         for ((idx, segment) in segments.withIndex()) {
             processSegment(data, segment.startIdx, segment.endIdx, previousTimestamp)
