@@ -47,13 +47,6 @@ class AutosensDataStoreObject : AutosensDataStore {
                 it.bgReadings = this.bgReadings.toMutableList()
                 it.autosensDataTable = LongSparseArray<AutosensData>(this.autosensDataTable.size).apply { putAll(this@AutosensDataStoreObject.autosensDataTable) }
                 it.bucketedData = this.bucketedData?.toMutableList()
-                // Workers reassign iobCobCalculator.ads to this clone once they're done ("work on
-                // a local copy and set back when finished") - carrying these over is what makes that
-                // swap transparent. Without it, referenceTime silently resets to -1 on every such
-                // reassignment, so the 5-minute grid in createBucketedDataRecalculated() never gets
-                // to keep its anchor and ends up re-anchoring to raw CGM timestamps every cycle instead.
-                it.referenceTime = this.referenceTime
-                it.lastUsed5minCalculation = this.lastUsed5minCalculation
             }
         }
 

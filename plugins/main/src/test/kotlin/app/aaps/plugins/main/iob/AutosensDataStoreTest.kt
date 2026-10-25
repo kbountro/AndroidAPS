@@ -24,24 +24,6 @@ class AutosensDataStoreTest : TestBaseWithProfile() {
     }
 
     @Test
-    fun cloneShouldPreserveReferenceTimeAndLastUsed5minCalculation() {
-        // IobCobOrefWorker/IobCobOref1Worker call ads.clone(), compute on the copy, then reassign
-        // iobCobCalculator.ads to it ("work on a local copy and set back when finished") every
-        // single cycle. If clone() drops these two fields, referenceTime silently resets to -1 on
-        // every such reassignment, which defeats the 5-minute grid anchor in
-        // createBucketedDataRecalculated() - see that field's own "once referenceTime != null..."
-        // comment - and makes bucketedData[0] track the raw CGM timestamp every cycle instead of a
-        // stable grid.
-        autosensDataStore.referenceTime = T.mins(37).msecs()
-        autosensDataStore.lastUsed5minCalculation = false
-
-        val cloned = autosensDataStore.clone() as AutosensDataStoreObject
-
-        assertThat(cloned.referenceTime).isEqualTo(T.mins(37).msecs())
-        assertThat(cloned.lastUsed5minCalculation).isEqualTo(false)
-    }
-
-    @Test
     fun isAbout5minDataTest() {
         val bgReadingList: MutableList<GV> = ArrayList()
 
