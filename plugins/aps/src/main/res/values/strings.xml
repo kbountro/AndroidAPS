@@ -255,7 +255,7 @@
     <string name="calibration_enable_smb_title" translatable="false">Re-enable SMB and AutoISF weights earlier anyway</string>
     <string name="calibration_enable_smb_summary" translatable="false">Activate this when suppressing is no longer required because calibration transition was smooth</string>
     <string name="autoisf_force_1min_raw_title" translatable="false">Treat this CGM as 1-minute raw data</string>
-    <string name="autoisf_force_1min_raw_summary" translatable="false">Makes the acceleration fit eligible for the faster-than-5-minute raw-data path on any CGM, not just Libre2/Libre2 Native/Libre3. Still only engages if your last 3 readings actually arrived under 3 minutes apart - this does not force it on for a sensor that isn\'t really sampling that fast.</string>
+    <string name="autoisf_force_1min_raw_summary" translatable="false">Widens two Libre-only gates to any CGM: (1) the AutoISF acceleration fit\'s raw-data path - only engages if your last 3 readings actually arrived under 3 minutes apart, so this alone will not force it on for a sensor that isn\'t really that fast; (2) the Libre calibration offset/slope and exponential smoothing below - this one has no such timing check, and assumes 1-minute cadence, so only enable it if your CGM genuinely delivers readings about every minute.</string>
     <string name="fslCal_Offset_title">Offset of Libre calibration versus finger like in xDrip</string>
     <string name="fslCal_Offset_summary">OFFSET value as in calibration formula\nLibre_calibrated = OFFSET + slope * Libre_raw</string>
     <string name="fslCal_Slope_title">Slope of Libre calibration versus finger like in xDrip</string>

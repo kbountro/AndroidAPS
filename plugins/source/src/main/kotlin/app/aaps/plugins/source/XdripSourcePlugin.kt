@@ -142,7 +142,13 @@ class XdripSourcePlugin @Inject constructor(
                  aapsLogger.debug(LTag.BGSOURCE, "Sensor calibrating for another ${calibrationMinutes}m")
             }
             val sourceCGM = bundle.getString(Intents.XDRIP_DATA_SOURCE) ?: ""
-            if (extraRaw == 0.0 && (sourceCGM=="Libre2" || sourceCGM=="Libre2 Native" || sourceCGM=="Libre3" || sourceCGM=="G7")) {
+            // ApsAutoIsfForce1MinuteRaw also widens this gate (shared with GlucoseStatusCalculatorAutoIsf's
+            // own Libre allowlist) - unlike that one, this path has no empirical timing check behind it, so
+            // turning it on for a sensor that isn't actually ~1-minute cadence would apply calibration
+            // offset/slope and exponential smoothing tuned for that cadence (cgmDelta below) to data it
+            // doesn't fit, with no safety fallback the way the acceleration-fit path has.
+            if (extraRaw == 0.0 && (sourceCGM=="Libre2" || sourceCGM=="Libre2 Native" || sourceCGM=="Libre3" || sourceCGM=="G7" ||
+                    preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw))) {
                 extraRaw = extraBgEstimate
                 extraBgEstimate = max(40.0, extraRaw * slope + offset * ( if (profileUtil.units == GlucoseUnit.MMOL) Constants.MMOLL_TO_MGDL else 1.0))
                 val maxGap = 20
