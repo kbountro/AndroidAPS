@@ -102,6 +102,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.a1).isWithin(0.0001).of(-0.6451) //
         assertThat(glucoseStatus.a2).isWithin(0.0001).of(1.0706) //
         assertThat(glucoseStatus.corrSqu).isWithin(0.0006).of(0.9430) // parabola fit quality
+        assertThat(calculator.lastFitProblem).isEmpty()
     }
 
     @Test fun calculateValidForced1MinuteRawGlucoseStatusAutoIsf() {
@@ -278,6 +279,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidLibreData())
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
         assertThat(glucoseStatus.corrSqu).isWithin(0.001).of(0.0) // parabola fit quality
+        assertThat(calculator.lastFitProblem).contains("calibration in progress")
     }
 
     @Test fun calculateValidGlucoseStatusWith10mGap() {
@@ -326,7 +328,9 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     @Test fun oneRecordShouldProduceZeroDeltas() {
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateOneCurrentRecordBgData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateDummyLibreData())
-        val glucoseStatus = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator).getGlucoseStatusData(false)!!
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+        assertThat(calculator.lastFitProblem).isEqualTo("only one bucketed value")
         assertThat(glucoseStatus.glucose).isWithin(0.001).of(214.0)
         assertThat(glucoseStatus.delta).isWithin(0.001).of(0.0)
         assertThat(glucoseStatus.shortAvgDelta).isWithin(0.001).of(0.0) // -2 -2.5 -3 deltas are relative to current value
@@ -357,6 +361,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateDummyLibreData())
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
         assertThat(glucoseStatus.corrSqu).isWithin(0.001).of(0.0) //
+        assertThat(calculator.lastFitProblem).contains("gap of 15.0 min after the newest 5.0 min")
     }
 
     @Test fun oldDataShouldReturnNull() {

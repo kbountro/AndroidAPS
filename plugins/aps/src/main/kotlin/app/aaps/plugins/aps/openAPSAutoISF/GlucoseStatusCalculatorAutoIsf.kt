@@ -32,6 +32,11 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
     @Inject lateinit var preferences: Preferences
     @Inject lateinit var activePlugin: ActivePlugin
 
+    // Why the last call's parabola fit scored no window at all (empty when it did). AutoISF prints it
+    // next to "correlation ... is too low", which can't otherwise tell a skipped fit from a poor one.
+    @Volatile var lastFitProblem: String = ""
+        private set
+
     fun getGlucoseStatusData(allowOldData: Boolean): GlucoseStatusAutoIsf? {
         val data = iobCobCalculator.ads.getBucketedDataTableCopy() ?: return null
         val orig = iobCobCalculator.ads.getBgReadingsDataTableCopy()
@@ -75,6 +80,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val fslMinDur = if (use1MinuteRaw) 10 else 15
         if (sizeRecords == 1) {
             aapsLogger.debug(LTag.GLUCOSE, "sizeRecords==1")
+            lastFitProblem = "only one bucketed value"
             return GlucoseStatusAutoIsf(
                 glucose = statusGlucose,
                 noise = 0.0,
@@ -151,6 +157,9 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val calibrationDuration = preferences.get(IntKey.FslCalibrationDuration)
         val calibrationMinutes = calibrationDuration - (dateUtil.now() - preferences.get(LongKey.FslCalibrationStart)) / 60000
         val calibrationStopsSMB = calibrationMinutes > 0 && !preferences.get(BooleanKey.FslCalibrationEnd)
+        var fitStop = ""
+        var windowsTried = 0
+        var windowScored = false
         if (sizeRecords > 3 && !calibrationStopsSMB) {
             var sy = 0.0 // y
             var sx = 0.0 // x
@@ -197,6 +206,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                             a1 = 0.0
                             a2 = 0.0
                         }
+                        fitStop = "gap of ${tenths((tiLast - ti) * scaleTime / 60.0)} min after the newest ${tenths(-tiLast * scaleTime / 60.0)} min"
                         break
                     }
                     tiLast = ti
@@ -219,6 +229,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                         detC = sx4 * (sx2 * sy - sx * sxy) - sx3 * (sx3 * sy - sx * sx2y) + sx2 * (sx3 * sxy - sx2 * sx2y)
                     }
                     if (detH != 0.0) {
+                        windowsTried++
                         val a: Double = detA / detH * scaleBg * (300 / scaleTime).pow(2.0)
                         val b = detB / detH * scaleBg * (300 / scaleTime)
                         val c: Double = detC / detH * scaleBg
@@ -248,6 +259,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                             rSqu = 1 - sResidualSquares / sSquares
                         }
                         if (rSqu >= corrMax) {
+                            windowScored = true
                             corrMax = rSqu
 
                             duraP = -ti * scaleTime / 60.0 // remember we are going backwards in time
@@ -262,7 +274,9 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                     }
                 }
             }
-        }
+        } else fitStop = if (calibrationStopsSMB) "calibration in progress" else "only $sizeRecords records"
+        lastFitProblem = if (windowScored) "" else describeFitProblem(fitStop, windowsTried, fslMinDur, use1MinuteRaw, orig, data, fitValueAt)
+        if (!windowScored) aapsLogger.debug(LTag.GLUCOSE, "Parabola fit scored no window: $lastFitProblem")
         // End parabola fit
 
         return GlucoseStatusAutoIsf(
@@ -327,6 +341,28 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             }
         }
         return null
+    }
+
+    private fun tenths(x: Double): Double = (x * 10).roundToInt() / 10.0
+
+    // One line saying why no window was scored plus the newest values the fit actually saw, as
+    // "seconds ago:mg/dL" pairs. NaN is printed as such rather than rounded (roundToInt would throw).
+    private fun describeFitProblem(
+        stop: String, windowsTried: Int, minMinutes: Int, use1MinuteRaw: Boolean,
+        orig: List<GV>, data: List<InMemoryGlucoseValue>, fitValueAt: (Int) -> Double
+    ): String {
+        fun mgdl(v: Double) = if (v.isNaN()) "NaN" else v.roundToInt().toString()
+        val reason = stop.ifEmpty {
+            if (windowsTried > 0) "$windowsTried windows, none with a valid correlation"
+            else "never reached $minMinutes min with 4+ usable values"
+        }
+        val path = if (use1MinuteRaw) "1-min path"
+        else "5-min path" + if (orig.size > 2) " (newest 3 readings span ${(orig[0].timestamp - orig[2].timestamp) / 1000}s)" else ""
+        val newest = if (use1MinuteRaw)
+            (0 until minOf(orig.size, 12)).joinToString(" ") { "${(orig[0].timestamp - orig[it].timestamp) / 1000}:${mgdl(fitValueAt(it))}" }
+        else
+            (0 until minOf(data.size, 8)).joinToString(" ") { "${(data[0].timestamp - data[it].timestamp) / 1000}:${mgdl(data[it].value)}${if (data[it].filledGap) "*" else ""}" }
+        return "$path: $reason; newest (s ago:mg/dL${if (use1MinuteRaw) "" else ", *=gap-filled"}) $newest"
     }
 
     companion object {
