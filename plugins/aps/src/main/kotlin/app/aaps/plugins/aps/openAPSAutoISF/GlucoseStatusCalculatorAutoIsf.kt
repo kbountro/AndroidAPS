@@ -54,11 +54,12 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val filled = now.filledGap
         val cgm = now.sourceSensor
         val isLibre = cgm.text == "Libre2" || cgm.text == "Libre2 Native" || cgm.text == "Libre3"   // || cgm.text=="G7"
-        // Raw (1-minute) path: readings genuinely closer than 5 minutes apart (orig[0]-orig[2] under
-        // 3 minutes) from an allowlisted Libre or, with ApsAutoIsfForce1MinuteRaw, any sensor - the
-        // flag widens eligibility, it never skips the timing check. Timing is tested first so that
-        // preferences is only consulted when there really is dense data from a non-Libre sensor.
-        val use1MinuteRaw = orig.size > 2 && orig[0].timestamp - orig[2].timestamp < 3 * 60000 &&
+        // Raw (1-minute) path: readings genuinely denser than a 5-minute CGM - the newest 4 within 10
+        // minutes - from an allowlisted Libre or, with ApsAutoIsfForce1MinuteRaw, any sensor. The flag
+        // widens eligibility, it never skips the timing check. Requiring only the last 3 within 3
+        // minutes let one late reading drop a whole status onto the 5-minute grid. Timing is tested
+        // first so preferences is only consulted when there really is dense data from a non-Libre sensor.
+        val use1MinuteRaw = orig.size > 3 && orig[0].timestamp - orig[3].timestamp < 10 * 60000 &&
             (isLibre || preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw))
         // On the raw path "now" is the newest raw reading. The bucketed grid re-anchors on it every
         // cycle (see AutosensDataStoreObject.clone()), but taking it from orig directly keeps glucose,
@@ -357,7 +358,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             else "never reached $minMinutes min with 4+ usable values"
         }
         val path = if (use1MinuteRaw) "1-min path"
-        else "5-min path" + if (orig.size > 2) " (newest 3 readings span ${(orig[0].timestamp - orig[2].timestamp) / 1000}s)" else ""
+        else "5-min path" + if (orig.size > 3) " (newest 4 readings span ${(orig[0].timestamp - orig[3].timestamp) / 1000}s)" else ""
         val newest = if (use1MinuteRaw)
             (0 until minOf(orig.size, 12)).joinToString(" ") { "${(orig[0].timestamp - orig[it].timestamp) / 1000}:${mgdl(fitValueAt(it))}" }
         else

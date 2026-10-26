@@ -42,6 +42,33 @@ class AutosensDataStoreTest : TestBaseWithProfile() {
         assertThat(nextCycle.bucketedData!![0].timestamp).isEqualTo(T.mins(61).msecs())
     }
 
+    @Test
+    fun irregularOneMinuteReadingsAreNotGapFilled() {
+        // Readings 2 minutes apart: grid points between two of them are 60 s from a real reading,
+        // which the old 30 s bound flagged as gap-filled (and AutoISF then skipped).
+        autosensDataStore.bgReadings = readingsAtMinutes(60, 58, 56, 54, 52, 50, 48, 46, 44, 42, 40)
+        autosensDataStore.createBucketedData(aapsLogger, dateUtil)
+        assertThat(autosensDataStore.bucketedData!!).hasSize(5)
+        assertThat(autosensDataStore.bucketedData!!.none { it.filledGap }).isTrue()
+    }
+
+    @Test
+    fun gridPointInsideARealHoleIsGapFilled() {
+        // 10-minute hole between 56 and 46: the 55 point is a minute from a real reading, the 50 point
+        // four minutes from either side.
+        autosensDataStore.bgReadings = readingsAtMinutes(60, 59, 58, 57, 56, 46, 45, 44, 43, 42, 41, 40)
+        autosensDataStore.createBucketedData(aapsLogger, dateUtil)
+        assertThat(autosensDataStore.bucketedData!![1].timestamp).isEqualTo(T.mins(55).msecs())
+        assertThat(autosensDataStore.bucketedData!![1].filledGap).isFalse()
+        assertThat(autosensDataStore.bucketedData!![2].timestamp).isEqualTo(T.mins(50).msecs())
+        assertThat(autosensDataStore.bucketedData!![2].filledGap).isTrue()
+    }
+
+    private fun readingsAtMinutes(vararg minutes: Long): MutableList<GV> =
+        minutes.map {
+            GV(raw = 0.0, noise = 0.0, value = 100.0 + it, timestamp = T.mins(it).msecs(), sourceSensor = SourceSensor.UNKNOWN, trendArrow = TrendArrow.FLAT)
+        }.toMutableList()
+
     private fun oneMinuteReadings(newest: Long): MutableList<GV> =
         MutableList(30) { i ->
             GV(

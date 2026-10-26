@@ -183,6 +183,27 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.date).isEqualTo(1514766900000L)
     }
 
+    @Test fun rawPathSurvivesOneLateReading() {
+        // Newest 3 readings span 210 s (one late reading), which used to drop the whole status onto the
+        // 5-minute grid. The newest 4 still fall within 10 minutes, so the raw path must run: sliding
+        // delta 20.0 (120 now vs 100 five minutes ago) rather than the bucketed 10.0.
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        calculator.preferences = preferences
+        calculator.activePlugin = activePlugin
+        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
+        whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
+        whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
+        whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
+        whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData())
+        whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateIrregularRawData())
+
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+
+        assertThat(glucoseStatus.delta).isWithin(0.001).of(20.0)
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(120.0)
+    }
+
     @Test fun bucketedDeltaWhenForce1MinuteRawDisabled() {
         // Identical fixtures to the test above, flag off: delta must stay on the bucketed 10.0,
         // not the raw 20.0 - confirms the gate actually gates the delta too, not just the fit.
@@ -506,8 +527,21 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         return list
     }
 
+    // Like generateSlidingDeltaRawData but with one late reading: the newest 3 span 210 s, the newest 4
+    // span 300 s. Sliding delta over exactly 5 minutes = now(120.0) - at(t-5min, direct hit, 100.0) = 20.0.
+    private fun generateIrregularRawData(): MutableList<GV> {
+        val origData: MutableList<GV> = ArrayList()
+        origData.add(GV(value = 120.0, timestamp = 1514766900000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 118.0, timestamp = 1514766780000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 116.0, timestamp = 1514766690000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 100.0, timestamp = 1514766600000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 98.0, timestamp = 1514766540000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        origData.add(GV(value = 96.0, timestamp = 1514766480000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
+        return origData
+    }
+
     // 1-minute-spaced raw data, SYAI_TAG (needs ApsAutoIsfForce1MinuteRaw to be raw-eligible).
-    // orig[0]-orig[2] = 120s < 3min, so it passes the empirical timing check. Sliding delta over
+    // The newest 4 span 180s < 10min, so it passes the empirical timing check. Sliding delta over
     // exactly 5 minutes = now(120.0) - at(t-5min, a direct hit at index 5, value 100.0) = 20.0.
     private fun generateSlidingDeltaRawData(): MutableList<GV> {
         val origData: MutableList<GV> = ArrayList()
