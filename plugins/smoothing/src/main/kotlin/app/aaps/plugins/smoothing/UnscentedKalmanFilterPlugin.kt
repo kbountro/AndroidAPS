@@ -28,26 +28,42 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Adaptive Unscented Kalman Filter with RTS smoothing.
+ * Adaptive Unscented Kalman Filter, as "UKF+RTS" with a Rauch-Tung-Striebel backward pass that revises
+ * older values using the readings that came after them. [UnscentedKalmanFilterForwardPlugin] ("UKF") runs
+ * the same filter without that pass, so every value uses only the readings up to its own time.
  * Backported for AAPS 3.4.2.x structure using AAPS 4.0.0.0 math/logic.
  */
 @Singleton
-class UnscentedKalmanFilterPlugin @Inject constructor(
+open class UnscentedKalmanFilterPlugin protected constructor(
     aapsLogger: AAPSLogger,
     rh: ResourceHelper,
     private val rxBus: RxBus,
     private val aapsSchedulers: AapsSchedulers,
     private val persistenceLayer: PersistenceLayer,
-    private val sp: SP
+    private val sp: SP,
+    nameRes: Int,
+    descriptionRes: Int,
+    private val backwardPass: Boolean,
+    // Each variant learns its own R, so switching between them in Config Builder doesn't mix their state.
+    private val keyPrefix: String
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.SMOOTHING)
         .pluginIcon(app.aaps.core.ui.R.drawable.ic_timeline_24)
-        .pluginName(R.string.UKF_name)
+        .pluginName(nameRes)
         .shortName(R.string.smoothing_shortname)
-        .description(R.string.description_UKF),
+        .description(descriptionRes),
     aapsLogger, rh
 ), Smoothing {
+
+    @Inject constructor(
+        aapsLogger: AAPSLogger,
+        rh: ResourceHelper,
+        rxBus: RxBus,
+        aapsSchedulers: AapsSchedulers,
+        persistenceLayer: PersistenceLayer,
+        sp: SP
+    ) : this(aapsLogger, rh, rxBus, aapsSchedulers, persistenceLayer, sp, R.string.ukf_rts_name, R.string.description_ukf_rts, backwardPass = true, keyPrefix = "ukf_")
 
     // ============================================================
     // UKF CONFIGURATION
@@ -78,8 +94,9 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     // Initial measurement noise.
     private val rInit = 25.0
 
-    // Adaptive R bounds (variance, mg/dL^2).
-    private val rMin = 16.0
+    // Adaptive R bounds (variance, mg/dL^2). The floor was 16 (+/-4 mg/dL), which held the filter well
+    // above the jitter left in readings a CGM has already smoothed itself.
+    private val rMin = 4.0
     private val rMax = 225.0
     private val rEffMax = 400.0
 
@@ -101,6 +118,10 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     // Gap handling.
     private val majorGapThreshold = 60.0
     private val rateDecayTimeConstant = 30.0
+
+    // Backward timestamp steps up to this size don't count as a "timestamp went backwards" reset -
+    // see shouldResetLearning().
+    private val backwardsToleranceMinutes = 10.0
 
     private val millisPerMinute = 1000.0 * 60.0
 
@@ -170,14 +191,14 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
     private fun loadPersistedParameters() {
         try {
-            val lastSaved = sp.getLong("ukf_last_saved_timestamp", 0L)
-            val savedSensorChange = sp.getLong("ukf_sensor_change_timestamp", 0L)
+            val lastSaved = sp.getLong("${keyPrefix}last_saved_timestamp", 0L)
+            val savedSensorChange = sp.getLong("${keyPrefix}sensor_change_timestamp", 0L)
 
             if (lastSaved > 0) {
                 lastSensorChangeTimestamp = savedSensorChange
-                lastProcessedTimestamp = sp.getLong("ukf_last_processed_timestamp", 0L)
-                learnedR = sp.getDouble("ukf_learned_r", rInit)
-                sensorSessionId = sp.getInt("ukf_session_id", 0)
+                lastProcessedTimestamp = sp.getLong("${keyPrefix}last_processed_timestamp", 0L)
+                learnedR = sp.getDouble("${keyPrefix}learned_r", rInit)
+                sensorSessionId = sp.getInt("${keyPrefix}session_id", 0)
 
                 if (learnedR !in rMin..rMax) {
                     aapsLogger.info(LTag.GLUCOSE, "UKF: Loaded R ($learnedR) out of bounds, resetting to R_INIT")
@@ -200,11 +221,11 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
     private fun savePersistedParameters() {
         try {
-            sp.putLong("ukf_last_saved_timestamp", System.currentTimeMillis())
-            sp.putLong("ukf_sensor_change_timestamp", lastSensorChangeTimestamp)
-            sp.putLong("ukf_last_processed_timestamp", lastProcessedTimestamp)
-            sp.putDouble("ukf_learned_r", learnedR)
-            sp.putInt("ukf_session_id", sensorSessionId)
+            sp.putLong("${keyPrefix}last_saved_timestamp", System.currentTimeMillis())
+            sp.putLong("${keyPrefix}sensor_change_timestamp", lastSensorChangeTimestamp)
+            sp.putLong("${keyPrefix}last_processed_timestamp", lastProcessedTimestamp)
+            sp.putDouble("${keyPrefix}learned_r", learnedR)
+            sp.putInt("${keyPrefix}session_id", sensorSessionId)
 
             aapsLogger.debug(LTag.GLUCOSE, "UKF: Saved learned R for session $sensorSessionId")
         } catch (e: Exception) {
@@ -297,7 +318,11 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
         val timeDiffMinutes = (currentTimestamp - lastProcessedTimestamp) / millisPerMinute
 
-        if (timeDiffMinutes < 0) {
+        // This singleton is fed by two callers when AutoISF's raw path is active: LoadBgDataWorker
+        // with the bucketed 5-minute grid and GlucoseStatusCalculatorAutoIsf with the dense raw
+        // window, from several threads. Their newest points can be a reading or two apart in either
+        // order; treating that as "went backwards" would wipe learned R.
+        if (timeDiffMinutes < -backwardsToleranceMinutes) {
             aapsLogger.info(LTag.GLUCOSE, "UKF: Timestamp went backwards, resetting learning")
             return true
         }
@@ -342,6 +367,10 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     // MAIN FILTERING API
     // ============================================================
 
+    // Synchronized: besides LoadBgDataWorker, AutoISF's raw path now calls this from
+    // getGlucoseStatusData(), which UI, widget, wear, automation and loop code all hit on their own
+    // threads - and the learned-R state and innovation deques below aren't thread-safe.
+    @Synchronized
     override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
         if (data.isEmpty()) return data
         try {
@@ -355,12 +384,24 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
     private fun findDataSegments(data: List<InMemoryGlucoseValue>): List<DataSegment> {
         if (data.size < 2) return emptyList()
+        val gaps = (0 until data.size - 1).map { (data[it].timestamp - data[it + 1].timestamp) / millisPerMinute }
+        // The lower bound used to be a flat 2.0, which assumes ~5-minute-spaced input: anything
+        // tighter was treated as a suspicious near-duplicate and forced a segment break. Fed a
+        // genuinely ~1-minute-cadence stream (dense raw data, not the bucketed 5-min grid), that
+        // flat 2.0 would break every single consecutive pair into its own one-point "segment",
+        // which processSegment() treats as too small to filter and just passes through unsmoothed
+        // (segmentSize < 2 below) - silently disabling the UKF entirely on exactly the input it's
+        // meant to help with. Scaling the bound to the data's own typical gap keeps today's
+        // 5-minute behavior identical (typicalGap~5 -> minGap~2.0, unchanged) while admitting a
+        // ~1-minute cadence as normal (typicalGap~1 -> minGap~0.5).
+        val typicalGap = gaps.sorted().let { it[it.size / 2] }
+        val minGap = (typicalGap * 0.4).coerceIn(0.5, 2.0)
         val segments = mutableListOf<DataSegment>()
         var segmentStart = 0
 
         for (i in 0 until data.size - 1) {
-            val timeDiff = (data[i].timestamp - data[i + 1].timestamp) / millisPerMinute
-            if (timeDiff !in 2.0..majorGapThreshold || data[i].value == 38.0) {
+            val timeDiff = gaps[i]
+            if (timeDiff !in minGap..majorGapThreshold || data[i].value == 38.0) {
                 if (i - segmentStart >= 2) {
                     segments.add(DataSegment(segmentStart, i))
                 }
@@ -374,7 +415,8 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     }
 
     private fun smoothInternal(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
-        if (shouldResetLearning(data[0].timestamp)) {
+        val reset = shouldResetLearning(data[0].timestamp)
+        if (reset) {
             resetLearning()
         }
 
@@ -386,7 +428,10 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
         }
 
         val previousTimestamp = lastProcessedTimestamp
-        lastProcessedTimestamp = data[0].timestamp
+        // Kept monotonic across the two interleaved callers (see shouldResetLearning) so the one that
+        // runs second doesn't count readings the other already processed as new again. A real reset
+        // adopts the new timeline as-is.
+        lastProcessedTimestamp = if (reset) data[0].timestamp else max(lastProcessedTimestamp, data[0].timestamp)
 
         for ((idx, segment) in segments.withIndex()) {
             processSegment(data, segment.startIdx, segment.endIdx, previousTimestamp)
@@ -437,7 +482,13 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
         if (endIdx > 0) {
             val dt = (data[endIdx - 1].timestamp - data[endIdx].timestamp) / millisPerMinute
-            if (dt in 3.0..7.0) {
+            // Same ~5-minute assumption as findDataSegments' old flat lower bound. Widened the same
+            // way so a ~1-minute cadence still gets a real initial rate estimate at the start of the
+            // segment instead of defaulting to 0.0 - minor on its own (only the oldest point in the
+            // segment, corrected by subsequent updates well before reaching the recent end callers
+            // actually care about), but no reason to leave it wrong for free. 5-minute cadence (dt~5)
+            // is unaffected either way.
+            if (dt in 0.4..7.0) {
                 initialRate = (data[endIdx - 1].value - data[endIdx].value) / dt
                 initialRate = initialRate.coerceIn(-4.0, 4.0)
             }
@@ -554,7 +605,7 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
         learnedR = r
 
         val smoothedResults = forwardResults.copyOf()
-        if (segmentSize >= 3 && forwardStates.isNotEmpty()) {
+        if (backwardPass && segmentSize >= 3 && forwardStates.isNotEmpty()) {
             val maxSmoothSteps = min(segmentSize - 1, forwardStates.size)
             val xSmooth = doubleArrayOf(forwardResults[0], x[1])
 
