@@ -28,26 +28,42 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Adaptive Unscented Kalman Filter with RTS smoothing.
+ * Adaptive Unscented Kalman Filter, as "UKF+RTS" with a Rauch-Tung-Striebel backward pass that revises
+ * older values using the readings that came after them. [UnscentedKalmanFilterForwardPlugin] ("UKF") runs
+ * the same filter without that pass, so every value uses only the readings up to its own time.
  * Backported for AAPS 3.4.2.x structure using AAPS 4.0.0.0 math/logic.
  */
 @Singleton
-class UnscentedKalmanFilterPlugin @Inject constructor(
+open class UnscentedKalmanFilterPlugin protected constructor(
     aapsLogger: AAPSLogger,
     rh: ResourceHelper,
     private val rxBus: RxBus,
     private val aapsSchedulers: AapsSchedulers,
     private val persistenceLayer: PersistenceLayer,
-    private val sp: SP
+    private val sp: SP,
+    nameRes: Int,
+    descriptionRes: Int,
+    private val backwardPass: Boolean,
+    // Each variant learns its own R, so switching between them in Config Builder doesn't mix their state.
+    private val keyPrefix: String
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.SMOOTHING)
         .pluginIcon(app.aaps.core.ui.R.drawable.ic_timeline_24)
-        .pluginName(R.string.UKF_name)
+        .pluginName(nameRes)
         .shortName(R.string.smoothing_shortname)
-        .description(R.string.description_UKF),
+        .description(descriptionRes),
     aapsLogger, rh
 ), Smoothing {
+
+    @Inject constructor(
+        aapsLogger: AAPSLogger,
+        rh: ResourceHelper,
+        rxBus: RxBus,
+        aapsSchedulers: AapsSchedulers,
+        persistenceLayer: PersistenceLayer,
+        sp: SP
+    ) : this(aapsLogger, rh, rxBus, aapsSchedulers, persistenceLayer, sp, R.string.ukf_rts_name, R.string.description_ukf_rts, backwardPass = true, keyPrefix = "ukf_")
 
     // ============================================================
     // UKF CONFIGURATION
@@ -78,8 +94,9 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
     // Initial measurement noise.
     private val rInit = 25.0
 
-    // Adaptive R bounds (variance, mg/dL^2).
-    private val rMin = 16.0
+    // Adaptive R bounds (variance, mg/dL^2). The floor was 16 (+/-4 mg/dL), which held the filter well
+    // above the jitter left in readings a CGM has already smoothed itself.
+    private val rMin = 4.0
     private val rMax = 225.0
     private val rEffMax = 400.0
 
@@ -174,14 +191,14 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
     private fun loadPersistedParameters() {
         try {
-            val lastSaved = sp.getLong("ukf_last_saved_timestamp", 0L)
-            val savedSensorChange = sp.getLong("ukf_sensor_change_timestamp", 0L)
+            val lastSaved = sp.getLong("${keyPrefix}last_saved_timestamp", 0L)
+            val savedSensorChange = sp.getLong("${keyPrefix}sensor_change_timestamp", 0L)
 
             if (lastSaved > 0) {
                 lastSensorChangeTimestamp = savedSensorChange
-                lastProcessedTimestamp = sp.getLong("ukf_last_processed_timestamp", 0L)
-                learnedR = sp.getDouble("ukf_learned_r", rInit)
-                sensorSessionId = sp.getInt("ukf_session_id", 0)
+                lastProcessedTimestamp = sp.getLong("${keyPrefix}last_processed_timestamp", 0L)
+                learnedR = sp.getDouble("${keyPrefix}learned_r", rInit)
+                sensorSessionId = sp.getInt("${keyPrefix}session_id", 0)
 
                 if (learnedR !in rMin..rMax) {
                     aapsLogger.info(LTag.GLUCOSE, "UKF: Loaded R ($learnedR) out of bounds, resetting to R_INIT")
@@ -204,11 +221,11 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
 
     private fun savePersistedParameters() {
         try {
-            sp.putLong("ukf_last_saved_timestamp", System.currentTimeMillis())
-            sp.putLong("ukf_sensor_change_timestamp", lastSensorChangeTimestamp)
-            sp.putLong("ukf_last_processed_timestamp", lastProcessedTimestamp)
-            sp.putDouble("ukf_learned_r", learnedR)
-            sp.putInt("ukf_session_id", sensorSessionId)
+            sp.putLong("${keyPrefix}last_saved_timestamp", System.currentTimeMillis())
+            sp.putLong("${keyPrefix}sensor_change_timestamp", lastSensorChangeTimestamp)
+            sp.putLong("${keyPrefix}last_processed_timestamp", lastProcessedTimestamp)
+            sp.putDouble("${keyPrefix}learned_r", learnedR)
+            sp.putInt("${keyPrefix}session_id", sensorSessionId)
 
             aapsLogger.debug(LTag.GLUCOSE, "UKF: Saved learned R for session $sensorSessionId")
         } catch (e: Exception) {
@@ -588,7 +605,7 @@ class UnscentedKalmanFilterPlugin @Inject constructor(
         learnedR = r
 
         val smoothedResults = forwardResults.copyOf()
-        if (segmentSize >= 3 && forwardStates.isNotEmpty()) {
+        if (backwardPass && segmentSize >= 3 && forwardStates.isNotEmpty()) {
             val maxSmoothSteps = min(segmentSize - 1, forwardStates.size)
             val xSmooth = doubleArrayOf(forwardResults[0], x[1])
 

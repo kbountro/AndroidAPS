@@ -18,7 +18,9 @@ import org.junit.jupiter.api.Test
 import org.mockito.Mock
 import org.mockito.MockitoAnnotations
 import org.mockito.kotlin.any
+import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.atLeastOnce
+import org.mockito.kotlin.eq
 import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
@@ -76,6 +78,54 @@ class UnscentedKalmanFilterPluginTest {
 
         verify(sp, atLeastOnce()).putInt("ukf_session_id", 2)
     }
+
+    @Test
+    fun forwardOnlyValuesDoNotChangeWhenNewerReadingsArrive() {
+        // Forward pass only: each value depends on the readings up to its own time, so five newer
+        // readings must leave every older smoothed value exactly as it was.
+        val older = series(newest = T0, count = 60, stepMinutes = 1)
+        val alone = copyOf(older)
+        forwardUkf().smooth(alone)
+        val withNewer = (series(newest = T0 + 5 * MIN, count = 5, stepMinutes = 1) + copyOf(older)).toMutableList()
+        forwardUkf().smooth(withNewer)
+
+        for (i in alone.indices) assertThat(withNewer[i + 5].smoothed).isEqualTo(alone[i].smoothed)
+    }
+
+    @Test
+    fun backwardPassRevisesOlderValuesButNotTheNewest() {
+        val data = series(newest = T0, count = 60, stepMinutes = 1)
+        val rts = copyOf(data)
+        val forward = copyOf(data)
+        ukf.smooth(rts)
+        forwardUkf().smooth(forward)
+
+        assertThat(rts[0].smoothed).isEqualTo(forward[0].smoothed)
+        assertThat((1 until data.size).count { abs(rts[it].smoothed!! - forward[it].smoothed!!) > 0.01 }).isGreaterThan(data.size / 2)
+    }
+
+    @Test
+    fun learnedNoiseCanFallBelowTheOldFloorOf16() {
+        // The series' +/-2 mg/dL noise is variance 4; with the old floor the learned R stayed at 16 or more.
+        ukf.smooth(series(newest = T0, count = 120, stepMinutes = 1))
+
+        val learnedR = argumentCaptor<Double>()
+        verify(sp, atLeastOnce()).putDouble(eq("ukf_learned_r"), learnedR.capture())
+        assertThat(learnedR.lastValue).isLessThan(16.0)
+    }
+
+    @Test
+    fun forwardOnlyVariantKeepsItsOwnLearnedState() {
+        forwardUkf().smooth(series(newest = T0, count = 60, stepMinutes = 1))
+
+        verify(sp, atLeastOnce()).putDouble(eq("ukf_fwd_learned_r"), any())
+        verify(sp, never()).putDouble(eq("ukf_learned_r"), any())
+    }
+
+    private fun forwardUkf() = UnscentedKalmanFilterForwardPlugin(aapsLogger, rh, rxBus, aapsSchedulers, persistenceLayer, sp)
+
+    private fun copyOf(values: List<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> =
+        values.map { InMemoryGlucoseValue(timestamp = it.timestamp, value = it.value) }.toMutableList()
 
     // Slowly rising line (0.5 mg/dL/min) with +/-2 mg/dL alternating noise, newest first.
     private fun series(newest: Long, count: Int, stepMinutes: Int): MutableList<InMemoryGlucoseValue> =
