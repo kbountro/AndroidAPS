@@ -10,6 +10,7 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
+import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.shared.tests.TestBase
 import com.google.common.truth.Truth.assertThat
@@ -103,5 +104,26 @@ class InsulinOrefBasePluginTest : TestBase() {
         treatment.timestamp = time - 4 * 60 * 60 * 1000 // 4 hours
         treatment.amount = 10.0
         assertThat(sut.iobCalcForTreatment(treatment, time, Constants.defaultDIA).iobContrib).isWithin(0.01).of(0.0)
+    }
+
+    @Test
+    fun trafficJamCgmLagDelaysTheActivityButKeepsItsTotal() {
+        whenever(preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)).thenReturn(1.0)
+        val bolus = BS(timestamp = 0, amount = 1.0, type = BS.Type.NORMAL)
+        fun curve(lagMinutes: Double) = run {
+            whenever(preferences.get(DoubleKey.InsulinTrafficJamCgmLag)).thenReturn(lagMinutes)
+            (0 until 480).map { sut.trafficJamPdModelIobCalculation(bolus, it.toDouble()) }
+        }
+        val plain = curve(0.0)
+        val lagged = curve(8.0)
+
+        val plainPeak = plain.indices.maxBy { plain[it].activityContrib }
+        val laggedPeak = lagged.indices.maxBy { lagged[it].activityContrib }
+        assertThat(laggedPeak).isGreaterThan(plainPeak + 3)
+        assertThat(laggedPeak).isLessThan(plainPeak + 13)
+        assertThat(lagged.sumOf { it.activityContrib }).isWithin(1e-3).of(plain.sumOf { it.activityContrib })
+        // The whole dose is on board at once, and the effect still on its way to the CGM counts as on board.
+        assertThat(lagged[0].iobContrib).isWithin(1e-6).of(1.0)
+        assertThat(lagged[60].iobContrib).isGreaterThan(plain[60].iobContrib)
     }
 }

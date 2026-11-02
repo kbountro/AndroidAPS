@@ -212,6 +212,36 @@ to 480 minutes ahead) takes 12.5-13.9 ms at 0-0.7 against 4.3 ms at 1 (JVM on th
 machine, not a phone; best of three runs). Each dose with its own evolving state, the version this
 replaced, took 115-146 ms.
 
+## CGM lag
+
+The curves above are fitted to clamp data, which measure insulin's effect in the blood. A CGM
+measures interstitial glucose, which trails the blood by several minutes, and the sensor's own
+smoothing adds more. AAPS compares the CGM's rate of change with the insulin's expected effect
+(deviation = CGM delta - BGI), so with the effect computed in blood time, every SMB's effect is
+counted before the CGM can show it. That reads as a rise unexplained by insulin, which invites the
+next SMB. The tail of each dose shows the opposite error.
+
+A preference (Insulin settings → Absorption Speed, Dose Interaction and CGM Lag → CGM Lag,
+`DoubleKey.InsulinTrafficJamCgmLag`, range 0-30 minutes, default 0) adds a fourth first-order stage C
+after the active one, at the fixed rate kc = 1/lag:
+
+    dC/dt = ke*A - kc*C,   activity = kc*C,   IOB = D + X + A + C
+
+Every dose's activity is then delayed and smoothed by about the lag, to when the CGM can see it,
+and C, effect that has happened in the blood but not yet on the CGM, counts as insulin on board. A
+dose's total effect is unchanged. A lone 1U dose's activity peaks at 71 minutes with no lag, 76 at
+5 minutes and 84 at 12 minutes (Python replica). Insulin still enters the depot at its real time,
+so crowding, treatment times and the SMB interval are untouched. The lag is the sensor's, not the
+insulin's, so the speed setting doesn't scale it.
+
+C is propagated in closed form like the other stages (`CgmLagStage`). Every term is a divided
+difference of exp(-x) at the scaled rate differences, evaluated by its series or its derivative
+where the plain formula would cancel. That matters because the crowded depot/transit rate crosses
+both ke and kc as a depot empties, and a lag of 1/ke (7.7 minutes at speed 1) makes kc and ke
+coincide. Against fine numerical integration the error is at most 2.5e-11 relative over 600
+random cases, those coincidences included (Python replica). At 0 there is no fourth stage and every
+result is exactly as before.
+
 ## Real multi-dose behavior
 
 ![Real 12-dose cascade replay: Pool Compartment vs TsunamiMods vs conventional Tsunami](traffic_jam_cascade.svg)
