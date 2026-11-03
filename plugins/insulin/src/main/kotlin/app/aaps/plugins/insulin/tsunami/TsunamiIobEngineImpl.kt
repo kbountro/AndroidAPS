@@ -1,6 +1,7 @@
 package app.aaps.plugins.insulin.tsunami
 
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.EB
 import app.aaps.core.data.model.TB
 import app.aaps.core.data.model.TE
 import app.aaps.core.interfaces.aps.IobTotal
@@ -9,12 +10,18 @@ import app.aaps.core.interfaces.insulin.Insulin
 import app.aaps.core.interfaces.insulin.TsunamiIobEngine
 import app.aaps.core.interfaces.insulin.TsunamiIobResult
 import app.aaps.core.interfaces.plugin.ActivePlugin
+import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
+import app.aaps.core.interfaces.rx.bus.RxBus
+import app.aaps.core.interfaces.rx.events.EventNewHistoryData
+import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.convertedToAbsolute
 import app.aaps.core.objects.extensions.plus
+import io.reactivex.rxjava3.disposables.CompositeDisposable
+import io.reactivex.rxjava3.kotlin.plusAssign
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
@@ -50,7 +57,8 @@ class TsunamiIobEngineImpl @Inject constructor(
     private val persistenceLayer: PersistenceLayer,
     private val profileFunction: ProfileFunction,
     private val dateUtil: DateUtil,
-    private val activePlugin: ActivePlugin
+    private val activePlugin: ActivePlugin,
+    rxBus: RxBus
 ) : TsunamiIobEngine {
 
     companion object {
@@ -60,6 +68,26 @@ class TsunamiIobEngineImpl @Inject constructor(
         // How many requests must share an offset past the whole minute before the individual curves are
         // tabulated shifted by it (600 steps per curve, against one per dose and request).
         private const val SHIFTED_CURVE_MIN_USES = 4
+
+        // How far around now the treatment records are loaded at once ([Records]): autosens and the IOB graph
+        // reach 24 h plus the profile's DIA back, each request's window a DIA horizon more, and the IOB arrays
+        // look ahead about a DIA horizon. A request reaching past that widens the range.
+        private const val RECORDS_BACK_MS = 48L * 60 * 60 * 1000L
+        private const val RECORDS_AHEAD_MS = 12L * 60 * 60 * 1000L
+
+        // How far on either side of a request ending before that range (the history browser) its records reach.
+        private const val PAST_RECORDS_MARGIN_MS = 48L * 60 * 60 * 1000L
+    }
+
+    private val disposable = CompositeDisposable()
+
+    init {
+        // Any change to the history the simulations read - boluses, temp basals, extended boluses and profile
+        // switches (EventNewHistoryData), site changes (EventTherapyEventChange) - drops the cached results and
+        // records the moment it is committed: the bus calls subscribers on the sender's thread. The calculation
+        // run's own resetCache comes 5 s later at the earliest, and a request in between must not miss a dose.
+        disposable += rxBus.toObservable(EventNewHistoryData::class.java).subscribe({ resetCache() }, { resetCache() })
+        disposable += rxBus.toObservable(EventTherapyEventChange::class.java).subscribe({ resetCache() }, { resetCache() })
     }
 
     private data class ResultCacheKey(val time: Long, val sensitivityRatio: Double, val assumeZeroTempAfter: Long)
@@ -81,14 +109,109 @@ class TsunamiIobEngineImpl @Inject constructor(
     private var resultCache = HashMap<ResultCacheKey, TsunamiIobResult>()
     private var cacheVersion = 0
 
+    // The records of this cache generation ([recordsFor]): around now, and around the last request far before it.
+    private var recentRecords: Records? = null
+    private var pastRecords: Records? = null
+
     override val isActive: Boolean
         get() = activePlugin.activeInsulin.id.value == Insulin.InsulinType.OREF_LYUMJEV_U100_TRAFFIC_JAM.value
 
     override fun resetCache() {
         synchronized(engineLock) {
             resultCache.clear()
+            recentRecords = null
+            pastRecords = null
             cacheVersion++
         }
+    }
+
+    /**
+     * The treatment records the simulations read, and the profile basal of every minute, loaded once per cache
+     * generation ([resetCache]: every calculation run and every change to that history) for a range ([recordsFor]),
+     * and filtered per request exactly as the database queries filter them, so every request sees the same
+     * records, in the same order, as if it had queried them itself. Every request used to: four queries, each
+     * mapping every bolus since its window's start, and a profile lookup for every minute of the window. With a
+     * 1-minute CGM that was thousands of queries a minute - each calculation run recomputes the IOB at every
+     * autosens and IOB-graph time, some 860 requests, and every SMB IOB array is 95 more.
+     */
+    private inner class Records(val from: Long, val to: Long) {
+
+        // Boluses come by id, newest first, with timestamp >= from; sorted by timestamp here (stable, so equal
+        // timestamps keep that order) to be cut by binary search. The rest come by timestamp: temp basals and
+        // extended boluses starting within [from, to], cannula changes from `from` on.
+        private val boluses = persistenceLayer.getBolusesFromTime(from, true).blockingGet().sortedBy { it.timestamp }
+        private val tempBasals = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(from, to, true)
+        private val extendedBoluses = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(from, to, true)
+        private val cannulaChanges = persistenceLayer.getTherapyEventDataFromTime(from, TE.Type.CANNULA_CHANGE, true)
+
+        /** Every whole minute's profile and basal rate, looked up the first time a request needs it. */
+        private val minuteBasals = arrayOfNulls<Any>(((to - from) / 60_000L).toInt() + 1)
+
+        /** getBolusesFromTime(time): every bolus at or after [time]. */
+        fun bolusesFrom(time: Long): List<BS> = boluses.subList(firstAtOrAfter(boluses, time) { it.timestamp }, boluses.size)
+
+        /** getTemporaryBasalsStartingFromTimeToTime(from, to). */
+        fun tempBasalsStarting(from: Long, to: Long): List<TB> =
+            tempBasals.subList(firstAtOrAfter(tempBasals, from) { it.timestamp }, firstAtOrAfter(tempBasals, to + 1) { it.timestamp })
+
+        /** getExtendedBolusesStartingFromTimeToTime(from, to). */
+        fun extendedBolusesStarting(from: Long, to: Long): List<EB> =
+            extendedBoluses.subList(firstAtOrAfter(extendedBoluses, from) { it.timestamp }, firstAtOrAfter(extendedBoluses, to + 1) { it.timestamp })
+
+        /** getTherapyEventDataFromTime(time, CANNULA_CHANGE). */
+        fun cannulaChangesFrom(time: Long): List<TE> = cannulaChanges.subList(firstAtOrAfter(cannulaChanges, time) { it.timestamp }, cannulaChanges.size)
+
+        /** The profile at the whole minute [minute] and its basal rate then, or null without a profile. */
+        fun minuteBasal(minute: Long): MinuteBasal? {
+            val i = ((minute - from) / 60_000L).toInt()
+            if (minute < from || i >= minuteBasals.size) return lookUpBasal(minute)
+            when (val known = minuteBasals[i]) {
+                is MinuteBasal -> return known
+                NoProfile      -> return null
+            }
+            // Two requests may look the same minute up at once; both store the same answer.
+            return lookUpBasal(minute).also { minuteBasals[i] = it ?: NoProfile }
+        }
+
+        private fun lookUpBasal(minute: Long): MinuteBasal? = profileFunction.getProfile(minute)?.let { MinuteBasal(it, it.getBasal(minute)) }
+
+        /** The first index whose key is at least [key], in a list sorted by it. */
+        private fun <T> firstAtOrAfter(list: List<T>, key: Long, keyOf: (T) -> Long): Int {
+            var lo = 0
+            var hi = list.size
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                if (keyOf(list[mid]) < key) lo = mid + 1 else hi = mid
+            }
+            return lo
+        }
+    }
+
+    private class MinuteBasal(val profile: Profile, val rate: Double)
+    private object NoProfile
+
+    /**
+     * Records covering [from]..[to]. Requests reaching into the range around now (the loop, autosens, the IOB
+     * graph) share one load of that range, widened to the request if it reaches past it; a request ending before
+     * it (the history browser) loads its own range around itself, kept beside the recent one, so that browsing
+     * an old day neither loads everything since then nor drops the records the loop is using.
+     */
+    private fun recordsFor(from: Long, to: Long): Records {
+        val version: Int
+        synchronized(engineLock) {
+            recentRecords?.let { if (it.from <= from && it.to >= to) return it }
+            pastRecords?.let { if (it.from <= from && it.to >= to) return it }
+            version = cacheVersion
+        }
+        val now = dateUtil.now()
+        val recent = to >= now - RECORDS_BACK_MS
+        val loaded =
+            if (recent) Records(Math.floorDiv(min(from, now - RECORDS_BACK_MS), 60_000L) * 60_000L, max(to, now + RECORDS_AHEAD_MS))
+            else Records(Math.floorDiv(from - PAST_RECORDS_MARGIN_MS, 60_000L) * 60_000L, min(to + PAST_RECORDS_MARGIN_MS, now - RECORDS_BACK_MS))
+        synchronized(engineLock) {
+            if (version == cacheVersion) if (recent) recentRecords = loaded else pastRecords = loaded
+        }
+        return loaded
     }
 
     override fun calculateIobFromBolusToTime(toTime: Long): IobTotal {
@@ -171,11 +294,12 @@ class TsunamiIobEngineImpl @Inject constructor(
         // then arrives as one event at that minute's end, after requestedTime, as when simulating past it.
         val horizonTime = (requestedTime + 59_999L) / 60_000L * 60_000L
 
-        val boluses = persistenceLayer.getBolusesFromTime(startTime, true).blockingGet()
+        val records = recordsFor(startTime, horizonTime)
+        val boluses = records.bolusesFrom(startTime)
         val pumpInterface = activePlugin.activePump
         val isFakingTemps = pumpInterface.isFakingTempsByExtendedBoluses
 
-        val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, isFakingTemps, assumeZeroTempAfter, now)
+        val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, records, isFakingTemps, assumeZeroTempAfter, now)
 
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
@@ -200,7 +324,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         // none at all) all land in generation 0 - identical to the single-pool behavior
         // this replaces. Boundaries outside the window never matter: anything that old is
         // already past the DIA horizon, and anything that new hasn't happened yet.
-        val siteChangeBoundaries = persistenceLayer.getTherapyEventDataFromTime(startTime, TE.Type.CANNULA_CHANGE, true)
+        val siteChangeBoundaries = records.cannulaChangesFrom(startTime)
             .map { it.timestamp }
             .filter { it <= horizonTime }
 
@@ -460,6 +584,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         toTime: Long,
         sensitivityRatio: Double,
         boluses: List<BS>,
+        records: Records,
         isFakingTemps: Boolean,
         assumeZeroTempAfter: Long,
         currentNow: Long
@@ -489,8 +614,8 @@ class TsunamiIobEngineImpl @Inject constructor(
         // Fetch Temp Basals and Extended Boluses ONCE into RAM, sorted chronologically so the
         // per-minute loop below can sweep forward through them with monotonically advancing
         // indices instead of rescanning the full list every single minute.
-        val sortedTbs = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(alignedFromTime, toTime, true).sortedBy { it.timestamp }
-        val sortedEbs = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(alignedFromTime, toTime, true).sortedBy { it.timestamp }
+        val sortedTbs = records.tempBasalsStarting(alignedFromTime, toTime).sortedBy { it.timestamp }
+        val sortedEbs = records.extendedBolusesStarting(alignedFromTime, toTime).sortedBy { it.timestamp }
 
         // Everything before these indices has definitely ended relative to the current bTime,
         // and can never become relevant again since bTime only moves forward and each record's
@@ -504,9 +629,10 @@ class TsunamiIobEngineImpl @Inject constructor(
             val durationMins = (nextTime - bTime) / 60000.0
 
             if (durationMins > 0) {
-                val profile = profileFunction.getProfile(bTime)
-                if (profile != null) {
-                    val profileRate = profile.getBasal(bTime)
+                val minuteBasal = records.minuteBasal(bTime)
+                if (minuteBasal != null) {
+                    val profile = minuteBasal.profile
+                    val profileRate = minuteBasal.rate
                     var absoluteRate = profileRate
 
                     // 1. Resolve Active Temp Basal in RAM (Replaces processedTbrEbData to support Deep History)

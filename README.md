@@ -222,6 +222,17 @@ test machine, not a phone), with the same results. Before, every request simulat
 past the present, evaluating some 190 other times along the way to fill a cache those requests never
 hit, and summed the individual branches dose by dose: 530 ms at 0.5, 53 ms at 1.
 
+The windows read the treatment history (boluses, temp basals, extended boluses, site changes) and the
+profile basal of every minute. Each calculation run asks for about a thousand windows (autosens and
+the IOB graph at every 5-minute time over a day, the SMB IOB arrays, the overview), every minute with
+a 1-minute CGM, and each window used to query the database itself: four queries, and a profile lookup
+for every one of its 480 minutes. The engine now loads the history once per calculation run, for 48
+hours back to 12 hours ahead, looks each minute's profile basal up once, and cuts every window's
+records from that (the history browser gets a separate load around the day it shows). Any change to
+that history (a bolus, temp basal, extended bolus, profile switch or site change) drops the loaded
+records the moment it is saved. The results are the same to the last bit; the database queries of a
+calculation run go from about 3000 to 4.
+
 ## CGM lag
 
 The curves above are fitted to clamp data, which measure insulin's effect in the blood. A CGM
