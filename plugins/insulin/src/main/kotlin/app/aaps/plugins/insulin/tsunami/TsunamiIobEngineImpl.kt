@@ -659,7 +659,8 @@ class TsunamiIobEngineImpl @Inject constructor(
         fun propagateInPlace(ke: Double, kc: Double, dtMinutes: Double) {
             if (dtMinutes <= 0.0 || (D == 0.0 && X == 0.0 && A == 0.0 && C == 0.0)) return
             if (kc > 0.0) {
-                val s = PdModel.propagateWithLag(D, X, A, C, k, ke, kc, dtMinutes)
+                val s = DoubleArray(4)
+                PdModel.propagateWithLag(D, X, A, C, k, ke, kc, dtMinutes, s)
                 D = s[0]; X = s[1]; A = s[2]; C = s[3]
             } else {
                 val (nd, nx, na) = PdModel.propagate(D, X, A, k, k, ke, dtMinutes)
@@ -826,22 +827,18 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         /**
          * [propagate] with the CGM lag stage ([CgmLagStage]) at rate [kc] after the active stage, depot and
-         * transit both at [k]: (D, X, A, C) after [dt] minutes. D, X and A come out exactly as from [propagate].
+         * transit both at [k]: (D, X, A, C) after [dt] minutes, written into [out]. D and X come out exactly as
+         * from [propagate]; A is the same exact solution, without [propagate]'s rounding of rates closer than
+         * RATE_EPS to equal.
          */
-        fun propagateWithLag(d0: Double, x0: Double, a0: Double, c0: Double, k: Double, ke: Double, kc: Double, dt: Double): DoubleArray {
-            var d = d0
-            var x = x0
-            var a = a0
-            var c = c0
+        fun propagateWithLag(d0: Double, x0: Double, a0: Double, c0: Double, k: Double, ke: Double, kc: Double, dt: Double, out: DoubleArray) {
+            out[0] = d0; out[1] = x0; out[2] = a0; out[3] = c0
             var left = dt
             while (left > 0.0) {
                 val step = min(left, LAG_STEP_MINUTES)
-                c = CgmLagStage.propagate(c, d, x, a, k, ke, kc, step)
-                val (nd, nx, na) = propagate(d, x, a, k, k, ke, step)
-                d = nd; x = nx; a = na
+                CgmLagStage.propagate(out[0], out[1], out[2], out[3], k, ke, kc, step, out)
                 left -= step
             }
-            return doubleArrayOf(d, x, a, c)
         }
 
         /**
@@ -860,11 +857,16 @@ class TsunamiIobEngineImpl @Inject constructor(
                 val a = DoubleArray(n)
                 val c = DoubleArray(n)
                 d[0] = amount
+                val step = DoubleArray(4)
                 for (i in 1 until n) {
                     val k1 = rate(speedFactor, d[i - 1])
-                    if (kc > 0.0) c[i] = CgmLagStage.propagate(c[i - 1], d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * KE, kc, 1.0)
-                    val (nd, nx, na) = propagate(d[i - 1], x[i - 1], a[i - 1], k1, k1, speedFactor * KE, 1.0)
-                    d[i] = nd; x[i] = nx; a[i] = na
+                    if (kc > 0.0) {
+                        CgmLagStage.propagate(d[i - 1], x[i - 1], a[i - 1], c[i - 1], k1, speedFactor * KE, kc, 1.0, step)
+                        d[i] = step[0]; x[i] = step[1]; a[i] = step[2]; c[i] = step[3]
+                    } else {
+                        val (nd, nx, na) = propagate(d[i - 1], x[i - 1], a[i - 1], k1, k1, speedFactor * KE, 1.0)
+                        d[i] = nd; x[i] = nx; a[i] = na
+                    }
                 }
                 arrayOf(d, x, a, c)
             }
@@ -902,8 +904,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             }
             val k1 = rate(speedFactor, grid[0][i])
             if (kc > 0.0) {
-                val s = propagateWithLag(grid[0][i], grid[1][i], grid[2][i], grid[3][i], k1, speedFactor * KE, kc, dt)
-                out[0] = s[0]; out[1] = s[1]; out[2] = s[2]; out[3] = s[3]
+                propagateWithLag(grid[0][i], grid[1][i], grid[2][i], grid[3][i], k1, speedFactor * KE, kc, dt, out)
             } else {
                 val (d, x, a) = propagate(grid[0][i], grid[1][i], grid[2][i], k1, k1, speedFactor * KE, dt)
                 out[0] = d; out[1] = x; out[2] = a; out[3] = 0.0

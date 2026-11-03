@@ -250,11 +250,16 @@ abstract class InsulinOrefBasePlugin(
             val a = DoubleArray(n)
             val c = DoubleArray(n)
             d[0] = amount
+            val step = DoubleArray(4)
             for (i in 1 until n) {
                 val k1 = trafficJamRate(speedFactor, d[i - 1])
-                if (kc > 0.0) c[i] = CgmLagStage.propagate(c[i - 1], d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, kc, 1.0)
-                val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, 1.0)
-                d[i] = nd; x[i] = nx; a[i] = na
+                if (kc > 0.0) {
+                    CgmLagStage.propagate(d[i - 1], x[i - 1], a[i - 1], c[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, kc, 1.0, step)
+                    d[i] = step[0]; x[i] = step[1]; a[i] = step[2]; c[i] = step[3]
+                } else {
+                    val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, 1.0)
+                    d[i] = nd; x[i] = nx; a[i] = na
+                }
             }
             arrayOf(d, x, a, c)
         }
@@ -269,9 +274,9 @@ abstract class InsulinOrefBasePlugin(
         val i = min(t.toInt(), grid[0].size - 1)
         val k1 = trafficJamRate(speedFactor, grid[0][i])
         val ke = speedFactor * TRAFFIC_JAM_KE
-        val c = if (kc > 0.0) CgmLagStage.propagate(grid[3][i], grid[0][i], grid[1][i], grid[2][i], k1, ke, kc, t - i) else 0.0
+        if (kc > 0.0) return DoubleArray(4).also { CgmLagStage.propagate(grid[0][i], grid[1][i], grid[2][i], grid[3][i], k1, ke, kc, t - i, it) }
         val (d, x, a) = trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, ke, t - i)
-        return doubleArrayOf(d, x, a, c)
+        return doubleArrayOf(d, x, a, 0.0)
     }
 
     /** Exact propagation of (D, X, A) by [dt] minutes with depot and transit at [k1] and the active stage at [ke]. */

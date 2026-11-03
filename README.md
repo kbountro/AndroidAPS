@@ -234,13 +234,15 @@ dose's total effect is unchanged. A lone 1U dose's activity peaks at 71 minutes 
 so crowding, treatment times and the SMB interval are untouched. The lag is the sensor's, not the
 insulin's, so the speed setting doesn't scale it.
 
-C is propagated in closed form like the other stages (`CgmLagStage`). Every term is a divided
-difference of exp(-x) at the scaled rate differences, evaluated by its series or its derivative
-where the plain formula would cancel. That matters because the crowded depot/transit rate crosses
-both ke and kc as a depot empties, and a lag of 1/ke (7.7 minutes at speed 1) makes kc and ke
-coincide. Against fine numerical integration the error is at most 2.5e-11 relative over 600
-random cases, those coincidences included (Python replica). At 0 there is no fourth stage and every
-result is exactly as before.
+With a lag set, `CgmLagStage` advances the whole chain in closed form, one step for all four
+stages. Every term is a divided difference of exp(-x) at the scaled rate differences, evaluated by
+its series or its derivative where the plain formula would cancel. That matters because the crowded
+depot/transit rate crosses both ke and kc as a depot empties, and a lag of 1/ke (7.7 minutes at
+speed 1) makes kc and ke coincide. Against fine numerical integration the error is at most 1.4e-13
+relative over the test's cases, those coincidences included. The stages share exp(-k dt) and the
+divided differences, and the series are evaluated by Horner's rule with no division, so a step with
+the lag costs about as much as one without. At 0 there is no fourth stage and every result is
+exactly as before.
 
 ## Real multi-dose behavior
 
