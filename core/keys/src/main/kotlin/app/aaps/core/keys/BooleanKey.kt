@@ -43,6 +43,8 @@ enum class BooleanKey(
 
     BgSourceUploadToNs("dexcomg5_nsupload", true, defaultedBySM = true, hideParentScreenIfHidden = true),
     BgSourceCreateSensorChange("dexcom_lognssensorchange", true, defaultedBySM = true),
+    // xDrip+ source: work the trend arrow out from AAPS's own smoothed 5-minute data instead of showing the arrow xDrip+ sent
+    BgSourceXdripCalculateTrend("xdrip_calculate_trend", true, defaultedBySM = true),
 
     ApsUseDynamicSensitivity("use_dynamic_sensitivity", false),
     ApsUseAutosens("openapsama_useautosens", true, defaultedBySM = true, negativeDependency = ApsUseDynamicSensitivity), // change from default false

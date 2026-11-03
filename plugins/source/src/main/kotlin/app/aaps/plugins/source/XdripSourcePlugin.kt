@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Bundle
 import androidx.annotation.VisibleForTesting
+import androidx.preference.PreferenceCategory
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import app.aaps.core.data.configuration.Constants
@@ -33,6 +34,7 @@ import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.LongKey
 import app.aaps.core.objects.workflow.LoggingWorker
 import app.aaps.core.utils.receivers.DataWorkerStorage
+import app.aaps.core.validators.preferences.AdaptiveSwitchPreference
 import kotlinx.coroutines.Dispatchers
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -62,6 +64,15 @@ class XdripSourcePlugin @Inject constructor(
     override var sensorBatteryLevel = -1
 
     override fun advancedFilteringSupported(): Boolean = advancedFiltering
+
+    override fun addSourcePreferences(category: PreferenceCategory, context: Context) {
+        category.addPreference(
+            AdaptiveSwitchPreference(
+                ctx = context, booleanKey = BooleanKey.BgSourceXdripCalculateTrend,
+                summary = R.string.xdrip_calculate_trend_summary, title = R.string.xdrip_calculate_trend_title
+            )
+        )
+    }
 
     //private fun detectSource(glucoseValue: GV) {
     //    aapsLogger.debug(LTag.BGSOURCE, "Libre reading coming from source ${glucoseValue.sourceSensor}")
