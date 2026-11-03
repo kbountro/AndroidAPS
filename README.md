@@ -205,12 +205,22 @@ A single dose on a steady basal rate, minutes until 1 - (its own IOB)/dose reach
 | 3U | 116 / 230 | 123 / 253 | 112 / 211 | 115 / 222 | 110 / 204 | 112 / 210 |
 | 5U | 126 / 246 | 131 / 266 | 123 / 230 | 125 / 240 | 122 / 225 | 123 / 230 |
 
-Below 1 the shared branches are the engine run at 1, one pool per category for all doses, and each
-individual branch is read from its amount's isolated curve, tabulated once on a 1-minute grid (the
-table the bolus snooze uses) and kept in memory. One simulation of the IOB window (480 minutes back
-to 480 minutes ahead) takes 12.5-13.9 ms at 0-0.7 against 4.3 ms at 1 (JVM on the cloud test
-machine, not a phone; best of three runs). Each dose with its own evolving state, the version this
-replaced, took 115-146 ms.
+Below 1 the shared branches are the engine run at 1, one pool per category for all doses, and the
+individual branches come from each amount's isolated curve, tabulated once on a 1-minute grid (the
+table the bolus snooze uses) and kept in memory. Basal is one dose every minute, so the individual
+branches are summed as runs of equal doses a minute apart, one per stretch at one rate: a run's sum is
+a difference of the curve's running sums. Past the table's 600 minutes the rate is held, and a run's
+sum there is a geometric series of one-minute steps, two steps however long the run. Requests that
+keep falling at the same fraction of a minute, like the SMB IOB array's (now, now + 5 minutes, ...),
+also get the curves tabulated shifted by that fraction. All of it equals the dose-by-dose sum to
+rounding.
+
+Every requested time is simulated over its own window, 480 minutes back to that time, and evaluated
+there only. One loop run's SMB IOB array, 95 requests (now to now + 235 minutes, with and without a
+zero temp), then takes about 32 ms at a dose interaction of 0.5 against 28 ms at 1 (JVM on the cloud
+test machine, not a phone), with the same results. Before, every request simulated on to 8 hours
+past the present, evaluating some 190 other times along the way to fill a cache those requests never
+hit, and summed the individual branches dose by dose: 530 ms at 0.5, 53 ms at 1.
 
 ## CGM lag
 
