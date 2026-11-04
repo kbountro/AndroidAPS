@@ -136,6 +136,7 @@ class DataHandlerMobile @Inject constructor(
 
     private var lastBolusWizard: BolusWizard? = null
     private var lastQuickWizardEntry: QuickWizardEntry? = null
+    private val sendFilter = WearSendFilter()
 
     init {
         // From Wear
@@ -166,7 +167,7 @@ class DataHandlerMobile @Inject constructor(
             .observeOn(aapsSchedulers.io)
             .subscribe({
                            aapsLogger.debug(LTag.WEAR, "ResendData received from ${it.sourceNodeId}")
-                           resendData(it.from)
+                           resendData(it.from, force = true)
                        }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventData.ActionPumpStatus::class.java)
@@ -219,7 +220,7 @@ class DataHandlerMobile @Inject constructor(
             .observeOn(aapsSchedulers.io)
             .subscribe({
                            aapsLogger.debug(LTag.WEAR, "LoopStatesRequest received from ${it.sourceNodeId}")
-                           handleAvailableLoopStates()
+                           handleAvailableLoopStates(force = true)
                        }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventData.LoopStateSelected::class.java)
@@ -1124,7 +1125,12 @@ class DataHandlerMobile @Inject constructor(
     private var lastAuthorizedLoopStateChangeTS: Long? = null
     private var lastLoopStates: List<AvailableLoopState>? = null
 
-    private fun handleAvailableLoopStates() {
+    /**
+     * The loop modes the watch offers. Each list carries a new authorization time stamp, which the watch returns with its
+     * choice; with action buttons only when changed, an unchanged list is not sent and keeps the time stamp the watch holds,
+     * unless the last one was used up by a mode change.
+     */
+    private fun handleAvailableLoopStates(force: Boolean = true) {
         // See LoopDialog for states list building logic
         if (config.AAPSCLIENT) return
 
@@ -1153,7 +1159,10 @@ class DataHandlerMobile @Inject constructor(
             }
 
         val states = loop.allowedNextModes().mapNotNull { mapMode(it) }
-        lastAuthorizedLoopStateChangeTS = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        val onlyWhenChanged = preferences.get(BooleanKey.WearActionButtonsOnlyWhenChanged)
+        if (!sendFilter.actionButtons("loopStates", states, now, onlyWhenChanged, force || lastAuthorizedLoopStateChangeTS == null || lastLoopStates != states)) return
+        lastAuthorizedLoopStateChangeTS = now
         lastLoopStates = states
         rxBus.send(
             EventMobileToWear(
@@ -1246,48 +1255,74 @@ class DataHandlerMobile @Inject constructor(
             validTo = validTo()
         )
 
-    fun resendData(from: String) {
+    /**
+     * Sends the watch its data, as far as the options in the Wear plugin's "Data sent to the watch" settings let through
+     * ([WearSendFilter]). [automatic]: the update after a calculation run or a loop run, which BG every 5 minutes thins
+     * out. [force]: the watch asked for its data (a new watch face, its menu, a re-sync, a missed reading), so everything
+     * the options allow goes, action buttons included.
+     */
+    fun resendData(from: String, automatic: Boolean = false, force: Boolean = false) {
+        if (automatic && !force && preferences.get(BooleanKey.WearBgEveryFiveMinutes) &&
+            !sendFilter.pacedUpdate(iobCobCalculator.ads.lastBg()?.timestamp ?: 0L, userActivity())
+        ) {
+            aapsLogger.debug(LTag.WEAR, "Not sending data to wear from $from: BG every 5 minutes")
+            return
+        }
         aapsLogger.debug(LTag.WEAR, "Sending data to wear from $from")
+        val now = System.currentTimeMillis()
+        val onlyWhenChanged = preferences.get(BooleanKey.WearActionButtonsOnlyWhenChanged)
         // SingleBg
         iobCobCalculator.ads.lastBg()?.let { rxBus.send(EventMobileToWear(getSingleBG(it))) }
-        // Preferences
-        rxBus.send(
-            EventMobileToWear(
-                EventData.Preferences(
-                    timeStamp = System.currentTimeMillis(),
-                    wearControl = preferences.get(BooleanKey.WearControl),
-                    unitsMgdl = profileFunction.getUnits() == GlucoseUnit.MGDL,
-                    bolusPercentage = preferences.get(IntKey.OverviewBolusPercentage),
-                    maxCarbs = preferences.get(IntKey.SafetyMaxCarbs),
-                    maxBolus = preferences.get(DoubleKey.SafetyMaxBolus),
-                    insulinButtonIncrement1 = preferences.get(DoubleKey.OverviewInsulinButtonIncrement1),
-                    insulinButtonIncrement2 = preferences.get(DoubleKey.OverviewInsulinButtonIncrement2),
-                    carbsButtonIncrement1 = preferences.get(IntKey.OverviewCarbsButtonIncrement1),
-                    carbsButtonIncrement2 = preferences.get(IntKey.OverviewCarbsButtonIncrement2)
-                )
-            )
+        // Preferences (compared without their time stamp)
+        val wearPreferences = EventData.Preferences(
+            timeStamp = now,
+            wearControl = preferences.get(BooleanKey.WearControl),
+            unitsMgdl = profileFunction.getUnits() == GlucoseUnit.MGDL,
+            bolusPercentage = preferences.get(IntKey.OverviewBolusPercentage),
+            maxCarbs = preferences.get(IntKey.SafetyMaxCarbs),
+            maxBolus = preferences.get(DoubleKey.SafetyMaxBolus),
+            insulinButtonIncrement1 = preferences.get(DoubleKey.OverviewInsulinButtonIncrement1),
+            insulinButtonIncrement2 = preferences.get(DoubleKey.OverviewInsulinButtonIncrement2),
+            carbsButtonIncrement1 = preferences.get(IntKey.OverviewCarbsButtonIncrement1),
+            carbsButtonIncrement2 = preferences.get(IntKey.OverviewCarbsButtonIncrement2)
         )
+        if (sendFilter.actionButtons("preferences", wearPreferences.copy(timeStamp = 0L), now, onlyWhenChanged, force))
+            rxBus.send(EventMobileToWear(wearPreferences))
         // QuickWizard
-        rxBus.send(
-            EventMobileToWear(
-                EventData.QuickWizard(
-                    ArrayList(quickWizard.list().filter { it.forDevice(QuickWizardEntry.DEVICE_WATCH) }.map { it.toWear() })
-                )
-            )
+        val wearQuickWizard = EventData.QuickWizard(
+            ArrayList(quickWizard.list().filter { it.forDevice(QuickWizardEntry.DEVICE_WATCH) }.map { it.toWear() })
         )
+        if (sendFilter.actionButtons("quickWizard", wearQuickWizard, now, onlyWhenChanged, force))
+            rxBus.send(EventMobileToWear(wearQuickWizard))
         //UserAction
-        sendUserActions()
-        // GraphData
-        iobCobCalculator.ads.getBucketedDataTableCopy()?.let { bucketedData ->
-            rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList(bucketedData.map { getSingleBG(it) }))))
+        sendUserActions(force)
+        // GraphData and Treatments: what the chart on the watch face draws
+        if (preferences.get(BooleanKey.WearSendBgTable)) {
+            iobCobCalculator.ads.getBucketedDataTableCopy()?.let { bucketedData ->
+                rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList(bucketedData.map { getSingleBG(it) }))))
+            }
+            sendTreatments()
+            sendFilter.chartSent()
+        } else if (sendFilter.clearChart(force)) {
+            rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList())))
+            rxBus.send(EventMobileToWear(EventData.TreatmentData(ArrayList(), ArrayList(), ArrayList(), ArrayList())))
         }
-        // Treatments
-        sendTreatments()
         // Status
         // Keep status last. Wear start refreshing after status received
         sendStatus(from)
-        handleAvailableLoopStates()
+        handleAvailableLoopStates(force)
     }
+
+    /**
+     * The user's own treatments and loop state, for BG every 5 minutes to send an update at once when they change: the newest
+     * bolus (not SMB) and carbs, the temp target now and the loop's running mode.
+     */
+    private fun userActivity(): List<Any?> = listOf(
+        persistenceLayer.getNewestBolusOfType(BS.Type.NORMAL)?.let { it.timestamp to it.amount },
+        persistenceLayer.getNewestCarbs()?.let { it.timestamp to it.amount },
+        persistenceLayer.getTemporaryTargetActiveAt(dateUtil.now())?.let { listOf(it.timestamp, it.lowTarget, it.highTarget) },
+        loop.runningMode
+    )
 
     private fun AutomationEvent.toWear(now: Long): EventData.UserAction.UserActionEntry =
         EventData.UserAction.UserActionEntry(
@@ -1296,16 +1331,12 @@ class DataHandlerMobile @Inject constructor(
             title = title
         )
 
-    fun sendUserActions() {
+    /** The user actions (automations run by hand) the watch offers, compared without their time stamps. */
+    fun sendUserActions(force: Boolean = true) {
         val now = System.currentTimeMillis()
-        val events = automation.userEvents()
-        rxBus.send(
-            EventMobileToWear(
-                EventData.UserAction(
-                    ArrayList(events.filter { it.isEnabled && it.canRun() }.map { it.toWear(now) })
-                )
-            )
-        )
+        val entries = automation.userEvents().filter { it.isEnabled && it.canRun() }.map { it.toWear(now) }
+        if (sendFilter.actionButtons("userActions", entries.map { it.copy(timeStamp = 0L) }, now, preferences.get(BooleanKey.WearActionButtonsOnlyWhenChanged), force))
+            rxBus.send(EventMobileToWear(EventData.UserAction(ArrayList(entries))))
     }
 
     private fun sendTreatments() {

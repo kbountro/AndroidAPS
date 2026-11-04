@@ -126,6 +126,10 @@ enum class BooleanKey(
     WearCustomWatchfaceAuthorization(key = "wear_custom_watchface_autorization", defaultValue = false),
     WearNotifyOnSmb(key = "wear_notifySMB", defaultValue = true),
     WearBroadcastData(key = "wear_broadcast_data", defaultValue = false),
+    // What the phone sends the watch (Wear plugin, "Data sent to the watch"); the defaults keep sending everything with every update.
+    WearBgEveryFiveMinutes(key = "wear_bg_every_five_minutes", defaultValue = false),
+    WearActionButtonsOnlyWhenChanged(key = "wear_action_buttons_only_when_changed", defaultValue = false),
+    WearSendBgTable(key = "wear_send_bg_table", defaultValue = true),
     WizardCalculationVisible("wizard_calculation_visible", defaultValue = false),
     WizardCorrectionPercent("wizard_correction_percent", defaultValue = false),
     WizardIncludeCob("wizard_include_cob", defaultValue = false),

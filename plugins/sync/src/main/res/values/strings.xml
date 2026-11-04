@@ -144,6 +144,14 @@
     <string name="wear_general_settings">General Settings</string>
     <string name="wear_notifysmb_title">Notify on SMB</string>
     <string name="wear_notifysmb_summary">Show SMB on the watch like a standard bolus.</string>
+    <string name="wear_data_sent_settings">Data sent to the watch</string>
+    <string name="wear_data_sent_settings_summary">Send less to save the watch\'s battery</string>
+    <string name="wear_bg_every_five_minutes_title">BG every 5 minutes</string>
+    <string name="wear_bg_every_five_minutes_summary">With a 1-minute CGM, update the watch with every fifth reading instead of every reading. IOB, COB, basal and loop status come with it. A bolus, carbs, a temp target or a loop mode change still shows at once.</string>
+    <string name="wear_action_buttons_only_when_changed_title">Action buttons only when changed</string>
+    <string name="wear_action_buttons_only_when_changed_summary">Send the quick wizard, user action and loop mode buttons and the bolus and carb limits only when they change, and once an hour, instead of with every update. A re-sync from the watch sends them anyway.</string>
+    <string name="wear_send_bg_table_title">Send BG table</string>
+    <string name="wear_send_bg_table_summary">The BG history, basal, boluses, carbs and predictions drawn on the chart of watch faces that have one, and the BG history of the Circle face. Off: the watch gets none of it and clears what it has.</string>
     <string name="wear_custom_watchface_settings">Custom Watchface Settings</string>
     <string name="wear_custom_watchface_authorization_title">Custom Watchface Authorization</string>
     <string name="wear_custom_watchface_authorization_summary">Authorize loaded custom watchface to change and lock some watch display settings to suit watchface design</string>
