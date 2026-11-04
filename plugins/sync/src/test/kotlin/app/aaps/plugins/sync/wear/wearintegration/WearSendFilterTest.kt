@@ -16,8 +16,8 @@ class WearSendFilterTest {
         val jitter = listOf(0L, -3_000L, 4_000L, -2_000L, 1_000L, -4_000L, 3_000L)
         for (i in 0..20) {
             val reading = start + i * minute + jitter[i % jitter.size]
-            val afterCalculation = filter.pacedUpdate(reading, "no change")
-            val afterLoopRun = filter.pacedUpdate(reading, "no change")
+            val afterCalculation = filter.pacedUpdate("bg", reading, "no change")
+            val afterLoopRun = filter.pacedUpdate("bg", reading, "no change")
             assertThat(afterLoopRun).isEqualTo(afterCalculation) // the loop run goes with its reading's update
             if (afterCalculation) sent.add(i)
         }
@@ -30,29 +30,47 @@ class WearSendFilterTest {
         var reading = start
         for (gap in listOf(300_000L, 296_000L, 304_000L, 290_000L, 300_000L)) {
             reading += gap
-            assertThat(filter.pacedUpdate(reading, "no change")).isTrue()
+            assertThat(filter.pacedUpdate("bg", reading, "no change")).isTrue()
         }
     }
 
     @Test
     fun theUsersOwnTreatmentsShowAtOnce() {
         val filter = WearSendFilter()
-        assertThat(filter.pacedUpdate(start, listOf(null, null))).isTrue()
-        assertThat(filter.pacedUpdate(start + minute, listOf(null, null))).isFalse()
+        assertThat(filter.pacedUpdate("bg", start, listOf(null, null))).isTrue()
+        assertThat(filter.pacedUpdate("bg", start + minute, listOf(null, null))).isFalse()
         // A bolus between two paced updates goes out, once.
-        assertThat(filter.pacedUpdate(start + minute, listOf(start + minute to 2.0, null))).isTrue()
-        assertThat(filter.pacedUpdate(start + 2 * minute, listOf(start + minute to 2.0, null))).isFalse()
+        assertThat(filter.pacedUpdate("bg", start + minute, listOf(start + minute to 2.0, null))).isTrue()
+        assertThat(filter.pacedUpdate("bg", start + 2 * minute, listOf(start + minute to 2.0, null))).isFalse()
         // And the pace keeps its rhythm: the next update is still five minutes after the last paced one.
-        assertThat(filter.pacedUpdate(start + 4 * minute, listOf(start + minute to 2.0, null))).isFalse()
-        assertThat(filter.pacedUpdate(start + 5 * minute, listOf(start + minute to 2.0, null))).isTrue()
+        assertThat(filter.pacedUpdate("bg", start + 4 * minute, listOf(start + minute to 2.0, null))).isFalse()
+        assertThat(filter.pacedUpdate("bg", start + 5 * minute, listOf(start + minute to 2.0, null))).isTrue()
     }
 
     @Test
     fun aReadingOlderThanTheLastSentRestartsThePace() {
         val filter = WearSendFilter()
-        assertThat(filter.pacedUpdate(start, "no change")).isTrue()
-        assertThat(filter.pacedUpdate(start - 10 * minute, "no change")).isTrue()
-        assertThat(filter.pacedUpdate(start - 9 * minute, "no change")).isFalse()
+        assertThat(filter.pacedUpdate("bg", start, "no change")).isTrue()
+        assertThat(filter.pacedUpdate("bg", start - 10 * minute, "no change")).isTrue()
+        assertThat(filter.pacedUpdate("bg", start - 9 * minute, "no change")).isFalse()
+    }
+
+    @Test
+    fun theBgAndTheLoopStatusKeepTheirOwnPace() {
+        val filter = WearSendFilter()
+        val bg = mutableListOf<Int>()
+        val status = mutableListOf<Int>()
+        for (i in 0..12) {
+            val reading = start + i * minute
+            if (filter.pacedUpdate("bg", reading, "no change")) bg.add(i)
+            // The loop status switched to every 5 minutes two readings later than the BG.
+            if (i >= 2 && filter.pacedUpdate("status", reading, "no change")) status.add(i)
+        }
+        assertThat(bg).containsExactly(0, 5, 10).inOrder()
+        assertThat(status).containsExactly(2, 7, 12).inOrder()
+        // Both see the user's bolus.
+        assertThat(filter.pacedUpdate("bg", start + 13 * minute, "bolus")).isTrue()
+        assertThat(filter.pacedUpdate("status", start + 13 * minute, "bolus")).isTrue()
     }
 
     @Test
@@ -77,7 +95,7 @@ class WearSendFilterTest {
     }
 
     @Test
-    fun theChartIsClearedOnceWhenTheBgTableIsOff() {
+    fun theChartIsClearedOnceWhenTheChartDataAreOff() {
         val filter = WearSendFilter()
         assertThat(filter.clearChart(force = false)).isTrue()
         assertThat(filter.clearChart(force = false)).isFalse()

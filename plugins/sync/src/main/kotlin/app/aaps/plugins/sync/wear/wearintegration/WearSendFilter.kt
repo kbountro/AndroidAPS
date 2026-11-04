@@ -10,9 +10,8 @@ internal class WearSendFilter {
     companion object {
 
         /**
-         * With BG every 5 minutes, an update goes out for a reading at least this much newer than the one the last update
-         * went out for: every fifth with a 1-minute CGM (with room for readings arriving a few seconds early), every one
-         * with a 5-minute CGM.
+         * Every 5 minutes, a part goes out for a reading at least this much newer than the one it last went out for: every
+         * fifth with a 1-minute CGM (with room for readings arriving a few seconds early), every one with a 5-minute CGM.
          */
         const val PACE_MS = 270_000L
 
@@ -20,28 +19,31 @@ internal class WearSendFilter {
         const val ACTION_BUTTONS_REFRESH_MS = 60 * 60_000L
     }
 
-    private var pacedReading = 0L
-    private var userActivity: Any? = null
+    /** Per part of the update paced every 5 minutes: the reading it last went out for, and the user's activity then. */
+    private class Pace(var reading: Long = 0L, var userActivity: Any? = null)
+
+    private val paces = HashMap<String, Pace>()
     private val lastSent = HashMap<String, Any?>()
     private val lastSentAt = HashMap<String, Long>()
     private var chartCleared = false
 
     /**
-     * Whether an update after a calculation run or a loop run goes out with BG every 5 minutes, given the time of the
-     * newest reading and the user's own treatments and loop state ([userActivity], compared with the last call's). It
-     * does for a reading at least [PACE_MS] newer than the one the last update went out for, and for anything else
-     * about that same reading - the loop run after it, the SMB or temp basal that run sets - until the next reading
-     * arrives. In between, it does only if [userActivity] changed: a bolus, carbs, a temp target or a loop mode change
-     * shows at once.
+     * Whether [part] of an update after a calculation run or a loop run (the BG and chart, or the loop status) goes out when it
+     * is sent every 5 minutes, given the time of the newest reading and the user's own treatments and loop state
+     * ([userActivity], compared with the part's last call). It does for a reading at least [PACE_MS] newer than the one the part
+     * last went out for, and for anything else about that same reading - the loop run after it, the SMB or temp basal that run
+     * sets - until the next reading arrives. In between, it does only if [userActivity] changed: a bolus, carbs, a temp target
+     * or a loop mode change shows at once. Each part keeps its own pace; given the same calls, two parts decide alike.
      */
     @Synchronized
-    fun pacedUpdate(readingTime: Long, userActivity: Any?): Boolean {
-        val activityChanged = userActivity != this.userActivity
-        this.userActivity = userActivity
+    fun pacedUpdate(part: String, readingTime: Long, userActivity: Any?): Boolean {
+        val pace = paces.getOrPut(part) { Pace() }
+        val activityChanged = userActivity != pace.userActivity
+        pace.userActivity = userActivity
         return when {
-            readingTime == pacedReading                                       -> true
-            readingTime >= pacedReading + PACE_MS || readingTime < pacedReading -> { // a reading due, or the clock or data went back
-                pacedReading = readingTime
+            readingTime == pace.reading                                       -> true
+            readingTime >= pace.reading + PACE_MS || readingTime < pace.reading -> { // a reading due, or the clock or data went back
+                pace.reading = readingTime
                 true
             }
 
@@ -65,15 +67,15 @@ internal class WearSendFilter {
         return send
     }
 
-    /** The BG table and treatments for the chart were sent. */
+    /** The chart data (the BG table, treatments and predictions) were sent. */
     @Synchronized
     fun chartSent() {
         chartCleared = false
     }
 
     /**
-     * With the BG table off: whether to send an empty table and treatments, so that the watch drops what it holds instead of
-     * keeping an old chart - once, and again whenever the watch asks for its data ([force]).
+     * With the chart data off: whether to send an empty BG table and treatments, so that the watch drops what it holds instead
+     * of keeping an old chart - once, and again whenever the watch asks for its data ([force]).
      */
     @Synchronized
     fun clearChart(force: Boolean): Boolean {

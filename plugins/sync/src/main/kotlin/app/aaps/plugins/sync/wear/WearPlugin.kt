@@ -241,11 +241,17 @@ class WearPlugin @Inject constructor(
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.WearBgEveryFiveMinutes, summary = R.string.wear_bg_every_five_minutes_summary, title = R.string.wear_bg_every_five_minutes_title))
                 addPreference(
                     AdaptiveSwitchPreference(
+                        ctx = context, booleanKey = BooleanKey.WearStatusEveryFiveMinutes,
+                        summary = R.string.wear_status_every_five_minutes_summary, title = R.string.wear_status_every_five_minutes_title
+                    )
+                )
+                addPreference(
+                    AdaptiveSwitchPreference(
                         ctx = context, booleanKey = BooleanKey.WearActionButtonsOnlyWhenChanged,
                         summary = R.string.wear_action_buttons_only_when_changed_summary, title = R.string.wear_action_buttons_only_when_changed_title
                     )
                 )
-                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.WearSendBgTable, summary = R.string.wear_send_bg_table_summary, title = R.string.wear_send_bg_table_title))
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.WearSendChartData, summary = R.string.wear_send_chart_data_summary, title = R.string.wear_send_chart_data_title))
             })
         }
     }

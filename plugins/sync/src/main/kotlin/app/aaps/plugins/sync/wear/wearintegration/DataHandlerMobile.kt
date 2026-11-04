@@ -1257,22 +1257,26 @@ class DataHandlerMobile @Inject constructor(
 
     /**
      * Sends the watch its data, as far as the options in the Wear plugin's "Data sent to the watch" settings let through
-     * ([WearSendFilter]). [automatic]: the update after a calculation run or a loop run, which BG every 5 minutes thins
-     * out. [force]: the watch asked for its data (a new watch face, its menu, a re-sync, a missed reading), so everything
-     * the options allow goes, action buttons included.
+     * ([WearSendFilter]). [automatic]: the update after a calculation run or a loop run, whose BG and chart, and whose loop
+     * status, each go out only every 5 minutes if so set. [force]: the watch asked for its data (a new watch face, its menu,
+     * a re-sync, a missed reading), so everything the options allow goes, action buttons included.
      */
     fun resendData(from: String, automatic: Boolean = false, force: Boolean = false) {
-        if (automatic && !force && preferences.get(BooleanKey.WearBgEveryFiveMinutes) &&
-            !sendFilter.pacedUpdate(iobCobCalculator.ads.lastBg()?.timestamp ?: 0L, userActivity())
-        ) {
-            aapsLogger.debug(LTag.WEAR, "Not sending data to wear from $from: BG every 5 minutes")
+        val lastBg = iobCobCalculator.ads.lastBg()
+        val paceBg = automatic && !force && preferences.get(BooleanKey.WearBgEveryFiveMinutes)
+        val paceStatus = automatic && !force && preferences.get(BooleanKey.WearStatusEveryFiveMinutes)
+        val activity = if (paceBg || paceStatus) userActivity() else null
+        val bgDue = !paceBg || sendFilter.pacedUpdate("bg", lastBg?.timestamp ?: 0L, activity)
+        val statusDue = !paceStatus || sendFilter.pacedUpdate("status", lastBg?.timestamp ?: 0L, activity)
+        if (!bgDue && !statusDue) {
+            aapsLogger.debug(LTag.WEAR, "Not sending data to wear from $from: BG and loop status every 5 minutes")
             return
         }
-        aapsLogger.debug(LTag.WEAR, "Sending data to wear from $from")
+        aapsLogger.debug(LTag.WEAR, "Sending data to wear from $from" + (if (bgDue) "" else ", not BG and chart") + (if (statusDue) "" else ", not loop status"))
         val now = System.currentTimeMillis()
         val onlyWhenChanged = preferences.get(BooleanKey.WearActionButtonsOnlyWhenChanged)
         // SingleBg
-        iobCobCalculator.ads.lastBg()?.let { rxBus.send(EventMobileToWear(getSingleBG(it))) }
+        if (bgDue) lastBg?.let { rxBus.send(EventMobileToWear(getSingleBG(it))) }
         // Preferences (compared without their time stamp)
         val wearPreferences = EventData.Preferences(
             timeStamp = now,
@@ -1296,25 +1300,28 @@ class DataHandlerMobile @Inject constructor(
             rxBus.send(EventMobileToWear(wearQuickWizard))
         //UserAction
         sendUserActions(force)
-        // GraphData and Treatments: what the chart on the watch face draws
-        if (preferences.get(BooleanKey.WearSendBgTable)) {
-            iobCobCalculator.ads.getBucketedDataTableCopy()?.let { bucketedData ->
-                rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList(bucketedData.map { getSingleBG(it) }))))
+        // Chart data: the BG table (GraphData) and the treatments and predictions (TreatmentData) the watch face's chart draws,
+        // going with the BG
+        if (bgDue) {
+            if (preferences.get(BooleanKey.WearSendChartData)) {
+                iobCobCalculator.ads.getBucketedDataTableCopy()?.let { bucketedData ->
+                    rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList(bucketedData.map { getSingleBG(it) }))))
+                }
+                sendTreatments()
+                sendFilter.chartSent()
+            } else if (sendFilter.clearChart(force)) {
+                rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList())))
+                rxBus.send(EventMobileToWear(EventData.TreatmentData(ArrayList(), ArrayList(), ArrayList(), ArrayList())))
             }
-            sendTreatments()
-            sendFilter.chartSent()
-        } else if (sendFilter.clearChart(force)) {
-            rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList())))
-            rxBus.send(EventMobileToWear(EventData.TreatmentData(ArrayList(), ArrayList(), ArrayList(), ArrayList())))
         }
         // Status
         // Keep status last. Wear start refreshing after status received
-        sendStatus(from)
+        if (statusDue) sendStatus(from)
         handleAvailableLoopStates(force)
     }
 
     /**
-     * The user's own treatments and loop state, for BG every 5 minutes to send an update at once when they change: the newest
+     * The user's own treatments and loop state, for the parts sent every 5 minutes to go out at once when they change: the newest
      * bolus (not SMB) and carbs, the temp target now and the loop's running mode.
      */
     private fun userActivity(): List<Any?> = listOf(

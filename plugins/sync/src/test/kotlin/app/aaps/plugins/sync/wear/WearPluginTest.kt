@@ -50,6 +50,8 @@ class WearPluginTest : TestBaseWithProfile() {
             val preference = group.getPreference(index)
             listOf(preference.key) + if (preference is PreferenceGroup) keys(preference) else emptyList()
         }
-        assertThat(keys(screen)).containsAtLeast(BooleanKey.WearBgEveryFiveMinutes.key, BooleanKey.WearActionButtonsOnlyWhenChanged.key, BooleanKey.WearSendBgTable.key)
+        assertThat(keys(screen)).containsAtLeast(
+            BooleanKey.WearBgEveryFiveMinutes.key, BooleanKey.WearStatusEveryFiveMinutes.key, BooleanKey.WearActionButtonsOnlyWhenChanged.key, BooleanKey.WearSendChartData.key
+        )
     }
 }
