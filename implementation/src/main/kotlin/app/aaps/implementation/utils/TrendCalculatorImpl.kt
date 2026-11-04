@@ -3,14 +3,20 @@ package app.aaps.implementation.utils
 import app.aaps.core.data.iob.InMemoryGlucoseValue
 import app.aaps.core.data.model.TrendArrow
 import app.aaps.core.interfaces.aps.AutosensDataStore
+import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.interfaces.source.XDripSource
 import app.aaps.core.interfaces.utils.TrendCalculator
+import app.aaps.core.keys.BooleanKey
+import app.aaps.core.keys.interfaces.Preferences
 import dagger.Reusable
 import javax.inject.Inject
 
 @Reusable
 class TrendCalculatorImpl @Inject constructor(
-    private val rh: ResourceHelper
+    private val rh: ResourceHelper,
+    private val preferences: Preferences,
+    private val activePlugin: ActivePlugin
 ) : TrendCalculator {
 
     override fun getTrendArrow(autosensDataStore: AutosensDataStore): TrendArrow? {
@@ -19,10 +25,19 @@ class TrendCalculatorImpl @Inject constructor(
         val glucoseValue = data[0]
         return when {
             glucoseValue.value != glucoseValue.recalculated -> calculateDirection(data) // always recalculate after smoothing
+            ignoresSourceArrow()                            -> calculateDirection(data)
             glucoseValue.trendArrow != TrendArrow.NONE      -> glucoseValue.trendArrow
             else                                            -> calculateDirection(data)
         }
     }
+
+    /**
+     * xDrip+ works its arrow out from its own readings, which never saw AAPS's smoothing (the source smoothing in the
+     * xDrip+ plugin, the smoothing plugin). A smoothing plugin that leaves the newest reading as it came (none, average)
+     * would otherwise let that arrow through. Only read once bucketed data exist, so the BG source is selected by then.
+     */
+    private fun ignoresSourceArrow(): Boolean =
+        activePlugin.activeBgSource is XDripSource && preferences.get(BooleanKey.BgSourceXdripCalculateTrend)
 
     override fun getTrendDescription(autosensDataStore: AutosensDataStore): String {
         return when (getTrendArrow(autosensDataStore)) {

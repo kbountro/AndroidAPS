@@ -23,6 +23,12 @@ class AutosensDataStoreObject : AutosensDataStore {
     companion object {
 
         const val IRREGULAR_DATA_SEC = 30L
+
+        // A recalculated grid point only counts as gap-filled when no reading is within half a bucket
+        // of it, i.e. it sits in a hole the size of a missed 5-minute reading. With the old 30 s bound
+        // any irregular ~1-minute stream (a reading 70-150 s after the previous one) got most of its
+        // points flagged, and AutoISF skips flagged points in its 5% band and parabola fit.
+        const val FILLED_GAP_SEC = 150L
     }
 
     // we need to make sure that bucketed_data will always have the same timestamp for correct use of cached values
@@ -47,6 +53,14 @@ class AutosensDataStoreObject : AutosensDataStore {
                 it.bgReadings = this.bgReadings.toMutableList()
                 it.autosensDataTable = LongSparseArray<AutosensData>(this.autosensDataTable.size).apply { putAll(this@AutosensDataStoreObject.autosensDataTable) }
                 it.bucketedData = this.bucketedData?.toMutableList()
+                // referenceTime is deliberately not carried over. Workers reassign iobCobCalculator.ads
+                // to this clone every cycle, so the grid in createBucketedDataRecalculated() re-anchors
+                // on the newest reading and bucketedData[0] stays the newest 1-minute value.
+                // InvokeLoopWorker triggers the loop off that value (the Overview shows it too); with a
+                // carried-over anchor, 1-minute CGMs loop only every 5 minutes. lastUsed5minCalculation
+                // is carried over so createBucketedData() still notices a 5min/1min mode change and
+                // drops the cache.
+                it.lastUsed5minCalculation = this.lastUsed5minCalculation
             }
         }
 
@@ -248,7 +262,7 @@ class AutosensDataStoreObject : AutosensDataStore {
                 val bgDelta = newer.value - older.value
                 val timeDiffToNew = newer.timestamp - currentTime
                 val timeDiffToOlder = currentTime - older.timestamp
-                val filledGap = min(timeDiffToOlder, timeDiffToNew) > T.secs(IRREGULAR_DATA_SEC).msecs()
+                val filledGap = min(timeDiffToOlder, timeDiffToNew) > T.secs(FILLED_GAP_SEC).msecs()
                 val currentBg = newer.value - timeDiffToNew.toDouble() / (newer.timestamp - older.timestamp) * bgDelta
                 val newBgReading = InMemoryGlucoseValue(currentTime, currentBg.roundToLong().toDouble(), filledGap = filledGap, sourceSensor = lastBg.sourceSensor)
                 newBucketedData.add(newBgReading)

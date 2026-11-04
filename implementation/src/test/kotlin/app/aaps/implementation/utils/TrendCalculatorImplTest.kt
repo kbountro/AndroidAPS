@@ -3,24 +3,40 @@ package app.aaps.implementation.utils
 import app.aaps.core.data.iob.InMemoryGlucoseValue
 import app.aaps.core.data.model.TrendArrow
 import app.aaps.core.interfaces.aps.AutosensDataStore
+import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.interfaces.source.BgSource
+import app.aaps.core.interfaces.source.XDripSource
+import app.aaps.core.keys.BooleanKey
+import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.shared.tests.TestBase
 import com.google.common.truth.Truth.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mock
+import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
 class TrendCalculatorImplTest : TestBase() {
 
     @Mock lateinit var rh: ResourceHelper
     @Mock lateinit var autosensDataStore: AutosensDataStore
+    @Mock lateinit var preferences: Preferences
+    @Mock lateinit var activePlugin: ActivePlugin
+    @Mock lateinit var otherSource: BgSource
 
     private lateinit var trendCalculator: TrendCalculatorImpl
 
+    /** An xDrip+-like source: both a BG source and an XDripSource, as XdripSourcePlugin is. */
+    interface XdripBgSource : BgSource, XDripSource
+
+    private val xdripSource: XdripBgSource = mock()
+
     @BeforeEach
     fun setup() {
-        trendCalculator = TrendCalculatorImpl(rh)
+        trendCalculator = TrendCalculatorImpl(rh, preferences, activePlugin)
+        whenever(activePlugin.activeBgSource).thenReturn(otherSource)
+        whenever(preferences.get(BooleanKey.BgSourceXdripCalculateTrend)).thenReturn(true)
         whenever(rh.gs(app.aaps.core.ui.R.string.a11y_arrow_double_down)).thenReturn("Double Down")
         whenever(rh.gs(app.aaps.core.ui.R.string.a11y_arrow_single_down)).thenReturn("Single Down")
         whenever(rh.gs(app.aaps.core.ui.R.string.a11y_arrow_forty_five_down)).thenReturn("Forty Five Down")
@@ -176,6 +192,42 @@ class TrendCalculatorImplTest : TestBase() {
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(data)
         // Should recalculate and get SINGLE_UP (12.5 mg/dL rise over 5 min = 2.5 per minute)
         assertThat(trendCalculator.getTrendArrow(autosensDataStore)).isEqualTo(TrendArrow.SINGLE_UP)
+    }
+
+    @Test
+    fun `xDrip arrow is replaced by the one from the smoothed data`() {
+        // The newest reading came through smoothing unchanged (no smoothing, average), so it still carries xDrip+'s arrow,
+        // but the smoothed data rose only 2.5 mg/dL in 5 minutes.
+        whenever(activePlugin.activeBgSource).thenReturn(xdripSource)
+        val data = mutableListOf(
+            createGlucoseValue(102.5, 300000L, trendArrow = TrendArrow.DOUBLE_UP),
+            createGlucoseValue(100.0, 0L, recalculated = 100.0)
+        )
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(data)
+        assertThat(trendCalculator.getTrendArrow(autosensDataStore)).isEqualTo(TrendArrow.FLAT)
+    }
+
+    @Test
+    fun `xDrip arrow passes through when its calculation is turned off`() {
+        whenever(activePlugin.activeBgSource).thenReturn(xdripSource)
+        whenever(preferences.get(BooleanKey.BgSourceXdripCalculateTrend)).thenReturn(false)
+        val data = mutableListOf(
+            createGlucoseValue(102.5, 300000L, trendArrow = TrendArrow.DOUBLE_UP),
+            createGlucoseValue(100.0, 0L, recalculated = 100.0)
+        )
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(data)
+        assertThat(trendCalculator.getTrendArrow(autosensDataStore)).isEqualTo(TrendArrow.DOUBLE_UP)
+    }
+
+    @Test
+    fun `other sources keep their arrow whatever the xDrip setting`() {
+        // setup leaves the xDrip+ setting on and a source that isn't xDrip+ active
+        val data = mutableListOf(
+            createGlucoseValue(102.5, 300000L, trendArrow = TrendArrow.DOUBLE_UP),
+            createGlucoseValue(100.0, 0L, recalculated = 100.0)
+        )
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(data)
+        assertThat(trendCalculator.getTrendArrow(autosensDataStore)).isEqualTo(TrendArrow.DOUBLE_UP)
     }
 
     @Test

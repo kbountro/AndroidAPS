@@ -832,6 +832,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
         }
         if (fit_corr < 0.9) {
             consoleError.add("acce_ISF adaptation by-passed as correlation ${round(fit_corr, 3)} is too low")
+            glucoseStatusCalculatorAutoIsf.lastFitProblem.takeIf { it.isNotEmpty() }?.let { consoleError.add("parabola fit scored no window - $it") }
         } else {
             val fit_share = 10 * (fit_corr - 0.9)                            // 0 at correlation 0.9, 1 at 1.00
             var cap_weight = 1.0                                             // full contribution above target

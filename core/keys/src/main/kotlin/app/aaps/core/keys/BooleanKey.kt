@@ -43,6 +43,8 @@ enum class BooleanKey(
 
     BgSourceUploadToNs("dexcomg5_nsupload", true, defaultedBySM = true, hideParentScreenIfHidden = true),
     BgSourceCreateSensorChange("dexcom_lognssensorchange", true, defaultedBySM = true),
+    // xDrip+ source: work the trend arrow out from AAPS's own smoothed 5-minute data instead of showing the arrow xDrip+ sent
+    BgSourceXdripCalculateTrend("xdrip_calculate_trend", true, defaultedBySM = true),
 
     ApsUseDynamicSensitivity("use_dynamic_sensitivity", false),
     ApsUseAutosens("openapsama_useautosens", true, defaultedBySM = true, negativeDependency = ApsUseDynamicSensitivity), // change from default false
@@ -124,6 +126,11 @@ enum class BooleanKey(
     WearCustomWatchfaceAuthorization(key = "wear_custom_watchface_autorization", defaultValue = false),
     WearNotifyOnSmb(key = "wear_notifySMB", defaultValue = true),
     WearBroadcastData(key = "wear_broadcast_data", defaultValue = false),
+    // What the phone sends the watch (Wear plugin, "Data sent to the watch"); the defaults keep sending everything with every update.
+    WearBgEveryFiveMinutes(key = "wear_bg_every_five_minutes", defaultValue = false),
+    WearStatusEveryFiveMinutes(key = "wear_status_every_five_minutes", defaultValue = false),
+    WearActionButtonsOnlyWhenChanged(key = "wear_action_buttons_only_when_changed", defaultValue = false),
+    WearSendChartData(key = "wear_send_chart_data", defaultValue = true),
     WizardCalculationVisible("wizard_calculation_visible", defaultValue = false),
     WizardCorrectionPercent("wizard_correction_percent", defaultValue = false),
     WizardIncludeCob("wizard_include_cob", defaultValue = false),
