@@ -16,6 +16,9 @@ data class GlucoseStatusAutoIsf(
     val duraISFminutes: Double = 0.0,
     /** average BG over [duraISFminutes] */
     val duraISFaverage: Double = 0.0,
+    /** average of AutoISF's ISF curve over the readings in [duraISFminutes] (0 when none count): dura_ISF is
+     *  1 + (duraISFminutes / 60) * dura_ISF_weight * duraISFcurveAverage */
+    val duraISFcurveAverage: Double = 0.0,
     /** past duration of BG approximating parabola shape */
     val parabolaMinutes: Double = 0.0,
     /** parabola derived last delta, i.e. from -5m to now */

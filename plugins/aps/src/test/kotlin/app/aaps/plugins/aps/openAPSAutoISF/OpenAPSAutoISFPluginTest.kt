@@ -136,13 +136,15 @@ class OpenAPSAutoISFPluginTest : TestBaseWithProfile() {
 
     @Test
     fun interpolateTest() {
-        whenever(preferences.get(DoubleKey.ApsAutoIsfLowBgWeight)).thenReturn(10.0)
-        whenever(preferences.get(DoubleKey.ApsAutoIsfHighBgWeight)).thenReturn(1.0)
-        assertThat(openAPSAutoISFPlugin.interpolate(45.0)).isEqualTo(-5.0)
-        assertThat(openAPSAutoISFPlugin.interpolate(55.0)).isEqualTo(-5.0)
+        // AutoIsfCurve: linear between (50, -0.57) (60, -0.28) (70, -0.16) (80, -0.06) (90, 0) (150, 0) (200, 0.11) (300, 0.25),
+        // extended linearly beyond both ends. bg_ISF applies its weights to this; the curve no longer reads them.
+        assertThat(openAPSAutoISFPlugin.interpolate(45.0)).isWithin(1e-9).of(-0.715)
+        assertThat(openAPSAutoISFPlugin.interpolate(55.0)).isWithin(1e-9).of(-0.425)
         assertThat(openAPSAutoISFPlugin.interpolate(100.0)).isEqualTo(0.0)
-        assertThat(openAPSAutoISFPlugin.interpolate(130.0)).isEqualTo(0.25)
-        assertThat(openAPSAutoISFPlugin.interpolate(230.0)).isEqualTo(0.7)
+        assertThat(openAPSAutoISFPlugin.interpolate(130.0)).isEqualTo(0.0)
+        assertThat(openAPSAutoISFPlugin.interpolate(200.0)).isEqualTo(0.11)
+        assertThat(openAPSAutoISFPlugin.interpolate(230.0)).isWithin(1e-9).of(0.152)
+        assertThat(openAPSAutoISFPlugin.interpolate(400.0)).isWithin(1e-9).of(0.39)
     }
 
     @Test

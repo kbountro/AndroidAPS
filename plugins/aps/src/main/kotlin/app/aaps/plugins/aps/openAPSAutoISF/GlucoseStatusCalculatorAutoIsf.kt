@@ -108,8 +108,8 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val fitValueAt = { i: Int -> smoothedRawWindow.getOrNull(i)?.recalculated ?: orig[i].value }
         val delta = (if (use1MinuteRaw) slidingDelta(smoothedRawWindow) else null) ?: deltaResult.delta
 
-        // dura_ISF: how long, within the last hour, glucose has been at its current level above 150 mg/dL, rise included;
-        // still 5-minute data
+        // dura_ISF: how long, within the last hour, glucose has been at its current level above 150 mg/dL, rise included,
+        // and the ISF curve's average over that time; still 5-minute data
         val duraWindow = DuraIsfWindow.of(data)
 
         // calculate best parabola and determine delta by extending it 5 minutes into the future
@@ -266,6 +266,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             longAvgDelta = deltaResult.longAvgDelta,
             duraISFminutes = duraWindow.minutes.toDouble(),
             duraISFaverage = duraWindow.average,
+            duraISFcurveAverage = duraWindow.curveAverage,
             parabolaMinutes = duraP,
             deltaPl = deltaPl,
             deltaPn = deltaPn,

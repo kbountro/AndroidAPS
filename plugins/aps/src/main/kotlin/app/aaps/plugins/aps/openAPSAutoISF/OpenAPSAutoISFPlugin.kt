@@ -803,6 +803,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
 
         val dura05: Double = glucose_status!!.duraISFminutes
         val avg05: Double = glucose_status.duraISFaverage
+        val curve05: Double = glucose_status.duraISFcurveAverage
         val maxISFReduction: Double = autoISF_max
         var sens_modified = false
         var pp_ISF = 1.0
@@ -923,15 +924,16 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
 
             // kbountro: New duraISF scaling according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
             else               -> {
-                // fight the resistance at high levels: the curve's effect after an hour at the level, built up linearly over that
-                // hour and then held (DuraIsfWindow counts at most 60 minutes; min() keeps the hold whatever the source)
+                // fight the resistance at high levels: the curve's effect after an hour at a level, each 5 minutes adding its
+                // reading's share, built up over the hour and then held (DuraIsfWindow counts at most 60 minutes and averages
+                // the curve over its readings; min() keeps the hold whatever the source)
                 val dura05Weight = min(dura05, DuraIsfWindow.MAX_MINUTES.toDouble()) / 60
                 //val avg05Weight = weightISF / target_bg
                 //dura_ISF += dura05Weight * avg05Weight * (avg05 - target_bg)
                 val avg05Weight = weightISF
-                dura_ISF += dura05Weight * avg05Weight * interpolate(avg05)
+                dura_ISF += dura05Weight * avg05Weight * curve05
                 sens_modified = true
-                consoleError.add("dura_ISF adaptation is ${round(dura_ISF, 2)} after ${round(dura05, 1)}m above ${DuraIsfWindow.FLOOR_MGDL.toInt()} mg/dL at an average of ${round(avg05, 1)}")
+                consoleError.add("dura_ISF adaptation is ${round(dura_ISF, 2)} after ${round(dura05, 1)}m above ${DuraIsfWindow.FLOOR_MGDL.toInt()} mg/dL (average ${round(avg05, 1)}, average curve value ${round(curve05, 3)})")
             }
         }
         autoIsfValues.duraIsf = dura_ISF
@@ -957,78 +959,9 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
         return round(sens / sensitivityRatio, 1)     // nothing changed
     }
 
-    // kbountro: Changed polygon according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
-    // kbountro: Guessed extrapolation of the above study from 200mg/dl to 300mg/dl, 10% -> 20% insulin effectiveness
-    // kbountro: Moved bgISF weights out of the interpolate function
-    fun interpolate(xdata: Double): Double {   // interpolate ISF behaviour based on polygons defining nonlinear functions defined by value pairs for ...
-        //  ...             <----------------------  glucose  ---------------------->
-        //val polyX = arrayOf(50.0, 60.0, 80.0, 90.0, 100.0, 110.0, 150.0, 180.0, 200.0)
-        //val polyY = arrayOf(-0.5, -0.5, -0.3, -0.2, 0.0, 0.0, 0.5, 0.7, 0.7)
-        val polyX = arrayOf(50.0, 60.0, 70.0, 80.0, 90.0, 150.0, 200.0, 300.0)
-        val polyY = arrayOf(-0.57, -0.28, -0.16, -0.06, 0.0, 0.0, 0.11, 0.25)
-        val polymax: Int = polyX.size - 1
-        var step = polyX[0]
-        var sVal = polyY[0]
-        var stepT = polyX[polymax]
-        var sValold = polyY[polymax]
-
-        var newVal = 1.0
-        var lowVal = 1.0
-        val topVal: Double
-        val lowX: Double
-        val topX: Double
-        val myX: Double
-        var lowLabl = step
-
-        if (step > xdata) {
-            // extrapolate backwards
-            stepT = polyX[1]
-            sValold = polyY[1]
-            lowVal = sVal
-            topVal = sValold
-            lowX = step
-            topX = stepT
-            myX = xdata
-            newVal = lowVal + (topVal - lowVal) / (topX - lowX) * (myX - lowX)
-        } else if (stepT < xdata) {
-            // extrapolate forwards
-            step = polyX[polymax - 1]
-            sVal = polyY[polymax - 1]
-            lowVal = sVal
-            topVal = sValold
-            lowX = step
-            topX = stepT
-            myX = xdata
-            newVal = lowVal + (topVal - lowVal) / (topX - lowX) * (myX - lowX)
-        } else {
-            // interpolate
-            for (i: Int in 0..polymax) {
-                step = polyX[i]
-                sVal = polyY[i]
-                if (step == xdata) {
-                    newVal = sVal
-                    break
-                } else if (step > xdata) {
-                    topVal = sVal
-                    lowX = lowLabl
-                    myX = xdata
-                    topX = step
-                    newVal = lowVal + (topVal - lowVal) / (topX - lowX) * (myX - lowX)
-                    break
-                }
-                lowVal = sVal
-                lowLabl = step
-            }
-        }
-        /*
-        newVal = if (xdata > 100) {
-            newVal * higher_ISFrange_weight
-        } else {
-            newVal * lower_ISFrange_weight
-        }
-        */
-        return newVal
-    }
+    // kbountro: Changed polygon according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416 - now in
+    // AutoIsfCurve, which dura_ISF's DuraIsfWindow uses too.
+    fun interpolate(xdata: Double): Double = AutoIsfCurve.at(xdata)
 
     fun withinISFlimits(
         liftISF: Double, minISFReduction: Double, maxISFReduction: Double, sensitivityRatio: Double,

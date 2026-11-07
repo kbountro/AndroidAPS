@@ -18,6 +18,17 @@ class DuraIsfWindowTest {
         val window = DuraIsfWindow.of(every5min(250.0, 240.0, 230.0, 220.0, 210.0, 200.0, 190.0, 180.0, 170.0, 160.0, 145.0, 140.0))
         assertThat(window.minutes).isEqualTo(45L)
         assertThat(window.average).isWithin(1e-9).of(205.0)
+        // The curve averaged over the ten readings: (0.18 + 0.166 + ... + 0.022) / 10, below curve(205) = 0.117.
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.109)
+    }
+
+    @Test
+    fun aShortSpikeCountsOnlyForItsOwnMinutes() {
+        // 55 minutes at 160, then 300 for the newest reading: 1 of 12 readings at curve(300) = 0.25, 11 at curve(160) = 0.022.
+        val window = DuraIsfWindow.of(every5min(300.0, *DoubleArray(11) { 160.0 }, 140.0))
+        assertThat(window.minutes).isEqualTo(55L)
+        assertThat(window.average).isWithin(1e-9).of(2060.0 / 12)
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.041)
     }
 
     @Test
@@ -26,6 +37,7 @@ class DuraIsfWindowTest {
         val window = DuraIsfWindow.of(every5min(220.0, 218.0, 221.0, 205.0, 219.0, 222.0, 220.0, 221.0, 219.0, 220.0, 222.0, 218.0, 220.0, 140.0))
         assertThat(window.minutes).isEqualTo(60L)
         assertThat(window.average).isWithin(0.01).of(218.85)
+        assertThat(window.curveAverage).isWithin(1e-4).of(0.1364) // all between 200 and 300, where the curve is linear: curve(218.85)
     }
 
     @Test
@@ -34,14 +46,17 @@ class DuraIsfWindowTest {
         val steady = DuraIsfWindow.of(every5min(*DoubleArray(25) { 200.0 }))
         assertThat(steady.minutes).isEqualTo(60L)
         assertThat(steady.average).isWithin(1e-9).of(200.0)
+        assertThat(steady.curveAverage).isWithin(1e-9).of(0.11)
         // An hour at 250 after a two-hour rise from 150: the average is the last hour's, not the rise's.
         val afterRise = DuraIsfWindow.of(every5min(*DoubleArray(13) { 250.0 }, *DoubleArray(24) { 246.0 - 4.0 * it }))
         assertThat(afterRise.minutes).isEqualTo(60L)
         assertThat(afterRise.average).isWithin(1e-9).of(250.0)
+        assertThat(afterRise.curveAverage).isWithin(1e-9).of(0.18)
         // A reading 65 minutes old is outside the window even when it would otherwise count.
         val slowRise = DuraIsfWindow.of(every5min(*DoubleArray(20) { 300.0 - 2.5 * it }))
         assertThat(slowRise.minutes).isEqualTo(60L)
         assertThat(slowRise.average).isWithin(1e-9).of(285.0)
+        assertThat(slowRise.curveAverage).isWithin(1e-9).of(0.229)
     }
 
     @Test
@@ -50,6 +65,7 @@ class DuraIsfWindowTest {
         val window = DuraIsfWindow.of(every5min(200.0, 220.0, 240.0, 260.0, 260.0, 260.0))
         assertThat(window.minutes).isEqualTo(0L)
         assertThat(window.average).isWithin(1e-9).of(200.0)
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.11) // the newest reading alone; dura_ISF needs 10 minutes
     }
 
     @Test
@@ -65,10 +81,12 @@ class DuraIsfWindowTest {
         val atFloor = DuraIsfWindow.of(every5min(150.0, 160.0, 170.0))
         assertThat(atFloor.minutes).isEqualTo(0L)
         assertThat(atFloor.average).isWithin(1e-9).of(150.0)
+        assertThat(atFloor.curveAverage).isEqualTo(0.0)
         // The count stops at the first reading at or below 150.
         val above = DuraIsfWindow.of(every5min(180.0, 170.0, 160.0, 150.0, 160.0))
         assertThat(above.minutes).isEqualTo(10L)
         assertThat(above.average).isWithin(1e-9).of(170.0)
+        assertThat(above.curveAverage).isWithin(1e-9).of(0.044) // (0.066 + 0.044 + 0.022) / 3
     }
 
     @Test
