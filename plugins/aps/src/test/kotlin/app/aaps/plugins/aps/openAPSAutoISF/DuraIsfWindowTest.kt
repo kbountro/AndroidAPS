@@ -29,6 +29,22 @@ class DuraIsfWindowTest {
     }
 
     @Test
+    fun onlyTheLastHourCounts() {
+        // Two hours at 200: the count stops at 60 minutes.
+        val steady = DuraIsfWindow.of(every5min(*DoubleArray(25) { 200.0 }))
+        assertThat(steady.minutes).isEqualTo(60L)
+        assertThat(steady.average).isWithin(1e-9).of(200.0)
+        // An hour at 250 after a two-hour rise from 150: the average is the last hour's, not the rise's.
+        val afterRise = DuraIsfWindow.of(every5min(*DoubleArray(13) { 250.0 }, *DoubleArray(24) { 246.0 - 4.0 * it }))
+        assertThat(afterRise.minutes).isEqualTo(60L)
+        assertThat(afterRise.average).isWithin(1e-9).of(250.0)
+        // A reading 65 minutes old is outside the window even when it would otherwise count.
+        val slowRise = DuraIsfWindow.of(every5min(*DoubleArray(20) { 300.0 - 2.5 * it }))
+        assertThat(slowRise.minutes).isEqualTo(60L)
+        assertThat(slowRise.average).isWithin(1e-9).of(285.0)
+    }
+
+    @Test
     fun aFallOfMoreThanFivePercentEndsTheCount() {
         // Down from a plateau at 260: 220 is more than 5% above 200, so the count starts again from the fall.
         val window = DuraIsfWindow.of(every5min(200.0, 220.0, 240.0, 260.0, 260.0, 260.0))

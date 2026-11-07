@@ -923,8 +923,9 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
 
             // kbountro: New duraISF scaling according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
             else               -> {
-                // fight the resistance at high levels
-                val dura05Weight = dura05 / 60
+                // fight the resistance at high levels: the curve's effect after an hour at the level, built up linearly over that
+                // hour and then held (DuraIsfWindow counts at most 60 minutes; min() keeps the hold whatever the source)
+                val dura05Weight = min(dura05, DuraIsfWindow.MAX_MINUTES.toDouble()) / 60
                 //val avg05Weight = weightISF / target_bg
                 //dura_ISF += dura05Weight * avg05Weight * (avg05 - target_bg)
                 val avg05Weight = weightISF
