@@ -19,7 +19,6 @@ import dagger.Reusable
 import javax.inject.Inject
 import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.roundToLong
 
 @Reusable
 class GlucoseStatusCalculatorAutoIsf @Inject constructor(
@@ -109,31 +108,8 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val fitValueAt = { i: Int -> smoothedRawWindow.getOrNull(i)?.recalculated ?: orig[i].value }
         val delta = (if (use1MinuteRaw) slidingDelta(smoothedRawWindow) else null) ?: deltaResult.delta
 
-        // calculate 2 variables for 5% range; still using 5 minute data
-        val bw = 0.05
-        var sumBG: Double = now.recalculated
-        var oldAvg: Double = sumBG
-        var minutesDur = 0L
-        var n = 1
-        for (i in 1 until sizeRecords) {
-            if (data[i].value > 39 && !data[i].filledGap) {
-                n += 1
-                val then = data[i]
-                val thenDate: Long = then.timestamp
-                //  stop the series if there was a CGM gap greater than 13 minutes, i.e. 2 regular readings
-                //  needs shorter gap for Libre?
-                if (((nowDate - thenDate) / (1000.0 * 60)).roundToInt() - minutesDur > 13) {
-                    break
-                }
-                if (then.recalculated > oldAvg * (1 - bw) && then.recalculated < oldAvg * (1 + bw)) {
-                    sumBG += then.recalculated
-                    oldAvg = sumBG / n  // was: (i + 1)
-                    minutesDur = ((nowDate - thenDate) / (1000.0 * 60)).roundToLong()
-                } else {
-                    break
-                }
-            }
-        }
+        // dura_ISF: how long glucose has been at its current level above 150 mg/dL, rise included; still 5-minute data
+        val duraWindow = DuraIsfWindow.of(data)
 
         // calculate best parabola and determine delta by extending it 5 minutes into the future
         // after https://www.codeproject.com/Articles/63170/Least-Squares-Regression-for-Quadratic-Curve-Fitti
@@ -287,8 +263,8 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             shortAvgDelta = deltaResult.shortAvgDelta,
             delta = delta,
             longAvgDelta = deltaResult.longAvgDelta,
-            duraISFminutes = minutesDur.toDouble(),
-            duraISFaverage = oldAvg,
+            duraISFminutes = duraWindow.minutes.toDouble(),
+            duraISFaverage = duraWindow.average,
             parabolaMinutes = duraP,
             deltaPl = deltaPl,
             deltaPn = deltaPn,

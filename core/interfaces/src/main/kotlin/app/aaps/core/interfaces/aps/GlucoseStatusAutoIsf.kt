@@ -10,9 +10,11 @@ data class GlucoseStatusAutoIsf(
     override val shortAvgDelta: Double = 0.0,
     override val longAvgDelta: Double = 0.0,
     override val date: Long = 0L,
-    /** past duration of BG changing only within +/- 5% */
+    /** past duration of BG above 150 mg/dL, counted back from now while each reading is less than 5% above the
+     *  average of the newer ones: the time at its current level, the rise to it included, since it last fell
+     *  (AutoISF's DuraIsfWindow); 0 at or below 150 mg/dL */
     val duraISFminutes: Double = 0.0,
-    /** average BG while BG was changing less than +/- 5% */
+    /** average BG over [duraISFminutes] */
     val duraISFaverage: Double = 0.0,
     /** past duration of BG approximating parabola shape */
     val parabolaMinutes: Double = 0.0,

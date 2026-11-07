@@ -914,10 +914,11 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
             }
 
             // kbountro: New lower bound according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
+            // (DuraIsfWindow counts no time at or below it, so this only catches a window it did not produce)
             //avg05 <= target_bg -> {
-            avg05 <= 150 -> {
+            avg05 <= DuraIsfWindow.FLOOR_MGDL -> {
                 //consoleError.add("dura_ISF by-passed; avg. glucose $avg05 below target $target_bg")
-                consoleError.add("dura_ISF by-passed; avg. glucose $avg05 <= 150")
+                consoleError.add("dura_ISF by-passed; avg. glucose $avg05 <= ${DuraIsfWindow.FLOOR_MGDL.toInt()}")
             }
 
             // kbountro: New duraISF scaling according to https://journals.sagepub.com/doi/pdf/10.1177/193229681000400416
@@ -929,7 +930,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
                 val avg05Weight = weightISF
                 dura_ISF += dura05Weight * avg05Weight * interpolate(avg05)
                 sens_modified = true
-                consoleError.add("dura_ISF adaptation is ${round(dura_ISF, 2)} because ISF ${round(sens, 1)} did not do it for ${round(dura05, 1)}m")
+                consoleError.add("dura_ISF adaptation is ${round(dura_ISF, 2)} after ${round(dura05, 1)}m above ${DuraIsfWindow.FLOOR_MGDL.toInt()} mg/dL at an average of ${round(avg05, 1)}")
             }
         }
         autoIsfValues.duraIsf = dura_ISF
