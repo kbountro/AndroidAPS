@@ -92,8 +92,10 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.longAvgDelta).isWithin(0.001).of(-2.0) // -2 -2 -2 -2
         assertThat(glucoseStatus.date).isEqualTo(1514766900000L) // latest date
 
-        assertThat(glucoseStatus.duraISFminutes).isEqualTo(35.0) // plateau size records in minutes
-        assertThat(glucoseStatus.duraISFaverage).isWithin(0.1).of(221.5) // average during above time window
+        // dura_ISF counts on the raw readings here, all below 150 mg/dL: nothing counts (the bucketed fixture would give 35 minutes).
+        assertThat(glucoseStatus.duraISFminutes).isEqualTo(0.0)
+        assertThat(glucoseStatus.duraISFaverage).isWithin(0.001).of(114.0) // the newest raw reading
+        assertThat(glucoseStatus.duraISFcurveAverage).isEqualTo(0.0)
         assertThat(glucoseStatus.parabolaMinutes).isWithin(0.1).of(14.0) // parabola size records in minutes
         assertThat(glucoseStatus.deltaPl).isWithin(0.0001).of(-1.7157) // last delta
         assertThat(glucoseStatus.deltaPn).isWithin(0.0001).of(0.4255) // next delta
@@ -103,6 +105,24 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.a2).isWithin(0.0001).of(1.0706) //
         assertThat(glucoseStatus.corrSqu).isWithin(0.0006).of(0.9430) // parabola fit quality
         assertThat(calculator.lastFitProblem).isEmpty()
+    }
+
+    @Test fun rawPathCountsDuraIsfOnTheOneMinuteReadings() {
+        // Raw path (Libre): 47 minutes of 1-minute readings at 200 before one at 140. The bucketed fixture (35 minutes at 221.5)
+        // is not what dura_ISF counts on; the raw readings give 46 minutes, to the minute.
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        calculator.preferences = preferences
+        calculator.activePlugin = activePlugin
+        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
+        whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
+        whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
+        whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyBgData())
+        whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSteadyLibreRawData())
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+        assertThat(glucoseStatus.duraISFminutes).isEqualTo(46.0)
+        assertThat(glucoseStatus.duraISFaverage).isWithin(1e-9).of(200.0)
+        assertThat(glucoseStatus.duraISFcurveAverage).isWithin(1e-9).of(0.11)
     }
 
     @Test fun calculateValidForced1MinuteRawGlucoseStatusAutoIsf() {
@@ -555,6 +575,12 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         origData.add(GV(value = 96.0, timestamp = 1514766480000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
         return origData
     }
+
+    // 1-minute Libre readings: 200 for 47 minutes (newest at 1514766900000), then 140.
+    private fun generateSteadyLibreRawData(): MutableList<GV> =
+        (0..47).map {
+            GV(value = if (it < 47) 200.0 else 140.0, timestamp = 1514766900000 - it * 60_000L, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.LIBRE_2)
+        }.toMutableList()
 
     private fun generateDummyLibreData(): MutableList<GV> {
         val origData: MutableList<GV> = ArrayList()

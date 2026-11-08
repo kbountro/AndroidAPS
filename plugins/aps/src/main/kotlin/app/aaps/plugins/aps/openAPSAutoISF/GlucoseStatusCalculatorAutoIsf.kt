@@ -109,8 +109,9 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val delta = (if (use1MinuteRaw) slidingDelta(smoothedRawWindow) else null) ?: deltaResult.delta
 
         // dura_ISF: how long, within the last hour, glucose has been at its current level above 150 mg/dL, rise included,
-        // and the ISF curve's average over that time; still 5-minute data
-        val duraWindow = DuraIsfWindow.of(data)
+        // and the ISF curve's average over that time - on the raw path counted on the same smoothed 1-minute readings as the
+        // sliding delta (the last hour of them, all DuraIsfWindow looks at), to the minute; else on the 5-minute grid
+        val duraWindow = DuraIsfWindow.of(if (use1MinuteRaw && smoothedRawWindow.isNotEmpty()) smoothedRawWindow else data)
 
         // calculate best parabola and determine delta by extending it 5 minutes into the future
         // after https://www.codeproject.com/Articles/63170/Least-Squares-Regression-for-Quadratic-Curve-Fitti

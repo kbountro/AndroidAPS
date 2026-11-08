@@ -12,23 +12,27 @@ class DuraIsfWindowTest {
     private fun every5min(vararg values: Double): List<InMemoryGlucoseValue> =
         values.mapIndexed { i, value -> InMemoryGlucoseValue(timestamp = now - i * 300_000L, value = value) }
 
+    /** A reading [minutesAgo] minutes before the newest. */
+    private fun reading(minutesAgo: Int, value: Double) = InMemoryGlucoseValue(timestamp = now - minutesAgo * 60_000L, value = value)
+
     @Test
     fun aRiseCountsFromWhereGlucoseRoseAbove150() {
         // 10 mg/dL every 5 minutes from 145 to 250. The old +/-5% band stopped at 230, after 5 minutes.
         val window = DuraIsfWindow.of(every5min(250.0, 240.0, 230.0, 220.0, 210.0, 200.0, 190.0, 180.0, 170.0, 160.0, 145.0, 140.0))
         assertThat(window.minutes).isEqualTo(45L)
         assertThat(window.average).isWithin(1e-9).of(205.0)
-        // The curve averaged over the ten readings: (0.18 + 0.166 + ... + 0.022) / 10, below curve(205) = 0.117.
-        assertThat(window.curveAverage).isWithin(1e-9).of(0.109)
+        // The curve averaged over the 45 minutes by trapezoids: 5 * ((0.18 + 0.022) / 2 + 0.166 + 0.152 + ... + 0.044) / 45,
+        // below curve(205) = 0.117.
+        assertThat(window.curveAverage).isWithin(1e-9).of(4.945 / 45)
     }
 
     @Test
     fun aShortSpikeCountsOnlyForItsOwnMinutes() {
-        // 55 minutes at 160, then 300 for the newest reading: 1 of 12 readings at curve(300) = 0.25, 11 at curve(160) = 0.022.
+        // 50 minutes at 160, then up to 300 in the last 5: (5 * (0.25 + 0.022) / 2 + 50 * 0.022) / 55, where curve(300) = 0.25.
         val window = DuraIsfWindow.of(every5min(300.0, *DoubleArray(11) { 160.0 }, 140.0))
         assertThat(window.minutes).isEqualTo(55L)
         assertThat(window.average).isWithin(1e-9).of(2060.0 / 12)
-        assertThat(window.curveAverage).isWithin(1e-9).of(0.041)
+        assertThat(window.curveAverage).isWithin(1e-9).of(1.78 / 55)
     }
 
     @Test
@@ -37,7 +41,7 @@ class DuraIsfWindowTest {
         val window = DuraIsfWindow.of(every5min(220.0, 218.0, 221.0, 205.0, 219.0, 222.0, 220.0, 221.0, 219.0, 220.0, 222.0, 218.0, 220.0, 140.0))
         assertThat(window.minutes).isEqualTo(60L)
         assertThat(window.average).isWithin(0.01).of(218.85)
-        assertThat(window.curveAverage).isWithin(1e-4).of(0.1364) // all between 200 and 300, where the curve is linear: curve(218.85)
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.13625) // all between 200 and 300, where the curve is linear
     }
 
     @Test
@@ -57,6 +61,26 @@ class DuraIsfWindowTest {
         assertThat(slowRise.minutes).isEqualTo(60L)
         assertThat(slowRise.average).isWithin(1e-9).of(285.0)
         assertThat(slowRise.curveAverage).isWithin(1e-9).of(0.229)
+    }
+
+    @Test
+    fun oneMinuteReadingsCountToTheMinute() {
+        val window = DuraIsfWindow.of((0..23).map { reading(it, 200.0) } + reading(24, 140.0))
+        assertThat(window.minutes).isEqualTo(23L)
+        assertThat(window.average).isWithin(1e-9).of(200.0)
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.11)
+    }
+
+    @Test
+    fun everyMinuteWeighsTheSameHoweverDenseTheReadings() {
+        // The last 30 minutes at 250, the 30 before at 200 with no readings from 41 to 44 minutes ago: 31 readings at 250 and
+        // 26 at 200, but 30 minutes of each (plus the minute between them). The curve average is by time:
+        // (30 * 0.18 + (0.18 + 0.11) / 2 + 29 * 0.11) / 60, not by reading (31 * 0.18 + 26 * 0.11) / 57 = 0.148.
+        val data = (0..30).map { reading(it, 250.0) } + ((31..40) + (45..60)).map { reading(it, 200.0) }
+        val window = DuraIsfWindow.of(data)
+        assertThat(window.minutes).isEqualTo(60L)
+        assertThat(window.average).isWithin(1e-9).of((31 * 250.0 + 26 * 200.0) / 57)
+        assertThat(window.curveAverage).isWithin(1e-9).of(8.735 / 60)
     }
 
     @Test
