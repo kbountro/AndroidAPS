@@ -6,6 +6,7 @@ import app.aaps.core.data.model.SourceSensor
 import app.aaps.core.data.model.TrendArrow
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.AutosensDataStore
+import app.aaps.core.interfaces.aps.DuraIsfStart
 import app.aaps.core.interfaces.aps.GlucoseStatusAutoIsf
 import app.aaps.core.interfaces.smoothing.Smoothing
 import app.aaps.core.keys.BooleanKey
@@ -62,6 +63,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
 
         assertThat(glucoseStatus.duraISFminutes).isEqualTo(35.0) // plateau size records in minutes
         assertThat(glucoseStatus.duraISFaverage).isWithin(0.1).of(221.5) // average during above time window
+        assertThat(glucoseStatus.duraISFstart).isEqualTo(DuraIsfStart.OLDEST) // all eight readings count
         assertThat(glucoseStatus.parabolaMinutes).isWithin(0.1).of(35.0) // parabola size records in minutes
         assertThat(glucoseStatus.deltaPl).isWithin(0.1).of(-2.56) // last delta
         assertThat(glucoseStatus.deltaPn).isWithin(0.1).of(-2.77) // next delta
@@ -94,8 +96,9 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
 
         // dura_ISF counts on the raw readings here, all below 150 mg/dL: nothing counts (the bucketed fixture would give 35 minutes).
         assertThat(glucoseStatus.duraISFminutes).isEqualTo(0.0)
-        assertThat(glucoseStatus.duraISFaverage).isWithin(0.001).of(114.0) // the newest raw reading
+        assertThat(glucoseStatus.duraISFaverage).isWithin(0.001).of(114.2) // the 5-minute average of the newest raw readings
         assertThat(glucoseStatus.duraISFcurveAverage).isEqualTo(0.0)
+        assertThat(glucoseStatus.duraISFstart).isEqualTo(DuraIsfStart.NOT_ABOVE_FLOOR)
         assertThat(glucoseStatus.parabolaMinutes).isWithin(0.1).of(14.0) // parabola size records in minutes
         assertThat(glucoseStatus.deltaPl).isWithin(0.0001).of(-1.7157) // last delta
         assertThat(glucoseStatus.deltaPn).isWithin(0.0001).of(0.4255) // next delta
@@ -123,6 +126,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.duraISFminutes).isEqualTo(46.0)
         assertThat(glucoseStatus.duraISFaverage).isWithin(1e-9).of(200.0)
         assertThat(glucoseStatus.duraISFcurveAverage).isWithin(1e-9).of(0.11)
+        assertThat(glucoseStatus.duraISFstart).isEqualTo(DuraIsfStart.RISE) // the reading at 140
     }
 
     @Test fun calculateValidForced1MinuteRawGlucoseStatusAutoIsf() {

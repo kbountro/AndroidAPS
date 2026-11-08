@@ -16,11 +16,14 @@ data class GlucoseStatusAutoIsf(
      *  on the 1-minute readings on AutoISF's raw path, else on the 5-minute grid; 0 when the 5-minute average ending at the
      *  newest reading is 150 mg/dL or less */
     val duraISFminutes: Double = 0.0,
-    /** average BG of the readings in [duraISFminutes] */
+    /** average BG of the readings in [duraISFminutes]; when nothing counts because BG is not above 150 mg/dL, the 5-minute
+     *  average ending at the newest reading that showed it */
     val duraISFaverage: Double = 0.0,
     /** AutoISF's ISF curve averaged over the time in [duraISFminutes] (0 when nothing counts): dura_ISF is
      *  1 + (duraISFminutes / 60) * dura_ISF_weight * duraISFcurveAverage */
     val duraISFcurveAverage: Double = 0.0,
+    /** where the count of [duraISFminutes] starts, which says why it reaches back no further (null when not known) */
+    val duraISFstart: DuraIsfStart? = null,
     /** past duration of BG approximating parabola shape */
     val parabolaMinutes: Double = 0.0,
     /** parabola derived last delta, i.e. from -5m to now */

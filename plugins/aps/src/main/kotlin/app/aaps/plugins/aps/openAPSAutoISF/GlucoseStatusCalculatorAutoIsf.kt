@@ -2,6 +2,7 @@ package app.aaps.plugins.aps.openAPSAutoISF
 
 import app.aaps.core.data.iob.InMemoryGlucoseValue
 import app.aaps.core.data.model.GV
+import app.aaps.core.interfaces.aps.DuraIsfStart
 import app.aaps.core.interfaces.aps.GlucoseStatusAutoIsf
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
@@ -90,6 +91,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                 date = statusDate,
                 duraISFminutes = 0.0,
                 duraISFaverage = now.value,
+                duraISFstart = if (now.value > DuraIsfWindow.FLOOR_MGDL) DuraIsfStart.OLDEST else DuraIsfStart.NOT_ABOVE_FLOOR,
                 parabolaMinutes = 0.0,
                 deltaPl = 0.0,
                 deltaPn = 0.0,
@@ -268,6 +270,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             duraISFminutes = duraWindow.minutes.toDouble(),
             duraISFaverage = duraWindow.average,
             duraISFcurveAverage = duraWindow.curveAverage,
+            duraISFstart = duraWindow.start,
             parabolaMinutes = duraP,
             deltaPl = deltaPl,
             deltaPn = deltaPn,

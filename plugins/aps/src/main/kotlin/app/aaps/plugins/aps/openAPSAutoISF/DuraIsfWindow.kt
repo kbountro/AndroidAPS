@@ -1,6 +1,8 @@
 package app.aaps.plugins.aps.openAPSAutoISF
 
 import app.aaps.core.data.iob.InMemoryGlucoseValue
+import app.aaps.core.interfaces.aps.DuraIsfStart
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 /**
@@ -22,18 +24,21 @@ import kotlin.math.roundToLong
  * minutes older than it, gap-filled and invalid ones (39 mg/dL or less) left out - the five 1-minute readings ri to ri+4, or
  * ri alone on the table, whose next reading is 5 minutes older:
  *
- *  1. If r0 is gap-filled or invalid, or avg5(r0) <= [FLOOR_MGDL]: minutes = 0, average = r0, curveAverage = 0. Done.
+ *  1. If r0 is gap-filled or invalid, or avg5(r0) <= [FLOOR_MGDL]: minutes = 0, average = avg5(r0) (r0 if invalid),
+ *     curveAverage = 0, start = NOT_ABOVE_FLOOR. Done.
  *  2. Start with sum = r0, count = 1, average = r0, minutes = 0, area = 0, last = r0.
  *  3. Take each older reading ri in turn:
  *     a. skip it if it is gap-filled or invalid;
  *     b. stop if it is more than [MAX_MINUTES] old;
- *     c. stop if it is more than [MAX_GAP_MINUTES] older than the last reading counted (a CGM gap);
- *     d. stop if avg5(ri) <= [FLOOR_MGDL]: glucose was not high yet;
- *     e. stop if avg5(ri) >= 1.05 * average: glucose has fallen since;
+ *     c. stop if it is more than [MAX_GAP_MINUTES] older than the last reading counted (a CGM gap): start = GAP;
+ *     d. stop if avg5(ri) <= [FLOOR_MGDL]: glucose was not high yet: start = RISE;
+ *     e. stop if avg5(ri) >= 1.05 * average: glucose has fallen since: start = FALL;
  *     f. otherwise count it: sum += ri, count += 1, average = sum / count,
  *        area += (curve(last) + curve(ri)) / 2 * (minutes from ri to last), minutes = the age of ri, last = ri.
- *  4. The result is minutes (0 to 60, rounded to the minute), average, and curveAverage = area divided by the time from the
- *     last reading counted to r0 (curve(r0) when no older reading counted).
+ *  4. The result is minutes (0 to 60, rounded to the minute), average, curveAverage = area divided by the time from the last
+ *     reading counted to r0 (curve(r0) when no older reading counted), and start ([DuraIsfStart]). When step b ended the count
+ *     or the readings ran out, start = HOUR if minutes >= 59 (the 1-minute readings end at the hour), else GAP if step b ended
+ *     it (a hole before the hour's end), else OLDEST.
  *
  * Steps 1, d and e test the 5-minute average, which slides along with ri, rather than ri alone, so that a single noisy reading
  * does not end the count. On the table, where the average is ri itself, they test ri.
@@ -81,9 +86,10 @@ internal object DuraIsfWindow {
 
     /**
      * [minutes] counted back from the newest reading, 0 to [MAX_MINUTES]; the [average] glucose of the readings counted (the
-     * newest alone at 0); and the ISF curve averaged over the same time, [curveAverage] (0 when nothing counts).
+     * newest alone at 0; when glucose is not above [FLOOR_MGDL], the 5-minute average that showed it); the ISF curve averaged
+     * over the same time, [curveAverage] (0 when nothing counts); and where the count starts, [start].
      */
-    class Window(val minutes: Long, val average: Double, val curveAverage: Double)
+    class Window(val minutes: Long, val average: Double, val curveAverage: Double, val start: DuraIsfStart)
 
     /**
      * The window of [data], glucose readings newest first, not empty: the smoothed 1-minute readings of the last hour, or the
@@ -91,22 +97,37 @@ internal object DuraIsfWindow {
      */
     fun of(data: List<InMemoryGlucoseValue>): Window {
         val now = data[0]
-        if (!valid(now) || avg5(data, 0) <= FLOOR_MGDL) return Window(0L, now.recalculated, 0.0)             // 1
+        val nowAverage5 = if (valid(now)) avg5(data, 0) else now.recalculated
+        if (!valid(now) || nowAverage5 <= FLOOR_MGDL) return Window(0L, nowAverage5, 0.0, DuraIsfStart.NOT_ABOVE_FLOOR) // 1
         var sum = now.recalculated                                                                          // 2
         var count = 1
         var minutes = 0L
         var area = 0.0
         var lastTime = now.timestamp
         var lastCurve = AutoIsfCurve.at(now.recalculated)
+        var start: DuraIsfStart? = null // where step c, d or e ended the count
+        var pastTheHour = false         // whether step b did
         for (i in 1 until data.size) {                                                                      // 3
             val then = data[i]
             if (!valid(then)) continue                                                                      // a
             val minutesAgo = ((now.timestamp - then.timestamp) / 60_000.0).roundToLong()
-            if (minutesAgo > MAX_MINUTES) break                                                             // b
-            if (minutesAgo - minutes > MAX_GAP_MINUTES) break                                               // c
+            if (minutesAgo > MAX_MINUTES) {                                                                 // b
+                pastTheHour = true
+                break
+            }
+            if (minutesAgo - minutes > MAX_GAP_MINUTES) {                                                   // c
+                start = DuraIsfStart.GAP
+                break
+            }
             val average5 = avg5(data, i)
-            if (average5 <= FLOOR_MGDL) break                                                               // d
-            if (average5 >= sum / count * (1 + FALL_BAND)) break                                            // e
+            if (average5 <= FLOOR_MGDL) {                                                                   // d
+                start = DuraIsfStart.RISE
+                break
+            }
+            if (average5 >= sum / count * (1 + FALL_BAND)) {                                                // e
+                start = DuraIsfStart.FALL
+                break
+            }
             sum += then.recalculated                                                                        // f
             count++
             val curve = AutoIsfCurve.at(then.recalculated)
@@ -116,8 +137,41 @@ internal object DuraIsfWindow {
             lastCurve = curve
         }
         val span = (now.timestamp - lastTime) / 60_000.0                                                    // 4
-        return Window(minutes, sum / count, if (span > 0.0) area / span else AutoIsfCurve.at(now.recalculated))
+        val curveAverage = if (span > 0.0) area / span else AutoIsfCurve.at(now.recalculated)
+        return Window(
+            minutes, sum / count, curveAverage, start ?: when {
+                minutes >= MAX_MINUTES - 1 -> DuraIsfStart.HOUR
+                pastTheHour                -> DuraIsfStart.GAP
+                else                       -> DuraIsfStart.OLDEST
+            }
+        )
     }
+
+    /**
+     * For AutoISF's log, from GlucoseStatusAutoIsf's duraISFminutes, duraISFaverage and duraISFstart: how long glucose has
+     * been above [FLOOR_MGDL], at what average and since when, as in "glucose above 150 mg/dL for 45 min at an average of
+     * 205 mg/dL (since it rose above 150 mg/dL)", or "glucose not above 150 mg/dL (5-minute average 146 mg/dL)" when nothing
+     * counts.
+     */
+    fun describe(minutes: Double, average: Double, start: DuraIsfStart?): String {
+        val floor = FLOOR_MGDL.roundToInt()
+        val min = whole(minutes)
+        val avg = whole(average)
+        if (start == DuraIsfStart.NOT_ABOVE_FLOOR) return "glucose not above $floor mg/dL (5-minute average $avg mg/dL)"
+        val since = when (start) {
+            DuraIsfStart.RISE   -> " (since it rose above $floor mg/dL)"
+            DuraIsfStart.FALL   -> " (since it last fell by ${(FALL_BAND * 100).roundToInt()}% or more)"
+            DuraIsfStart.HOUR   -> " (the whole hour counted)"
+            DuraIsfStart.GAP    -> " (since a gap in the readings)"
+            DuraIsfStart.OLDEST -> " (since the oldest reading)"
+            else                -> ""
+        }
+        return if (average > FLOOR_MGDL) "glucose above $floor mg/dL for $min min at an average of $avg mg/dL$since"
+        else "glucose at an average of $avg mg/dL for $min min$since, not above $floor mg/dL"
+    }
+
+    /** [x] rounded to a whole number for the log; "?" for NaN, which roundToInt() would throw on. */
+    private fun whole(x: Double): String = if (x.isNaN()) "?" else x.roundToInt().toString()
 
     private fun valid(reading: InMemoryGlucoseValue): Boolean = reading.value > 39 && !reading.filledGap
 
