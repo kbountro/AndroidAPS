@@ -84,6 +84,27 @@ class DuraIsfWindowTest {
     }
 
     @Test
+    fun aFallOnOneMinuteReadingsIsTestedOnFiveMinuteAverages() {
+        // Falling 36 mg/dL/h to 200 now. Each 5-minute block's average is compared with the average of all the newer readings:
+        // the block 31-35 minutes ago averages 219.8, 5% or more above the 209 before it, so the count ends at 30 minutes
+        // (on the table: 25; reading by reading: 33).
+        val window = DuraIsfWindow.of((0..66).map { reading(it, 200.0 + 0.6 * it) })
+        assertThat(window.minutes).isEqualTo(30L)
+        assertThat(window.average).isWithin(1e-6).of(209.0)
+        assertThat(window.curveAverage).isWithin(1e-6).of(0.1226)
+    }
+
+    @Test
+    fun aSingleHighOneMinuteReadingDoesNotEndTheCount() {
+        // An hour at 200 with one reading at 212, 20 minutes ago: 6% above the average, which would end the count reading by
+        // reading, but its block (16-20 minutes ago) averages 202.4.
+        val window = DuraIsfWindow.of((0..60).map { reading(it, if (it == 20) 212.0 else 200.0) })
+        assertThat(window.minutes).isEqualTo(60L)
+        assertThat(window.average).isWithin(1e-9).of((60 * 200.0 + 212.0) / 61)
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.11028)
+    }
+
+    @Test
     fun aFallOfMoreThanFivePercentEndsTheCount() {
         // Down from a plateau at 260: 220 is more than 5% above 200, so the count starts again from the fall.
         val window = DuraIsfWindow.of(every5min(200.0, 220.0, 240.0, 260.0, 260.0, 260.0))
