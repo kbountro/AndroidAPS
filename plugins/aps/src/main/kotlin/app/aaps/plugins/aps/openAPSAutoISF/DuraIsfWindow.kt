@@ -18,33 +18,40 @@ import kotlin.math.roundToLong
  *
  * The readings (GlucoseStatusCalculatorAutoIsf) are the smoothed CGM readings of the last hour on AutoISF's 1-minute raw path,
  * so minutes count to the minute, and the 5-minute bucketed table otherwise. Over them, r0 (the newest), r1, r2, ... (newest
- * first, smoothed values):
+ * first, smoothed values), with avg5(ri) the 5-minute average ending at ri: the average of ri and the readings less than 4.5
+ * minutes older than it, gap-filled and invalid ones (39 mg/dL or less) left out - the five 1-minute readings ri to ri+4, or
+ * ri alone on the table, whose next reading is 5 minutes older:
  *
- *  1. If r0 <= [FLOOR_MGDL]: minutes = 0, average = r0, curveAverage = 0. Done.
+ *  1. If r0 is gap-filled or invalid, or avg5(r0) <= [FLOOR_MGDL]: minutes = 0, average = r0, curveAverage = 0. Done.
  *  2. Start with sum = r0, count = 1, average = r0, minutes = 0, area = 0, last = r0.
  *  3. Take each older reading ri in turn:
- *     a. skip it if it is gap-filled or invalid (39 mg/dL or less);
+ *     a. skip it if it is gap-filled or invalid;
  *     b. stop if it is more than [MAX_MINUTES] old;
  *     c. stop if it is more than [MAX_GAP_MINUTES] older than the last reading counted (a CGM gap);
- *     d. stop if ri <= [FLOOR_MGDL]: glucose was not high yet;
- *     e. stop if the 5-minute average ending at ri >= 1.05 * average: glucose has fallen since. That average is of ri and the
- *        valid readings less than 4.5 minutes older than it - the five 1-minute readings ri to ri+4, or ri alone on the
- *        table, whose next reading is 5 minutes older - and slides along with ri;
+ *     d. stop if avg5(ri) <= [FLOOR_MGDL]: glucose was not high yet;
+ *     e. stop if avg5(ri) >= 1.05 * average: glucose has fallen since;
  *     f. otherwise count it: sum += ri, count += 1, average = sum / count,
  *        area += (curve(last) + curve(ri)) / 2 * (minutes from ri to last), minutes = the age of ri, last = ri.
  *  4. The result is minutes (0 to 60, rounded to the minute), average, and curveAverage = area divided by the time from the
  *     last reading counted to r0 (curve(r0) when no older reading counted).
  *
- * Step e is upstream AutoISF's rule, the upper half of its +/-5% band around the running average: on the table, where the
- * window is one reading, it is that rule exactly. On 1-minute readings the sliding average keeps a fall's end close to the
- * table's (falling 36 mg/dL/h: 29 minutes, the table 25, single readings 33), at the resolution of a minute, and a single
- * noisy reading no longer ends the count. Because it compares with the average of everything newer rather than with the
- * reading before, it finds the latest fall within the hour however slowly it went (10 mg/dL in an hour stays within 5%;
- * 15 mg/dL or more from 220 stops the count), and also a fall that is over (glucose fell half an hour ago and has been flat
- * since: the count starts after the fall). The 5-minute delta, which says only whether glucose is falling now, cannot tell
- * either. Step d lets every reading above 150 mg/dL through, however far below the current level, so the time spent rising to
- * the level counts, and so does a dip within a plateau. In step f the area is the curve's integral over time by trapezoids,
- * so every minute weighs the same however dense or irregular the readings.
+ * Steps 1, d and e test the 5-minute average, which slides along with ri, rather than ri alone, so that a single noisy reading
+ * does not end the count. On the table, where the average is ri itself, they test ri.
+ *
+ * Step e is upstream AutoISF's rule, the upper half of its +/-5% band around the running average: on the table it is that rule
+ * exactly. On 1-minute readings the 5-minute average keeps a fall's end close to the table's (falling 36 mg/dL/h: 29 minutes,
+ * the table 25, single readings 33), at the resolution of a minute. Because it compares with the average of everything newer
+ * rather than with the reading before, it finds the latest fall within the hour however slowly it went (10 mg/dL in an hour
+ * stays within 5%; 15 mg/dL or more from 220 stops the count), and also a fall that is over (glucose fell half an hour ago and
+ * has been flat since: the count starts after the fall). The 5-minute delta, which says only whether glucose is falling now,
+ * cannot tell either.
+ *
+ * Steps 1 and d keep the count above 150 mg/dL, where the curve is positive. Every reading whose 5-minute average is above 150
+ * goes through, however far below the current level, so the time spent rising to the level counts, and so does a dip within a
+ * plateau, even a minute or two at 150 or below (at its own curve value). On 1-minute readings a rise counts until its
+ * 5-minute average reaches 150, about 2 minutes short of where the readings themselves do; those minutes, near 150, add almost
+ * nothing to dura_ISF. In step f the area is the curve's integral over time by trapezoids, so every minute weighs the same
+ * however dense or irregular the readings.
  *
  * For example, on the table, rising 10 mg/dL every 5 minutes from 145 to 250: 250, 240, ..., 160 count and 145 stops the
  * count, giving 45 minutes and a curve average of 0.110, so dura_ISF = 1 + 0.75 * dura_ISF_weight * 0.110. An hour at 250
@@ -66,7 +73,7 @@ internal object DuraIsfWindow {
     /** A 5-minute average this fraction or more above that of the readings counted before it ends the count. */
     private const val FALL_BAND = 0.05
 
-    /** Step e averages a reading with the valid readings less than this much older (ms): 5 minutes of 1-minute readings. */
+    /** avg5 averages a reading with the valid readings less than this much older (ms): 5 minutes of 1-minute readings. */
     private const val SLIDING_WINDOW_MS = 270_000L
 
     /** A CGM gap longer than this ends the count. */
@@ -84,7 +91,7 @@ internal object DuraIsfWindow {
      */
     fun of(data: List<InMemoryGlucoseValue>): Window {
         val now = data[0]
-        if (now.recalculated <= FLOOR_MGDL) return Window(0L, now.recalculated, 0.0)                     // 1
+        if (!valid(now) || avg5(data, 0) <= FLOOR_MGDL) return Window(0L, now.recalculated, 0.0)             // 1
         var sum = now.recalculated                                                                          // 2
         var count = 1
         var minutes = 0L
@@ -97,8 +104,9 @@ internal object DuraIsfWindow {
             val minutesAgo = ((now.timestamp - then.timestamp) / 60_000.0).roundToLong()
             if (minutesAgo > MAX_MINUTES) break                                                             // b
             if (minutesAgo - minutes > MAX_GAP_MINUTES) break                                               // c
-            if (then.recalculated <= FLOOR_MGDL) break                                                      // d
-            if (slidingAverage(data, i) >= sum / count * (1 + FALL_BAND)) break                             // e
+            val average5 = avg5(data, i)
+            if (average5 <= FLOOR_MGDL) break                                                               // d
+            if (average5 >= sum / count * (1 + FALL_BAND)) break                                            // e
             sum += then.recalculated                                                                        // f
             count++
             val curve = AutoIsfCurve.at(then.recalculated)
@@ -113,8 +121,8 @@ internal object DuraIsfWindow {
 
     private fun valid(reading: InMemoryGlucoseValue): Boolean = reading.value > 39 && !reading.filledGap
 
-    /** The average of data[i], which is valid, and the valid readings less than [SLIDING_WINDOW_MS] older than it. */
-    private fun slidingAverage(data: List<InMemoryGlucoseValue>, i: Int): Double {
+    /** avg5 of the steps: the average of data[i], which is valid, and the valid readings under [SLIDING_WINDOW_MS] older. */
+    private fun avg5(data: List<InMemoryGlucoseValue>, i: Int): Double {
         val from = data[i].timestamp - SLIDING_WINDOW_MS
         var sum = 0.0
         var count = 0
