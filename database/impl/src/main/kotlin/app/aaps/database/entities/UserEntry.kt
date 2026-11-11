@@ -123,6 +123,8 @@ data class UserEntry(
         AUTOISF_DISABLED,
         IOB_TH_SET,
         ACCE_WEIGHT_SET,
+        BRAKE_WEIGHT_SET,
+        PP_WEIGHT_SET,
         UNKNOWN
         ;
     }
