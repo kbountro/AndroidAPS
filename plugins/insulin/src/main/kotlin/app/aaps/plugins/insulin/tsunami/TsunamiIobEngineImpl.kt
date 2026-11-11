@@ -1,6 +1,7 @@
 package app.aaps.plugins.insulin.tsunami
 
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.EB
 import app.aaps.core.data.model.TB
 import app.aaps.core.data.model.TE
 import app.aaps.core.interfaces.aps.IobTotal
@@ -9,12 +10,18 @@ import app.aaps.core.interfaces.insulin.Insulin
 import app.aaps.core.interfaces.insulin.TsunamiIobEngine
 import app.aaps.core.interfaces.insulin.TsunamiIobResult
 import app.aaps.core.interfaces.plugin.ActivePlugin
+import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
+import app.aaps.core.interfaces.rx.bus.RxBus
+import app.aaps.core.interfaces.rx.events.EventNewHistoryData
+import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.convertedToAbsolute
 import app.aaps.core.objects.extensions.plus
+import io.reactivex.rxjava3.disposables.CompositeDisposable
+import io.reactivex.rxjava3.kotlin.plusAssign
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
@@ -39,7 +46,8 @@ import kotlin.math.pow
  * "time warp" (retroactively inventing a new elapsed age to keep IOB continuous) that
  * unavoidably forced a discontinuous drop in reported activity every time the pool grew.
  * Here activity is KE * A with a constant KE, and a dose adds only to the depot, so activity
- * never jumps (see [PdModel]).
+ * never jumps (see [PdModel]). An optional CGM lag stage after A ([CgmLagStage]) delays and smooths
+ * the reported activity to when the CGM can see it.
  *
  * See [PdModel] for the full derivation and the calibration that replaced it.
  */
@@ -49,24 +57,61 @@ class TsunamiIobEngineImpl @Inject constructor(
     private val persistenceLayer: PersistenceLayer,
     private val profileFunction: ProfileFunction,
     private val dateUtil: DateUtil,
-    private val activePlugin: ActivePlugin
+    private val activePlugin: ActivePlugin,
+    rxBus: RxBus
 ) : TsunamiIobEngine {
 
     companion object {
         private const val DIA_HORIZON_MINUTES = 480.0 // 8h
         private const val DIA_HORIZON_MS = 8L * 60 * 60 * 1000L
 
-        // Deep-history scrolling has no required batch size (forward horizon only affects how
-        // much gets pre-cached for later queries, never the correctness of the current one) - tied
-        // to a multiple of the DIA horizon so it scales automatically if that ever changes.
-        private const val DEEP_HISTORY_BATCH_MS = 2 * DIA_HORIZON_MS
+        // How many requests must share an offset past the whole minute before the individual curves are
+        // tabulated shifted by it (600 steps per curve, against one per dose and request).
+        private const val SHIFTED_CURVE_MIN_USES = 4
+
+        // How far around now the treatment records are loaded at once ([Records]): autosens and the IOB graph
+        // reach 24 h plus the profile's DIA back, each request's window a DIA horizon more, and the IOB arrays
+        // look ahead about a DIA horizon. A request reaching past that widens the range.
+        private const val RECORDS_BACK_MS = 48L * 60 * 60 * 1000L
+        private const val RECORDS_AHEAD_MS = 12L * 60 * 60 * 1000L
+
+        // How far on either side of a request ending before that range (the history browser) its records reach.
+        private const val PAST_RECORDS_MARGIN_MS = 48L * 60 * 60 * 1000L
+    }
+
+    private val disposable = CompositeDisposable()
+
+    init {
+        // Any change to the history the simulations read - boluses, temp basals, extended boluses and profile
+        // switches (EventNewHistoryData), site changes (EventTherapyEventChange) - drops the cached results and
+        // records the moment it is committed: the bus calls subscribers on the sender's thread. The calculation
+        // run's own resetCache comes 5 s later at the earliest, and a request in between must not miss a dose.
+        disposable += rxBus.toObservable(EventNewHistoryData::class.java).subscribe({ resetCache() }, { resetCache() })
+        disposable += rxBus.toObservable(EventTherapyEventChange::class.java).subscribe({ resetCache() }, { resetCache() })
     }
 
     private data class ResultCacheKey(val time: Long, val sensitivityRatio: Double, val assumeZeroTempAfter: Long)
 
+    // How often each of the 8 last offsets past the whole minute has been requested: the SMB IOB array asks
+    // 95 times in a row for times sharing one (now, now + 5 min, ... and the same with a zero temp), which pays
+    // for a table of every curve shifted by it ([PdModel.runState]); a one-off request does not.
+    private val offsetUses = object : LinkedHashMap<Long, Int>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Int>?): Boolean = size > 8
+    }
+
+    private fun offsetRequestedOften(offset: Long): Boolean = synchronized(offsetUses) {
+        val uses = (offsetUses[offset] ?: 0) + 1
+        offsetUses[offset] = uses
+        uses >= SHIFTED_CURVE_MIN_USES
+    }
+
     private val engineLock = Any()
     private var resultCache = HashMap<ResultCacheKey, TsunamiIobResult>()
     private var cacheVersion = 0
+
+    // The records of this cache generation ([recordsFor]): around now, and around the last request far before it.
+    private var recentRecords: Records? = null
+    private var pastRecords: Records? = null
 
     override val isActive: Boolean
         get() = activePlugin.activeInsulin.id.value == Insulin.InsulinType.OREF_LYUMJEV_U100_TRAFFIC_JAM.value
@@ -74,8 +119,99 @@ class TsunamiIobEngineImpl @Inject constructor(
     override fun resetCache() {
         synchronized(engineLock) {
             resultCache.clear()
+            recentRecords = null
+            pastRecords = null
             cacheVersion++
         }
+    }
+
+    /**
+     * The treatment records the simulations read, and the profile basal of every minute, loaded once per cache
+     * generation ([resetCache]: every calculation run and every change to that history) for a range ([recordsFor]),
+     * and filtered per request exactly as the database queries filter them, so every request sees the same
+     * records, in the same order, as if it had queried them itself. Every request used to: four queries, each
+     * mapping every bolus since its window's start, and a profile lookup for every minute of the window. With a
+     * 1-minute CGM that was thousands of queries a minute - each calculation run recomputes the IOB at every
+     * autosens and IOB-graph time, some 860 requests, and every SMB IOB array is 95 more.
+     */
+    private inner class Records(val from: Long, val to: Long) {
+
+        // Boluses come by id, newest first, with timestamp >= from; sorted by timestamp here (stable, so equal
+        // timestamps keep that order) to be cut by binary search. The rest come by timestamp: temp basals and
+        // extended boluses starting within [from, to], cannula changes from `from` on.
+        private val boluses = persistenceLayer.getBolusesFromTime(from, true).blockingGet().sortedBy { it.timestamp }
+        private val tempBasals = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(from, to, true)
+        private val extendedBoluses = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(from, to, true)
+        private val cannulaChanges = persistenceLayer.getTherapyEventDataFromTime(from, TE.Type.CANNULA_CHANGE, true)
+
+        /** Every whole minute's profile and basal rate, looked up the first time a request needs it. */
+        private val minuteBasals = arrayOfNulls<Any>(((to - from) / 60_000L).toInt() + 1)
+
+        /** getBolusesFromTime(time): every bolus at or after [time]. */
+        fun bolusesFrom(time: Long): List<BS> = boluses.subList(firstAtOrAfter(boluses, time) { it.timestamp }, boluses.size)
+
+        /** getTemporaryBasalsStartingFromTimeToTime(from, to). */
+        fun tempBasalsStarting(from: Long, to: Long): List<TB> =
+            tempBasals.subList(firstAtOrAfter(tempBasals, from) { it.timestamp }, firstAtOrAfter(tempBasals, to + 1) { it.timestamp })
+
+        /** getExtendedBolusesStartingFromTimeToTime(from, to). */
+        fun extendedBolusesStarting(from: Long, to: Long): List<EB> =
+            extendedBoluses.subList(firstAtOrAfter(extendedBoluses, from) { it.timestamp }, firstAtOrAfter(extendedBoluses, to + 1) { it.timestamp })
+
+        /** getTherapyEventDataFromTime(time, CANNULA_CHANGE). */
+        fun cannulaChangesFrom(time: Long): List<TE> = cannulaChanges.subList(firstAtOrAfter(cannulaChanges, time) { it.timestamp }, cannulaChanges.size)
+
+        /** The profile at the whole minute [minute] and its basal rate then, or null without a profile. */
+        fun minuteBasal(minute: Long): MinuteBasal? {
+            val i = ((minute - from) / 60_000L).toInt()
+            if (minute < from || i >= minuteBasals.size) return lookUpBasal(minute)
+            when (val known = minuteBasals[i]) {
+                is MinuteBasal -> return known
+                NoProfile      -> return null
+            }
+            // Two requests may look the same minute up at once; both store the same answer.
+            return lookUpBasal(minute).also { minuteBasals[i] = it ?: NoProfile }
+        }
+
+        private fun lookUpBasal(minute: Long): MinuteBasal? = profileFunction.getProfile(minute)?.let { MinuteBasal(it, it.getBasal(minute)) }
+
+        /** The first index whose key is at least [key], in a list sorted by it. */
+        private fun <T> firstAtOrAfter(list: List<T>, key: Long, keyOf: (T) -> Long): Int {
+            var lo = 0
+            var hi = list.size
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                if (keyOf(list[mid]) < key) lo = mid + 1 else hi = mid
+            }
+            return lo
+        }
+    }
+
+    private class MinuteBasal(val profile: Profile, val rate: Double)
+    private object NoProfile
+
+    /**
+     * Records covering [from]..[to]. Requests reaching into the range around now (the loop, autosens, the IOB
+     * graph) share one load of that range, widened to the request if it reaches past it; a request ending before
+     * it (the history browser) loads its own range around itself, kept beside the recent one, so that browsing
+     * an old day neither loads everything since then nor drops the records the loop is using.
+     */
+    private fun recordsFor(from: Long, to: Long): Records {
+        val version: Int
+        synchronized(engineLock) {
+            recentRecords?.let { if (it.from <= from && it.to >= to) return it }
+            pastRecords?.let { if (it.from <= from && it.to >= to) return it }
+            version = cacheVersion
+        }
+        val now = dateUtil.now()
+        val recent = to >= now - RECORDS_BACK_MS
+        val loaded =
+            if (recent) Records(Math.floorDiv(min(from, now - RECORDS_BACK_MS), 60_000L) * 60_000L, max(to, now + RECORDS_AHEAD_MS))
+            else Records(Math.floorDiv(from - PAST_RECORDS_MARGIN_MS, 60_000L) * 60_000L, min(to + PAST_RECORDS_MARGIN_MS, now - RECORDS_BACK_MS))
+        synchronized(engineLock) {
+            if (version == cacheVersion) if (recent) recentRecords = loaded else pastRecords = loaded
+        }
+        return loaded
     }
 
     override fun calculateIobFromBolusToTime(toTime: Long): IobTotal {
@@ -106,32 +242,20 @@ class TsunamiIobEngineImpl @Inject constructor(
             resultCache[key]?.let { return it.copy() }
         }
 
-        val now = dateUtil.now()
-        // If requested time is older than 24 hours, don't simulate all the way to present to save DB load
-        val isDeepHistory = toTime < now - (24 * 60 * 60 * 1000L)
-
-        val startTime = toTime - DIA_HORIZON_MS // Always guarantee a full DIA horizon of physical warmup
-        val horizon = if (isDeepHistory) {
-            toTime + DEEP_HISTORY_BATCH_MS // Batch a chunk forward for scrolling
-        } else {
-            max(toTime, now + DIA_HORIZON_MS) // Batch all the way through the future projection
-        }
-
+        // Every requested time gets its own window - a full DIA horizon of warm-up before it, older doses
+        // dropped - simulated only up to that time, since nothing later changes its result. Simulating on
+        // to now + 8 h, to cache a 5-minute grid for later requests, served almost none: the callers ask for
+        // times off that grid (the SMB IOB array: now, now + 5 min, ..., 95 times per loop run with the zero
+        // temp; autosens and the IOB graph: the bucketed times), so each paid for a whole 16-hour simulation,
+        // evaluated at some 190 times, to use one. The few requests the grid did serve got its longer window
+        // instead of their own, so their values depended on which request had come first.
+        val startTime = toTime - DIA_HORIZON_MS
         val currentVersion = synchronized(engineLock) { cacheVersion }
-        // Pass the exactly requested toTime so the solver guarantees it is generated
-        val resultsMap = simulateDepotHistory(toTime, startTime, horizon, sensitivityRatio, assumeZeroTempAfter)
-
+        val result = simulateDepotHistory(toTime, startTime, sensitivityRatio, assumeZeroTempAfter)
         synchronized(engineLock) {
-            if (currentVersion == cacheVersion) {
-                for ((t, res) in resultsMap) {
-                    resultCache[ResultCacheKey(t, sensitivityRatio, assumeZeroTempAfter)] = res
-                }
-            }
+            if (currentVersion == cacheVersion) resultCache[key] = result
         }
-
-        return synchronized(engineLock) {
-            resultCache[key]?.copy() ?: resultsMap[toTime]?.copy() ?: resultsMap.values.last().copy()
-        }
+        return result.copy()
     }
 
     // =========================================================================
@@ -162,17 +286,20 @@ class TsunamiIobEngineImpl @Inject constructor(
     private fun simulateDepotHistory(
         requestedTime: Long,
         startTime: Long,
-        horizonTime: Long,
         sensitivityRatio: Double,
         assumeZeroTempAfter: Long = Long.MAX_VALUE
-    ): Map<Long, TsunamiIobResult> {
+    ): TsunamiIobResult {
         val now = dateUtil.now()
+        // Doses up to the first whole minute at or after requestedTime: the basal of the minute it falls in
+        // then arrives as one event at that minute's end, after requestedTime, as when simulating past it.
+        val horizonTime = (requestedTime + 59_999L) / 60_000L * 60_000L
 
-        val boluses = persistenceLayer.getBolusesFromTime(startTime, true).blockingGet()
+        val records = recordsFor(startTime, horizonTime)
+        val boluses = records.bolusesFrom(startTime)
         val pumpInterface = activePlugin.activePump
         val isFakingTemps = pumpInterface.isFakingTempsByExtendedBoluses
 
-        val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, isFakingTemps, assumeZeroTempAfter, now)
+        val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, records, isFakingTemps, assumeZeroTempAfter, now)
 
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
@@ -185,6 +312,11 @@ class TsunamiIobEngineImpl @Inject constructor(
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val ke = speedFactor * PdModel.KE
         val mixing = preferences.get(DoubleKey.InsulinTrafficJamMixing).coerceIn(0.0, 1.0)
+        // CGM lag (DoubleKey.InsulinTrafficJamCgmLag, see [CgmLagStage]): the rate of the stage after the
+        // active one, or 0 for no such stage (the default, unchanged from before). Not scaled by the speed
+        // setting: it is the sensor's delay, not the insulin's.
+        val lagMinutes = preferences.get(DoubleKey.InsulinTrafficJamCgmLag).coerceIn(0.0, 30.0)
+        val kc = if (lagMinutes > 0.0) 1.0 / lagMinutes else 0.0
 
         // Site-change boundaries within the simulated window: each one starts a fresh
         // [SiteState] generation. A dose's generation is how many boundaries fall at or
@@ -192,7 +324,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         // none at all) all land in generation 0 - identical to the single-pool behavior
         // this replaces. Boundaries outside the window never matter: anything that old is
         // already past the DIA horizon, and anything that new hasn't happened yet.
-        val siteChangeBoundaries = persistenceLayer.getTherapyEventDataFromTime(startTime, TE.Type.CANNULA_CHANGE, true)
+        val siteChangeBoundaries = records.cannulaChangesFrom(startTime)
             .map { it.timestamp }
             .filter { it <= horizonTime }
 
@@ -204,7 +336,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             val pools = Array(Category.entries.size) { Pool() }
 
             fun propagateInPlace(dtMinutes: Double) {
-                for (p in pools) p.propagateInPlace(ke, dtMinutes)
+                for (p in pools) p.propagateInPlace(ke, kc, dtMinutes)
             }
 
             /** Every pool's depot/transit rate from its group's live depot mass (see [CrowdingGroup]). */
@@ -226,27 +358,35 @@ class TsunamiIobEngineImpl @Inject constructor(
         var lastTime = startTime
 
         // The individual branch of every dose given so far, at a dose interaction below 1: its isolated
-        // curve, tabulated once per amount ([PdModel.isolatedGrid]). A profile-basal dose also carries
-        // its autoProfileBasal twin, which moves at the profile basal's rate and so is the same curve
-        // scaled by [IndividualDose.autoScale].
-        val individualDoses = ArrayList<IndividualDose>()
-        val gridsByAmount = HashMap<Double, Array<DoubleArray>>()
+        // curve ([PdModel.IsolatedCurve], one per amount), grouped into runs of equal doses a minute apart
+        // in each category ([IndividualRun]). A basal rate is one dose every minute, so a stretch at one
+        // rate is a single run, summed in a few steps ([PdModel.runState]) instead of dose by dose. A
+        // profile-basal dose also carries its autoProfileBasal twin, which moves at the profile basal's
+        // rate and so is the same curve scaled by [IndividualRun.autoScale].
+        val individualRuns = ArrayList<IndividualRun>()
+        val openRuns = arrayOfNulls<IndividualRun>(Category.entries.size)
+        val curvesByAmount = HashMap<Double, PdModel.IsolatedCurve>()
         fun addIndividual(timestamp: Long, cat: Category, amount: Double, autoScale: Double = 0.0) {
-            val grid = gridsByAmount.getOrPut(amount) { PdModel.isolatedGrid(amount, speedFactor) }
-            individualDoses.add(IndividualDose(timestamp, cat, grid, autoScale))
+            val curve = curvesByAmount.getOrPut(amount) { PdModel.isolatedCurve(amount, speedFactor, kc) }
+            val open = openRuns[cat.ordinal]
+            if (open != null && open.curve === curve && open.autoScale == autoScale && open.last + 60000L == timestamp) open.count++
+            else IndividualRun(cat, curve, autoScale, timestamp).also { individualRuns.add(it); openRuns[cat.ordinal] = it }
         }
-        val isolated = DoubleArray(3)
+        val runState = DoubleArray(4)
+        // Runs of whole-minute doses are all requestedTime's offset past the whole minute old; if requests
+        // keep sharing that offset, the curves are tabulated shifted by it ([PdModel.runState]).
+        val offset = requestedTime % 60_000L
+        val shiftWholeMinuteRuns = mixing < 1.0 && offset != 0L && offsetRequestedOften(offset)
 
-        // Sorted once so the snooze/lastBolusTime bookkeeping below can sweep forward with
-        // monotonically advancing indices instead of rescanning every bolus for every snapshot.
+        // Sorted so the snooze/lastBolusTime bookkeeping below can sweep forward with monotonically
+        // advancing indices.
         val sortedBoluses = boluses.filter { it.isValid }.sortedBy { it.timestamp }
         var bolusValidIdx = 0 // boluses folded into lastBolusTimeSeen so far (timestamp <= current tTarget)
         var bolusFrontIdx = 0 // boluses before this index have permanently expired snooze windows
         var lastBolusTimeSeen = 0L
 
         // Evaluates every category's IOB/activity at [tTarget] by peeking [dtPeek] minutes ahead of the
-        // pools' last-committed state - without mutating it, since several snapshot times can fall
-        // between two consecutive dose events and each must be evaluated from the same starting state.
+        // pools' last-committed state, without mutating it.
         fun evaluatePools(dtPeek: Double, tTarget: Long): TsunamiIobResult {
             while (bolusValidIdx < sortedBoluses.size && sortedBoluses[bolusValidIdx].timestamp <= tTarget) {
                 val b = sortedBoluses[bolusValidIdx]
@@ -273,7 +413,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                     val tSnoozeElapsed = ((tTarget - b.timestamp) * divisor) / 60000.0
                     if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
                         // Snooze reflects this bolus's own isolated pool, not shared crowding.
-                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount, speedFactor)
+                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount, speedFactor, kc)
                     }
                 }
             }
@@ -284,9 +424,9 @@ class TsunamiIobEngineImpl @Inject constructor(
             val act = DoubleArray(Category.entries.size)
             for (cat in Category.entries) {
                 val sum = Pool()
-                for (site in sites.values) sum.add(site.pools[cat.ordinal].propagated(ke, dtPeek))
+                for (site in sites.values) sum.add(site.pools[cat.ordinal].propagated(ke, kc, dtPeek))
                 iob[cat.ordinal] = sum.iob()
-                act[cat.ordinal] = sum.activity(ke)
+                act[cat.ordinal] = sum.activity(ke, kc)
             }
 
             // m times the shared branches, which the pools hold as they would at m = 1, plus 1 - m times
@@ -294,15 +434,15 @@ class TsunamiIobEngineImpl @Inject constructor(
             if (mixing < 1.0) {
                 val indIob = DoubleArray(Category.entries.size)
                 val indAct = DoubleArray(Category.entries.size)
-                for (dose in individualDoses) {
-                    PdModel.isolatedStateOnGrid(dose.grid, (tTarget - dose.timestamp) / 60000.0, speedFactor, isolated)
-                    val doseIob = isolated[0] + isolated[1] + isolated[2]
-                    val doseAct = ke * isolated[2]
-                    indIob[dose.cat.ordinal] += doseIob
-                    indAct[dose.cat.ordinal] += doseAct
-                    if (dose.autoScale > 0.0) {
-                        indIob[Category.AUTO_PROFILE_BASAL.ordinal] += dose.autoScale * doseIob
-                        indAct[Category.AUTO_PROFILE_BASAL.ordinal] += dose.autoScale * doseAct
+                for (run in individualRuns) {
+                    PdModel.runState(run.curve, tTarget - run.first, run.count, shiftWholeMinuteRuns && run.first % 60_000L == 0L, runState)
+                    val runIob = runState[0] + runState[1] + runState[2] + runState[3]
+                    val runAct = if (kc > 0.0) kc * runState[3] else ke * runState[2]
+                    indIob[run.cat.ordinal] += runIob
+                    indAct[run.cat.ordinal] += runAct
+                    if (run.autoScale > 0.0) {
+                        indIob[Category.AUTO_PROFILE_BASAL.ordinal] += run.autoScale * runIob
+                        indAct[Category.AUTO_PROFILE_BASAL.ordinal] += run.autoScale * runAct
                     }
                 }
                 for (i in iob.indices) {
@@ -331,30 +471,9 @@ class TsunamiIobEngineImpl @Inject constructor(
             )
         }
 
-        val resultsMap = HashMap<Long, TsunamiIobResult>()
-
-        // Use a Set to automatically prevent duplicates, ensuring a perfect chronological map
-        val targetTimes = mutableSetOf<Long>()
-        var evalT = (startTime / 300000L) * 300000L
-        while (evalT <= horizonTime) {
-            if (evalT >= startTime) targetTimes.add(evalT)
-            evalT += 5 * 60 * 1000L
-        }
-        // Force the engine to snapshot the EXACT millisecond requested by AAPS
-        targetTimes.add(requestedTime)
-        targetTimes.add(horizonTime)
-
-        val sortedTargets = targetTimes.sorted()
-        var nextTargetIdx = 0
-
         for (dose in timeline) {
-            // STRICTLY LESS THAN: Take snapshots AFTER the current dose is absorbed, but before the next!
-            while (nextTargetIdx < sortedTargets.size && sortedTargets[nextTargetIdx] < dose.timestamp) {
-                val tTarget = sortedTargets[nextTargetIdx]
-                val dtPeek = (tTarget - lastTime) / 60000.0
-                resultsMap[tTarget] = evaluatePools(dtPeek, tTarget)
-                nextTargetIdx++
-            }
+            // The snapshot comes AFTER every dose at or before requestedTime is absorbed, but before the next.
+            if (dose.timestamp > requestedTime) break
 
             val dtMins = (dose.timestamp - lastTime) / 60000.0
             if (dtMins > 0) {
@@ -397,15 +516,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             for (s in sites.values) s.refreshRates()
         }
 
-        // Process remaining snapshots at the very end of the timeline
-        while (nextTargetIdx < sortedTargets.size) {
-            val tTarget = sortedTargets[nextTargetIdx]
-            val dtPeek = (tTarget - lastTime) / 60000.0
-            resultsMap[tTarget] = evaluatePools(dtPeek, tTarget)
-            nextTargetIdx++
-        }
-
-        return resultsMap
+        return evaluatePools((requestedTime - lastTime) / 60000.0, requestedTime)
     }
 
     /**
@@ -473,6 +584,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         toTime: Long,
         sensitivityRatio: Double,
         boluses: List<BS>,
+        records: Records,
         isFakingTemps: Boolean,
         assumeZeroTempAfter: Long,
         currentNow: Long
@@ -502,8 +614,8 @@ class TsunamiIobEngineImpl @Inject constructor(
         // Fetch Temp Basals and Extended Boluses ONCE into RAM, sorted chronologically so the
         // per-minute loop below can sweep forward through them with monotonically advancing
         // indices instead of rescanning the full list every single minute.
-        val sortedTbs = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(alignedFromTime, toTime, true).sortedBy { it.timestamp }
-        val sortedEbs = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(alignedFromTime, toTime, true).sortedBy { it.timestamp }
+        val sortedTbs = records.tempBasalsStarting(alignedFromTime, toTime).sortedBy { it.timestamp }
+        val sortedEbs = records.extendedBolusesStarting(alignedFromTime, toTime).sortedBy { it.timestamp }
 
         // Everything before these indices has definitely ended relative to the current bTime,
         // and can never become relevant again since bTime only moves forward and each record's
@@ -517,9 +629,10 @@ class TsunamiIobEngineImpl @Inject constructor(
             val durationMins = (nextTime - bTime) / 60000.0
 
             if (durationMins > 0) {
-                val profile = profileFunction.getProfile(bTime)
-                if (profile != null) {
-                    val profileRate = profile.getBasal(bTime)
+                val minuteBasal = records.minuteBasal(bTime)
+                if (minuteBasal != null) {
+                    val profile = minuteBasal.profile
+                    val profileRate = minuteBasal.rate
                     var absoluteRate = profileRate
 
                     // 1. Resolve Active Temp Basal in RAM (Replaces processedTbrEbData to support Deep History)
@@ -634,37 +747,46 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     /**
      * One pool's live state: mass still in the SC depot (D), in transit (X), or active (A), and the
-     * depot/transit rate [k] it was last given (SiteState.refreshRates, at every event).
+     * depot/transit rate [k] it was last given (SiteState.refreshRates, at every event). With a CGM lag
+     * (kc > 0, see [CgmLagStage]) also C, insulin whose effect the CGM has yet to see: activity is then
+     * kc*C instead of ke*A, and C counts as on board. With kc = 0, C stays 0 and nothing changes.
      */
-    private class Pool(var D: Double = 0.0, var X: Double = 0.0, var A: Double = 0.0, var k: Double = 0.0) {
+    private class Pool(var D: Double = 0.0, var X: Double = 0.0, var A: Double = 0.0, var C: Double = 0.0, var k: Double = 0.0) {
 
-        fun iob(): Double = D + X + A
-        fun activity(ke: Double): Double = ke * A
+        fun iob(): Double = D + X + A + C
+        fun activity(ke: Double, kc: Double): Double = if (kc > 0.0) kc * C else ke * A
 
         fun add(p: Pool) {
-            D += p.D; X += p.X; A += p.A
+            D += p.D; X += p.X; A += p.A; C += p.C
         }
 
-        fun propagated(ke: Double, dtMinutes: Double): Pool {
-            if (dtMinutes <= 0.0 || (D == 0.0 && X == 0.0 && A == 0.0)) return Pool(D, X, A, k)
-            val (nd, nx, na) = PdModel.propagate(D, X, A, k, k, ke, dtMinutes)
-            return Pool(nd, nx, na, k)
-        }
+        fun propagated(ke: Double, kc: Double, dtMinutes: Double): Pool =
+            Pool(D, X, A, C, k).also { it.propagateInPlace(ke, kc, dtMinutes) }
 
-        fun propagateInPlace(ke: Double, dtMinutes: Double) {
-            if (dtMinutes <= 0.0 || (D == 0.0 && X == 0.0 && A == 0.0)) return
-            val (nd, nx, na) = PdModel.propagate(D, X, A, k, k, ke, dtMinutes)
-            D = nd; X = nx; A = na
+        fun propagateInPlace(ke: Double, kc: Double, dtMinutes: Double) {
+            if (dtMinutes <= 0.0 || (D == 0.0 && X == 0.0 && A == 0.0 && C == 0.0)) return
+            if (kc > 0.0) {
+                val s = DoubleArray(4)
+                PdModel.propagateWithLag(D, X, A, C, k, ke, kc, dtMinutes, s)
+                D = s[0]; X = s[1]; A = s[2]; C = s[3]
+            } else {
+                val (nd, nx, na) = PdModel.propagate(D, X, A, k, k, ke, dtMinutes)
+                D = nd; X = nx; A = na
+            }
         }
     }
 
     /**
-     * One dose's individual branch, at a dose interaction below 1: its isolated curve ([grid], see
-     * [PdModel.isolatedGrid]) from [timestamp] on, in [cat]. For a profile-basal dose, [autoScale] is
-     * the matching autoProfileBasal amount over the profile amount (its twin moves at the profile
-     * basal's rate, so its curve is the same scaled), otherwise 0.
+     * [count] doses' individual branches in [cat], at a dose interaction below 1: doses of the same amount
+     * ([curve], see [PdModel.IsolatedCurve]) a minute apart, from [first] on. For profile basal, [autoScale]
+     * is the matching autoProfileBasal amount over the profile amount (its twin moves at the profile basal's
+     * rate, so its curve is the same scaled), otherwise 0.
      */
-    private class IndividualDose(val timestamp: Long, val cat: Category, val grid: Array<DoubleArray>, val autoScale: Double)
+    private class IndividualRun(val cat: Category, val curve: PdModel.IsolatedCurve, val autoScale: Double, val first: Long) {
+
+        var count = 1
+        val last: Long get() = first + (count - 1) * 60000L
+    }
 
     private data class DoseEvent(
         val timestamp: Long,
@@ -678,6 +800,9 @@ class TsunamiIobEngineImpl @Inject constructor(
     /**
      * Three linked first-order compartments: D (SC depot) -> X (transit) -> A (active, reported as
      * activity = KE*A). IOB(t) = D(t) + X(t) + A(t): mass not yet through the final step.
+     * With a CGM lag set (DoubleKey.InsulinTrafficJamCgmLag), a fourth, C, follows A at the fixed rate
+     * kc = 1/lag ([CgmLagStage]): activity is then kc*C and IOB D + X + A + C, the effect as the CGM sees
+     * it. The lag stage is not part of the fit below - the EPAR clamp curves measure the effect in the blood.
      *
      * Depot and transit share ONE crowding-dependent rate, K(M) = K1_B0 * M^K1_B1 ([rate]), where M
      * is the live depot mass of the dose's crowding group (D only - see groupDepotMass and
@@ -766,7 +891,7 @@ class TsunamiIobEngineImpl @Inject constructor(
      * Depot-only model: K1_B0 = 0.069092, K1_B1 = -0.596593 (depot only), K2 = 0.031796,
      * KE = ln(2)/44.
      */
-    private object PdModel {
+    internal object PdModel {
         const val KE = 0.1297809 // fitted; t1/2 5.34 min
 
         const val K1_B0 = 0.01784168
@@ -779,6 +904,12 @@ class TsunamiIobEngineImpl @Inject constructor(
         private const val ISOLATED_GRID_MINUTES = 600
 
         private const val RATE_EPS = 1e-7
+
+        /**
+         * [propagateWithLag] splits longer intervals into steps this long - exact, since rates are constant
+         * within one call - so that exp() of the scaled rate differences in [CgmLagStage] stays finite.
+         */
+        private const val LAG_STEP_MINUTES = 60.0
 
         /**
          * Exact closed-form propagation of (D, X, A) forward by [dt] minutes under constant
@@ -805,64 +936,214 @@ class TsunamiIobEngineImpl @Inject constructor(
         fun rate(speedFactor: Double, depotMass: Double): Double =
             speedFactor * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
 
-        /** An isolated dose's (D, X, A) at whole minutes 0..ISOLATED_GRID_MINUTES, per (amount, speedFactor). */
-        private val isolatedGrids = object : LinkedHashMap<Pair<Double, Double>, Array<DoubleArray>>(64, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Double, Double>, Array<DoubleArray>>?): Boolean = size > 256
+        /**
+         * [propagate] with the CGM lag stage ([CgmLagStage]) at rate [kc] after the active stage, depot and
+         * transit both at [k]: (D, X, A, C) after [dt] minutes, written into [out]. D and X come out exactly as
+         * from [propagate]; A is the same exact solution, without [propagate]'s rounding of rates closer than
+         * RATE_EPS to equal.
+         */
+        fun propagateWithLag(d0: Double, x0: Double, a0: Double, c0: Double, k: Double, ke: Double, kc: Double, dt: Double, out: DoubleArray) {
+            out[0] = d0; out[1] = x0; out[2] = a0; out[3] = c0
+            var left = dt
+            while (left > 0.0) {
+                val step = min(left, LAG_STEP_MINUTES)
+                CgmLagStage.propagate(out[0], out[1], out[2], out[3], k, ke, kc, step, out)
+                left -= step
+            }
         }
 
-        fun isolatedGrid(amount: Double, speedFactor: Double): Array<DoubleArray> = synchronized(isolatedGrids) {
-            isolatedGrids.getOrPut(Pair(amount, speedFactor)) {
-                val n = ISOLATED_GRID_MINUTES + 1
-                val d = DoubleArray(n)
-                val x = DoubleArray(n)
-                val a = DoubleArray(n)
-                d[0] = amount
-                for (i in 1 until n) {
-                    val k1 = rate(speedFactor, d[i - 1])
+        /** Isolated curves ([IsolatedCurve]) per (amount, speedFactor, kc), the 256 last used. */
+        private val isolatedCurves = object : LinkedHashMap<Triple<Double, Double, Double>, IsolatedCurve>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Triple<Double, Double, Double>, IsolatedCurve>?): Boolean = size > 256
+        }
+
+        fun isolatedCurve(amount: Double, speedFactor: Double, kc: Double): IsolatedCurve = synchronized(isolatedCurves) {
+            isolatedCurves.getOrPut(Triple(amount, speedFactor, kc)) { IsolatedCurve(amount, speedFactor, kc) }
+        }
+
+        fun isolatedGrid(amount: Double, speedFactor: Double, kc: Double): Array<DoubleArray> = isolatedCurve(amount, speedFactor, kc).grid
+
+        /**
+         * An isolated dose of [amount] at [speedFactor] and [kc]: its table ([grid]) and what [runState] needs to sum
+         * runs of such doses a minute apart, each made the first time it is needed (a dose evaluated only at its own
+         * time, one given right at the requested time, never tabulates anything).
+         */
+        class IsolatedCurve(val amount: Double, val speedFactor: Double, val kc: Double) {
+
+            /** (D, X, A, C) at whole minutes 0..ISOLATED_GRID_MINUTES - C (the CGM lag stage) all zero at kc = 0. */
+            val grid: Array<DoubleArray> by lazy { tabulate(amount, speedFactor, kc) }
+
+            /** Running sums of [grid]: sums[s][i] = grid[s][0] + ... + grid[s][i]. */
+            val sums: Array<DoubleArray> by lazy { runningSums(grid) }
+
+            /** Past the table the rate is held at its last value, so a step of a minute is a fixed linear map M there. */
+            val tailRate: Double by lazy { rate(speedFactor, grid[0][ISOLATED_GRID_MINUTES]) }
+
+            /**
+             * The sum over m >= 0 of M^m applied to the table's last state g - every state still to come - which is
+             * h = (I - M)^-1 g. M only moves mass down the chain, so I - M is lower triangular, and this is forward
+             * substitution on M's columns (unit states stepped by a minute).
+             */
+            val tailSum: DoubleArray by lazy {
+                val g = DoubleArray(4) { grid[it][ISOLATED_GRID_MINUTES] }
+                val m = Array(4) { j -> DoubleArray(4).also { held(DoubleArray(4).also { e -> e[j] = 1.0 }, this, 1.0, it) } }
+                val h = DoubleArray(4)
+                h[0] = g[0] / (1.0 - m[0][0])
+                h[1] = (g[1] + m[0][1] * h[0]) / (1.0 - m[1][1])
+                h[2] = (g[2] + m[0][2] * h[0] + m[1][2] * h[1]) / (1.0 - m[2][2])
+                h[3] = if (kc > 0.0) (g[3] + m[0][3] * h[0] + m[1][3] * h[1] + m[2][3] * h[2]) / (1.0 - m[3][3]) else 0.0
+                h
+            }
+
+            /** Running sums of [grid] shifted by a fraction of a minute, per remainder in ms, the two last used. */
+            private val shifted = object : LinkedHashMap<Long, Array<DoubleArray>>(4, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Array<DoubleArray>>?): Boolean = size > 2
+            }
+
+            /** Running sums of the dose's state at every age i + [remainderMs]/60000 minutes below the table's end. */
+            fun shiftedSums(remainderMs: Long): Array<DoubleArray> = synchronized(shifted) {
+                shifted.getOrPut(remainderMs) {
+                    val table = Array(4) { DoubleArray(ISOLATED_GRID_MINUTES) }
+                    val state = DoubleArray(4)
+                    for (i in 0 until ISOLATED_GRID_MINUTES) {
+                        isolatedStateOnGrid(grid, i + remainderMs / 60000.0, speedFactor, kc, state)
+                        for (s in 0..3) table[s][i] = state[s]
+                    }
+                    runningSums(table)
+                }
+            }
+        }
+
+        private fun tabulate(amount: Double, speedFactor: Double, kc: Double): Array<DoubleArray> {
+            val n = ISOLATED_GRID_MINUTES + 1
+            val d = DoubleArray(n)
+            val x = DoubleArray(n)
+            val a = DoubleArray(n)
+            val c = DoubleArray(n)
+            d[0] = amount
+            val step = DoubleArray(4)
+            for (i in 1 until n) {
+                val k1 = rate(speedFactor, d[i - 1])
+                if (kc > 0.0) {
+                    CgmLagStage.propagate(d[i - 1], x[i - 1], a[i - 1], c[i - 1], k1, speedFactor * KE, kc, 1.0, step)
+                    d[i] = step[0]; x[i] = step[1]; a[i] = step[2]; c[i] = step[3]
+                } else {
                     val (nd, nx, na) = propagate(d[i - 1], x[i - 1], a[i - 1], k1, k1, speedFactor * KE, 1.0)
                     d[i] = nd; x[i] = nx; a[i] = na
                 }
-                arrayOf(d, x, a)
+            }
+            return arrayOf(d, x, a, c)
+        }
+
+        private fun runningSums(table: Array<DoubleArray>): Array<DoubleArray> = Array(4) { s ->
+            val column = table[s]
+            var sum = 0.0
+            DoubleArray(column.size) { i -> sum += column[i]; sum }
+        }
+
+        /** [s] stepped by [minutes] at [curve]'s held tail rate, written into [out], as the table's tail is ([isolatedStateOnGrid]). */
+        private fun held(s: DoubleArray, curve: IsolatedCurve, minutes: Double, out: DoubleArray) {
+            val ke = curve.speedFactor * KE
+            if (curve.kc > 0.0) propagateWithLag(s[0], s[1], s[2], s[3], curve.tailRate, ke, curve.kc, minutes, out)
+            else {
+                val (d, x, a) = propagate(s[0], s[1], s[2], curve.tailRate, curve.tailRate, ke, minutes)
+                out[0] = d; out[1] = x; out[2] = a; out[3] = 0.0
             }
         }
 
         /**
-         * (D, X, A) of an isolated (unpooled) single dose of [amount], [tElapsed] minutes after it,
-         * with the rate re-evaluated every minute from the dose's own live depot mass, as the
-         * engine does. Past ISOLATED_GRID_MINUTES the rate is held at its last value.
+         * The sum of [isolatedStateOnGrid] over [count] doses of [curve] given a minute apart, the oldest [ageMs]
+         * milliseconds before, written into [out] as (D, X, A, C); equal to it dose by dose up to rounding. Every dose
+         * of the run is the same fraction of a minute past its whole minutes. The table's stretch of whole minutes
+         * comes from running sums: of the table itself at whole-minute ages, of the table shifted by the fraction
+         * ([IsolatedCurve.shiftedSums]) if [shift], else dose by dose. Past the table the rate is held, and the sum of
+         * M^m g over m = a..b is M^a h - M^(b+1) h, with h = [IsolatedCurve.tailSum] - two steps however many doses.
          */
-        fun isolatedState(tElapsed: Double, amount: Double, speedFactor: Double): Triple<Double, Double, Double> {
-            if (tElapsed <= 0.0) return Triple(amount, 0.0, 0.0)
-            val out = DoubleArray(3)
-            isolatedStateOnGrid(isolatedGrid(amount, speedFactor), tElapsed, speedFactor, out)
-            return Triple(out[0], out[1], out[2])
+        fun runState(curve: IsolatedCurve, ageMs: Long, count: Int, shift: Boolean, out: DoubleArray) {
+            if (count == 1) {
+                if (ageMs <= 0L) {
+                    out[0] = curve.amount; out[1] = 0.0; out[2] = 0.0; out[3] = 0.0
+                } else isolatedStateOnGrid(curve.grid, ageMs / 60000.0, curve.speedFactor, curve.kc, out)
+                return
+            }
+            out.fill(0.0)
+            val remainder = ageMs % 60000L
+            val fraction = remainder / 60000.0
+            val oldest = (ageMs / 60000L).toInt() // whole minutes of the oldest dose's age
+            val newest = oldest - count + 1        // and of the newest's
+            val state = DoubleArray(4)
+            val tableTop = min(oldest, ISOLATED_GRID_MINUTES - 1)
+            if (newest <= tableTop) {
+                when {
+                    remainder == 0L -> addSums(curve.sums, newest, tableTop, out)
+                    shift           -> addSums(curve.shiftedSums(remainder), newest, tableTop, out)
+                    else            -> for (i in newest..tableTop) {
+                        isolatedStateOnGrid(curve.grid, i + fraction, curve.speedFactor, curve.kc, state)
+                        for (s in 0..3) out[s] += state[s]
+                    }
+                }
+            }
+            val tailBottom = max(newest, ISOLATED_GRID_MINUTES)
+            if (tailBottom == oldest) {
+                isolatedStateOnGrid(curve.grid, oldest + fraction, curve.speedFactor, curve.kc, state)
+                for (s in 0..3) out[s] += state[s]
+            } else if (tailBottom < oldest) {
+                val h = curve.tailSum
+                held(h, curve, (tailBottom - ISOLATED_GRID_MINUTES) + fraction, state)
+                for (s in 0..3) out[s] += state[s]
+                held(h, curve, (oldest + 1 - ISOLATED_GRID_MINUTES) + fraction, state)
+                for (s in 0..3) out[s] -= state[s]
+            }
+        }
+
+        private fun addSums(sums: Array<DoubleArray>, from: Int, to: Int, out: DoubleArray) {
+            for (s in 0..3) out[s] += sums[s][to] - (if (from > 0) sums[s][from - 1] else 0.0)
         }
 
         /**
-         * [isolatedState] of the dose tabulated in [grid] ([isolatedGrid]), written into [out] as (D, X, A).
-         * On a whole minute of the table no propagation is needed (it would be by 0 minutes).
+         * (D, X, A, C) of an isolated (unpooled) single dose of [amount], [tElapsed] minutes after it,
+         * with the rate re-evaluated every minute from the dose's own live depot mass, as the
+         * engine does. Past ISOLATED_GRID_MINUTES the rate is held at its last value.
          */
-        fun isolatedStateOnGrid(grid: Array<DoubleArray>, tElapsed: Double, speedFactor: Double, out: DoubleArray) {
+        fun isolatedState(tElapsed: Double, amount: Double, speedFactor: Double, kc: Double): DoubleArray {
+            val out = DoubleArray(4)
             if (tElapsed <= 0.0) {
-                out[0] = grid[0][0]; out[1] = 0.0; out[2] = 0.0
+                out[0] = amount
+                return out
+            }
+            isolatedStateOnGrid(isolatedGrid(amount, speedFactor, kc), tElapsed, speedFactor, kc, out)
+            return out
+        }
+
+        /**
+         * [isolatedState] of the dose tabulated in [grid] ([isolatedGrid], for the same [kc]), written into
+         * [out] as (D, X, A, C). On a whole minute of the table no propagation is needed (it would be by 0 minutes).
+         */
+        fun isolatedStateOnGrid(grid: Array<DoubleArray>, tElapsed: Double, speedFactor: Double, kc: Double, out: DoubleArray) {
+            if (tElapsed <= 0.0) {
+                out[0] = grid[0][0]; out[1] = 0.0; out[2] = 0.0; out[3] = 0.0
                 return
             }
             val i = min(tElapsed.toInt(), ISOLATED_GRID_MINUTES)
             val dt = tElapsed - i
             if (dt == 0.0) {
-                out[0] = grid[0][i]; out[1] = grid[1][i]; out[2] = grid[2][i]
+                out[0] = grid[0][i]; out[1] = grid[1][i]; out[2] = grid[2][i]; out[3] = grid[3][i]
                 return
             }
             val k1 = rate(speedFactor, grid[0][i])
-            val (d, x, a) = propagate(grid[0][i], grid[1][i], grid[2][i], k1, k1, speedFactor * KE, dt)
-            out[0] = d; out[1] = x; out[2] = a
+            if (kc > 0.0) {
+                propagateWithLag(grid[0][i], grid[1][i], grid[2][i], grid[3][i], k1, speedFactor * KE, kc, dt, out)
+            } else {
+                val (d, x, a) = propagate(grid[0][i], grid[1][i], grid[2][i], k1, k1, speedFactor * KE, dt)
+                out[0] = d; out[1] = x; out[2] = a; out[3] = 0.0
+            }
         }
 
         /** Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single dose. */
-        fun isolatedIobFraction(tElapsed: Double, amount: Double, speedFactor: Double): Double {
+        fun isolatedIobFraction(tElapsed: Double, amount: Double, speedFactor: Double, kc: Double): Double {
             if (amount <= 0.0) return 0.0
-            val (d, x, a) = isolatedState(tElapsed, amount, speedFactor)
-            return (d + x + a) / amount
+            val s = isolatedState(tElapsed, amount, speedFactor, kc)
+            return (s[0] + s[1] + s[2] + s[3]) / amount
         }
 
         /** Second stage (X) of a 2-compartment chain fed by [q0] entering at rate [r1], draining at [r2]. */

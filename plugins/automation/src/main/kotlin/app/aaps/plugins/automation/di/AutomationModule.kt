@@ -17,7 +17,9 @@ import app.aaps.plugins.automation.actions.ActionRunAutotune
 import app.aaps.plugins.automation.actions.ActionSMBChange
 import app.aaps.plugins.automation.actions.ActionSendSMS
 import app.aaps.plugins.automation.actions.ActionSetAcceWeight
+import app.aaps.plugins.automation.actions.ActionSetBrakeWeight
 import app.aaps.plugins.automation.actions.ActionSetIobTH
+import app.aaps.plugins.automation.actions.ActionSetPpWeight
 import app.aaps.plugins.automation.actions.ActionSetAutomationState
 import app.aaps.plugins.automation.actions.ActionSettingsExport
 import app.aaps.plugins.automation.actions.ActionStartTempTarget
@@ -128,6 +130,8 @@ abstract class AutomationModule {
     @ContributesAndroidInjector abstract fun actionAutoisfEnableInjector(): ActionAutoisfEnable
     @ContributesAndroidInjector abstract fun actionAutoisfDisableInjector(): ActionAutoisfDisable
     @ContributesAndroidInjector abstract fun actionSetAcceWeightInjector(): ActionSetAcceWeight
+    @ContributesAndroidInjector abstract fun actionSetBrakeWeightInjector(): ActionSetBrakeWeight
+    @ContributesAndroidInjector abstract fun actionSetPpWeightInjector(): ActionSetPpWeight
     @ContributesAndroidInjector abstract fun actionSetIobTHInjector(): ActionSetIobTH
     @ContributesAndroidInjector abstract fun actionSendSMSInjector(): ActionSendSMS
     @ContributesAndroidInjector abstract fun actionStartTempTargetInjector(): ActionStartTempTarget

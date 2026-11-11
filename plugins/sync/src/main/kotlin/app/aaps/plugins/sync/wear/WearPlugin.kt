@@ -104,11 +104,11 @@ class WearPlugin @Inject constructor(
         disposable += rxBus
             .toObservable(EventAutosensCalculationFinished::class.java)
             .observeOn(aapsSchedulers.io)
-            .subscribe({ dataHandlerMobile.resendData("EventAutosensCalculationFinished") }, fabricPrivacy::logException)
+            .subscribe({ dataHandlerMobile.resendData("EventAutosensCalculationFinished", automatic = true) }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventLoopUpdateGui::class.java)
             .observeOn(aapsSchedulers.io)
-            .subscribe({ dataHandlerMobile.resendData("EventLoopUpdateGui") }, fabricPrivacy::logException)
+            .subscribe({ dataHandlerMobile.resendData("EventLoopUpdateGui", automatic = true) }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventWearUpdateTiles::class.java)
             .observeOn(aapsSchedulers.io)
@@ -194,7 +194,9 @@ class WearPlugin @Inject constructor(
     }
 
     override fun addPreferenceScreen(preferenceManager: PreferenceManager, parent: PreferenceScreen, context: Context, requiredKey: String?) {
-        if (requiredKey != null && requiredKey != "wear_wizard_settings" && requiredKey != "wear_custom_watchface_settings" && requiredKey != "wear_general_settings") return
+        if (requiredKey != null && requiredKey != "wear_wizard_settings" && requiredKey != "wear_custom_watchface_settings" && requiredKey != "wear_general_settings" &&
+            requiredKey != "wear_data_sent_settings"
+        ) return
         val category = PreferenceCategory(context)
         parent.addPreference(category)
         category.apply {
@@ -231,6 +233,25 @@ class WearPlugin @Inject constructor(
                 key = "wear_general_settings"
                 title = rh.gs(R.string.wear_general_settings)
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.WearNotifyOnSmb, summary = R.string.wear_notifysmb_summary, title = R.string.wear_notifysmb_title))
+            })
+            addPreference(preferenceManager.createPreferenceScreen(context).apply {
+                key = "wear_data_sent_settings"
+                title = rh.gs(R.string.wear_data_sent_settings)
+                summary = rh.gs(R.string.wear_data_sent_settings_summary)
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.WearBgEveryFiveMinutes, summary = R.string.wear_bg_every_five_minutes_summary, title = R.string.wear_bg_every_five_minutes_title))
+                addPreference(
+                    AdaptiveSwitchPreference(
+                        ctx = context, booleanKey = BooleanKey.WearStatusEveryFiveMinutes,
+                        summary = R.string.wear_status_every_five_minutes_summary, title = R.string.wear_status_every_five_minutes_title
+                    )
+                )
+                addPreference(
+                    AdaptiveSwitchPreference(
+                        ctx = context, booleanKey = BooleanKey.WearActionButtonsOnlyWhenChanged,
+                        summary = R.string.wear_action_buttons_only_when_changed_summary, title = R.string.wear_action_buttons_only_when_changed_title
+                    )
+                )
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.WearSendChartData, summary = R.string.wear_send_chart_data_summary, title = R.string.wear_send_chart_data_title))
             })
         }
     }

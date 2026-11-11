@@ -205,12 +205,65 @@ A single dose on a steady basal rate, minutes until 1 - (its own IOB)/dose reach
 | 3U | 116 / 230 | 123 / 253 | 112 / 211 | 115 / 222 | 110 / 204 | 112 / 210 |
 | 5U | 126 / 246 | 131 / 266 | 123 / 230 | 125 / 240 | 122 / 225 | 123 / 230 |
 
-Below 1 the shared branches are the engine run at 1, one pool per category for all doses, and each
-individual branch is read from its amount's isolated curve, tabulated once on a 1-minute grid (the
-table the bolus snooze uses) and kept in memory. One simulation of the IOB window (480 minutes back
-to 480 minutes ahead) takes 12.5-13.9 ms at 0-0.7 against 4.3 ms at 1 (JVM on the cloud test
-machine, not a phone; best of three runs). Each dose with its own evolving state, the version this
-replaced, took 115-146 ms.
+Below 1 the shared branches are the engine run at 1, one pool per category for all doses, and the
+individual branches come from each amount's isolated curve, tabulated once on a 1-minute grid (the
+table the bolus snooze uses) and kept in memory. Basal is one dose every minute, so the individual
+branches are summed as runs of equal doses a minute apart, one per stretch at one rate: a run's sum is
+a difference of the curve's running sums. Past the table's 600 minutes the rate is held, and a run's
+sum there is a geometric series of one-minute steps, two steps however long the run. Requests that
+keep falling at the same fraction of a minute, like the SMB IOB array's (now, now + 5 minutes, ...),
+also get the curves tabulated shifted by that fraction. All of it equals the dose-by-dose sum to
+rounding.
+
+Every requested time is simulated over its own window, 480 minutes back to that time, and evaluated
+there only. One loop run's SMB IOB array, 95 requests (now to now + 235 minutes, with and without a
+zero temp), then takes about 32 ms at a dose interaction of 0.5 against 28 ms at 1 (JVM on the cloud
+test machine, not a phone), with the same results. Before, every request simulated on to 8 hours
+past the present, evaluating some 190 other times along the way to fill a cache those requests never
+hit, and summed the individual branches dose by dose: 530 ms at 0.5, 53 ms at 1.
+
+The windows read the treatment history (boluses, temp basals, extended boluses, site changes) and the
+profile basal of every minute. Each calculation run asks for about a thousand windows (autosens and
+the IOB graph at every 5-minute time over a day, the SMB IOB arrays, the overview), every minute with
+a 1-minute CGM, and each window used to query the database itself: four queries, and a profile lookup
+for every one of its 480 minutes. The engine now loads the history once per calculation run, for 48
+hours back to 12 hours ahead, looks each minute's profile basal up once, and cuts every window's
+records from that (the history browser gets a separate load around the day it shows). Any change to
+that history (a bolus, temp basal, extended bolus, profile switch or site change) drops the loaded
+records the moment it is saved. The results are the same to the last bit; the database queries of a
+calculation run go from about 3000 to 4.
+
+## CGM lag
+
+The curves above are fitted to clamp data, which measure insulin's effect in the blood. A CGM
+measures interstitial glucose, which trails the blood by several minutes, and the sensor's own
+smoothing adds more. AAPS compares the CGM's rate of change with the insulin's expected effect
+(deviation = CGM delta - BGI), so with the effect computed in blood time, every SMB's effect is
+counted before the CGM can show it. That reads as a rise unexplained by insulin, which invites the
+next SMB. The tail of each dose shows the opposite error.
+
+A preference (Insulin settings → Absorption Speed, Dose Interaction and CGM Lag → CGM Lag,
+`DoubleKey.InsulinTrafficJamCgmLag`, range 0-30 minutes, default 0) adds a fourth first-order stage C
+after the active one, at the fixed rate kc = 1/lag:
+
+    dC/dt = ke*A - kc*C,   activity = kc*C,   IOB = D + X + A + C
+
+Every dose's activity is then delayed and smoothed by about the lag, to when the CGM can see it,
+and C, effect that has happened in the blood but not yet on the CGM, counts as insulin on board. A
+dose's total effect is unchanged. A lone 1U dose's activity peaks at 71 minutes with no lag, 76 at
+5 minutes and 84 at 12 minutes (Python replica). Insulin still enters the depot at its real time,
+so crowding, treatment times and the SMB interval are untouched. The lag is the sensor's, not the
+insulin's, so the speed setting doesn't scale it.
+
+With a lag set, `CgmLagStage` advances the whole chain in closed form, one step for all four
+stages. Every term is a divided difference of exp(-x) at the scaled rate differences, evaluated by
+its series or its derivative where the plain formula would cancel. That matters because the crowded
+depot/transit rate crosses both ke and kc as a depot empties, and a lag of 1/ke (7.7 minutes at
+speed 1) makes kc and ke coincide. Against fine numerical integration the error is at most 1.4e-13
+relative over the test's cases, those coincidences included. The stages share exp(-k dt) and the
+divided differences, and the series are evaluated by Horner's rule with no division, so a step with
+the lag costs about as much as one without. At 0 there is no fourth stage and every result is
+exactly as before.
 
 ## Real multi-dose behavior
 

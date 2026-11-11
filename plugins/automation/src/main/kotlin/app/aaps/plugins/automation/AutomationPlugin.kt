@@ -48,7 +48,9 @@ import app.aaps.plugins.automation.actions.ActionSMBChange
 import app.aaps.plugins.automation.actions.ActionSendSMS
 import app.aaps.plugins.automation.actions.ActionSetAutomationState
 import app.aaps.plugins.automation.actions.ActionSetAcceWeight
+import app.aaps.plugins.automation.actions.ActionSetBrakeWeight
 import app.aaps.plugins.automation.actions.ActionSetIobTH
+import app.aaps.plugins.automation.actions.ActionSetPpWeight
 import app.aaps.plugins.automation.actions.ActionSettingsExport
 import app.aaps.plugins.automation.actions.ActionStartTempTarget
 import app.aaps.plugins.automation.actions.ActionStopProcessing
@@ -418,6 +420,8 @@ class AutomationPlugin @Inject constructor(
             actions.add(ActionAutoisfEnable(injector))
             actions.add(ActionAutoisfDisable(injector))
             actions.add(ActionSetAcceWeight(injector))
+            actions.add(ActionSetBrakeWeight(injector))
+            actions.add(ActionSetPpWeight(injector))
             actions.add(ActionSetIobTH(injector))
         }
         return actions.toList()
