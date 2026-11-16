@@ -14,6 +14,8 @@ import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.LongKey
 import app.aaps.core.objects.extensions.fromGv
+import app.aaps.core.objects.extensions.hasOneMinuteCadence
+import app.aaps.core.objects.extensions.isLibre1Minute
 import app.aaps.plugins.aps.openAPS.DeltaCalculator
 import app.aaps.plugins.aps.openAPSAutoISF.extensions.asRounded
 import dagger.Reusable
@@ -53,14 +55,13 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val smooth = now.smoothed
         val filled = now.filledGap
         val cgm = now.sourceSensor
-        val isLibre = cgm.text == "Libre2" || cgm.text == "Libre2 Native" || cgm.text == "Libre3"   // || cgm.text=="G7"
+        val isLibre = cgm.isLibre1Minute()   // || cgm.text=="G7"
         // Raw (1-minute) path: readings genuinely denser than a 5-minute CGM - the newest 4 within 10
-        // minutes - from an allowlisted Libre or, with ApsAutoIsfForce1MinuteRaw, any sensor. The flag
-        // widens eligibility, it never skips the timing check. Requiring only the last 3 within 3
-        // minutes let one late reading drop a whole status onto the 5-minute grid. Timing is tested
-        // first so preferences is only consulted when there really is dense data from a non-Libre sensor.
-        val use1MinuteRaw = orig.size > 3 && orig[0].timestamp - orig[3].timestamp < 10 * 60000 &&
-            (isLibre || preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw))
+        // minutes (hasOneMinuteCadence) - from an allowlisted Libre or, with ApsAutoIsfForce1MinuteRaw, any
+        // sensor. The flag widens eligibility, it never skips the timing check. LoadBgDataWorker uses the
+        // same rule to decide whether to store the smoothed 1-minute values. Timing is tested first so
+        // preferences is only consulted when there really is dense data from a non-Libre sensor.
+        val use1MinuteRaw = orig.hasOneMinuteCadence() && (isLibre || preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw))
         // On the raw path "now" is the newest raw reading. The bucketed grid re-anchors on it every
         // cycle (see AutosensDataStoreObject.clone()), but taking it from orig directly keeps glucose,
         // date, the staleness check, the sliding delta and the parabola fit on that same instant even
@@ -282,24 +283,34 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         )   //.also { aapsLogger.debug(LTag.GLUCOSE, it.log(decimalFormatter)) }.asRounded()
     }
 
-    // Caps the dense stream handed to the smoothing plugin to the window the parabola fit and the
-    // sliding delta actually look at (the fit breaks off past 47.5 minutes; the delta only needs
-    // ~5), rather than the full multi-hour getBgReadingsDataTableCopy() buffer - keeps per-cycle
-    // smoothing cost (particularly the UKF's forward+backward pass) bounded regardless of how far
-    // back raw history extends. 60 minutes matches the UKF's own majorGapThreshold, i.e. its own
-    // notion of a useful history horizon for retrospective revision.
+    // The last hour of readings, each smoothed by the active smoothing plugin: the window the parabola
+    // fit (it breaks off past 47.5 minutes), dura_ISF and the sliding delta look at. Taken from the
+    // 1-minute values LoadBgDataWorker smooths once per data load (the ones the graph shows), as long as
+    // they hold exactly these readings. Only when they don't (they are one data load behind, or missing)
+    // is the window smoothed here, capped at 60 minutes to keep that cost bounded - 60 minutes matches
+    // the UKF's own majorGapThreshold, its own horizon for revising older values.
     private fun smoothedRecentWindow(orig: List<GV>): List<InMemoryGlucoseValue> {
         if (orig.isEmpty()) return emptyList()
         val cutoff = orig[0].timestamp - 60 * 60_000L
         val recent = orig.takeWhile { it.timestamp >= cutoff }   // always includes orig[0]
+        storedWindow(recent)?.let { return it }
         return activePlugin.activeSmoothing.smooth(recent.map { InMemoryGlucoseValue.fromGv(it) }.toMutableList())
     }
 
-    // "now" and "~5 minutes ago" interpolated off the smoothed dense stream, recomputed fresh on
-    // every call (getGlucoseStatusData has no caching) from whatever raw data currently exists -
-    // i.e. the smoother's current, fully-informed estimate for that instant, not whatever it
-    // happened to output when that reading first arrived. Returns null (caller keeps the bucketed
-    // delta) when there isn't enough lookback yet.
+    // The stored smoothed values of exactly these readings (same times, same values, same order), or null.
+    // Index i must stay the same reading as orig[i]: fitValueAt() pairs them by index.
+    private fun storedWindow(recent: List<GV>): List<InMemoryGlucoseValue>? {
+        val stored = iobCobCalculator.ads.getSmoothedReadingsCopy() ?: return null
+        if (stored.size < recent.size) return null
+        for (i in recent.indices)
+            if (stored[i].timestamp != recent[i].timestamp || stored[i].value != recent[i].value) return null
+        return stored.subList(0, recent.size)
+    }
+
+    // "now" and "~5 minutes ago" interpolated off the smoothed dense stream. That stream is smoothed
+    // over every reading so far (at the last data load), so this is the smoother's current, fully
+    // informed estimate for that instant, not whatever it gave when that reading first arrived.
+    // Returns null (caller keeps the bucketed delta) when there isn't enough lookback yet.
     private fun slidingDelta(smoothed: List<InMemoryGlucoseValue>): Double? {
         if (smoothed.size < 2) return null
         val now = smoothed[0].timestamp

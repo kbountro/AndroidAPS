@@ -318,10 +318,11 @@ open class UnscentedKalmanFilterPlugin protected constructor(
 
         val timeDiffMinutes = (currentTimestamp - lastProcessedTimestamp) / millisPerMinute
 
-        // This singleton is fed by two callers when AutoISF's raw path is active: LoadBgDataWorker
-        // with the bucketed 5-minute grid and GlucoseStatusCalculatorAutoIsf with the dense raw
-        // window, from several threads. Their newest points can be a reading or two apart in either
-        // order; treating that as "went backwards" would wipe learned R.
+        // This singleton is fed several streams when AutoISF's raw path is active: LoadBgDataWorker with
+        // the bucketed 5-minute grid and with every 1-minute reading, and GlucoseStatusCalculatorAutoIsf
+        // with the last hour of readings when the stored ones are a data load behind, from several threads.
+        // Their newest points can be a reading or two apart in either order; treating that as "went
+        // backwards" would wipe learned R.
         if (timeDiffMinutes < -backwardsToleranceMinutes) {
             aapsLogger.info(LTag.GLUCOSE, "UKF: Timestamp went backwards, resetting learning")
             return true
@@ -367,9 +368,10 @@ open class UnscentedKalmanFilterPlugin protected constructor(
     // MAIN FILTERING API
     // ============================================================
 
-    // Synchronized: besides LoadBgDataWorker, AutoISF's raw path now calls this from
-    // getGlucoseStatusData(), which UI, widget, wear, automation and loop code all hit on their own
-    // threads - and the learned-R state and innovation deques below aren't thread-safe.
+    // Synchronized: LoadBgDataWorker calls this for the 5-minute grid and, with a 1-minute CGM, for every
+    // reading; AutoISF's raw path also calls it from getGlucoseStatusData() whenever those stored readings
+    // are a data load behind, and UI, widget, wear, automation and loop code all hit that on their own
+    // threads. The learned-R state and innovation deques below aren't thread-safe.
     @Synchronized
     override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
         if (data.isEmpty()) return data

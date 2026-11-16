@@ -13,6 +13,14 @@ interface AutosensDataStore {
     var bgReadings: List<GV>
     var autosensDataTable: LongSparseArray<AutosensData>
     var bucketedData: MutableList<InMemoryGlucoseValue>?
+
+    /**
+     * Every reading of a CGM that AutoISF treats as 1-minute data, smoothed by the active smoothing plugin,
+     * newest first; null for other CGMs. LoadBgDataWorker fills it once per data load, right after it smooths
+     * [bucketedData]. The graph shows it and the AutoISF fit reads it, so neither has to smooth again.
+     * [bucketedData] stays a 5-minute grid, because autosens and COB count its points as 5-minute steps.
+     */
+    var smoothedReadings: List<InMemoryGlucoseValue>?
     var lastUsed5minCalculation: Boolean?
 
     /**
@@ -34,6 +42,7 @@ interface AutosensDataStore {
     fun getLastAutosensData(reason: String, aapsLogger: AAPSLogger, dateUtil: DateUtil): AutosensData?
     fun getAutosensDataAtTime(fromTime: Long): AutosensData?
     fun getBucketedDataTableCopy(): MutableList<InMemoryGlucoseValue>?
+    fun getSmoothedReadingsCopy(): List<InMemoryGlucoseValue>?
     fun createBucketedData(aapsLogger: AAPSLogger, dateUtil: DateUtil)
     fun slowAbsorptionPercentage(timeInMinutes: Int): Double
     fun newHistoryData(time: Long, aapsLogger: AAPSLogger, dateUtil: DateUtil)

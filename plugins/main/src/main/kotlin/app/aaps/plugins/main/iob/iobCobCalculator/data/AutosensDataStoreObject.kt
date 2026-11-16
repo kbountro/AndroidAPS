@@ -47,12 +47,19 @@ class AutosensDataStoreObject : AutosensDataStore {
         @Synchronized set
         @Synchronized get
 
+    override var smoothedReadings: List<InMemoryGlucoseValue>? = null
+        @Synchronized set
+        @Synchronized get
+
     override fun clone(): AutosensDataStore =
         AutosensDataStoreObject().also {
             synchronized(dataLock) {
                 it.bgReadings = this.bgReadings.toMutableList()
                 it.autosensDataTable = LongSparseArray<AutosensData>(this.autosensDataTable.size).apply { putAll(this@AutosensDataStoreObject.autosensDataTable) }
                 it.bucketedData = this.bucketedData?.toMutableList()
+                // Workers swap iobCobCalculator.ads for this clone, so the 1-minute values must come along,
+                // or the graph and the AutoISF fit would lose them until the next data load.
+                it.smoothedReadings = this.smoothedReadings?.toList()
                 // referenceTime is deliberately not carried over. Workers reassign iobCobCalculator.ads
                 // to this clone every cycle, so the grid in createBucketedDataRecalculated() re-anchors
                 // on the newest reading and bucketedData[0] stays the newest 1-minute value.
@@ -65,6 +72,7 @@ class AutosensDataStoreObject : AutosensDataStore {
         }
 
     override fun getBucketedDataTableCopy(): MutableList<InMemoryGlucoseValue>? = synchronized(dataLock) { bucketedData?.toMutableList() }
+    override fun getSmoothedReadingsCopy(): List<InMemoryGlucoseValue>? = synchronized(dataLock) { smoothedReadings?.toList() }
     override fun getBgReadingsDataTableCopy(): List<GV> = synchronized(dataLock) { bgReadings.toMutableList() }
 
     override fun reset() {

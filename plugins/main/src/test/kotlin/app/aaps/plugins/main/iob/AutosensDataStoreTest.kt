@@ -1,6 +1,7 @@
 package app.aaps.plugins.main.iob
 
 import androidx.collection.LongSparseArray
+import app.aaps.core.data.iob.InMemoryGlucoseValue
 import app.aaps.core.data.model.GV
 import app.aaps.core.data.model.SourceSensor
 import app.aaps.core.data.model.TrendArrow
@@ -40,6 +41,21 @@ class AutosensDataStoreTest : TestBaseWithProfile() {
         nextCycle.createBucketedData(aapsLogger, dateUtil)
 
         assertThat(nextCycle.bucketedData!![0].timestamp).isEqualTo(T.mins(61).msecs())
+    }
+
+    @Test
+    fun cloneKeepsTheStoredOneMinuteValues() {
+        // Workers swap iobCobCalculator.ads for its clone every cycle. The smoothed 1-minute values must
+        // come along, or the graph and the AutoISF fit would lose them until the next data load.
+        autosensDataStore.smoothedReadings = listOf(
+            InMemoryGlucoseValue(timestamp = T.mins(61).msecs(), value = 120.0, smoothed = 118.5),
+            InMemoryGlucoseValue(timestamp = T.mins(60).msecs(), value = 117.0, smoothed = 117.5)
+        )
+
+        val nextCycle = autosensDataStore.clone()
+
+        assertThat(nextCycle.smoothedReadings).isEqualTo(autosensDataStore.smoothedReadings)
+        assertThat(nextCycle.getSmoothedReadingsCopy()!!.map { it.recalculated }).containsExactly(118.5, 117.5).inOrder()
     }
 
     @Test

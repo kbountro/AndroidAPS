@@ -275,6 +275,72 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.glucose).isWithin(0.001).of(500.0) // glucose is the smoothed value too
     }
 
+    @Test fun rawPathUsesTheStoredSmoothedReadings() {
+        // LoadBgDataWorker stores every 1-minute reading as smoothed at the last data load (the graph shows
+        // them). When they hold exactly the readings of this status, the fit and the sliding delta read them
+        // and do not smooth again: the stored values are all 500, while the active smoothing plugin would
+        // make them 999 if it ran here.
+        val calculator = rawPathCalculator(constantSmoothing(999.0))
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(storedSmoothed(generateSlidingDeltaRawData(), 500.0))
+
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(500.0)
+        assertThat(glucoseStatus.delta).isWithin(0.001).of(0.0)
+    }
+
+    @Test fun rawPathSmoothsAgainWhenTheStoredReadingsAreBehind() {
+        // The stored values miss the newest reading (one data load behind), so they are not used: the window
+        // is smoothed here (identity), which gives the raw 120 and the raw sliding delta 20.
+        val calculator = rawPathCalculator(identitySmoothing())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(storedSmoothed(generateSlidingDeltaRawData().drop(1), 500.0))
+
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(120.0)
+        assertThat(glucoseStatus.delta).isWithin(0.001).of(20.0)
+    }
+
+    @Test fun rawPathSmoothsAgainWhenAStoredReadingDiffers() {
+        // Same times, but one stored reading has another value (the reading changed after the data load), so
+        // the stored values are not these readings and the window is smoothed here.
+        val calculator = rawPathCalculator(identitySmoothing())
+        val stored = storedSmoothed(generateSlidingDeltaRawData(), 500.0).toMutableList()
+        stored[3] = stored[3].copy(value = 999.0)
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(stored)
+
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(120.0)
+        assertThat(glucoseStatus.delta).isWithin(0.001).of(20.0)
+    }
+
+    // The sliding-delta fixtures on the forced 1-minute path, with [smoothing] as the active smoothing plugin.
+    private fun rawPathCalculator(smoothing: Smoothing): GlucoseStatusCalculatorAutoIsf {
+        val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
+        calculator.preferences = preferences
+        calculator.activePlugin = activePlugin
+        whenever(activePlugin.activeSmoothing).thenReturn(smoothing)
+        whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
+        whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
+        whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
+        whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
+        whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData())
+        whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSlidingDeltaRawData())
+        return calculator
+    }
+
+    private fun constantSmoothing(value: Double): Smoothing = object : Smoothing {
+        override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
+            data.forEach { it.smoothed = value }
+            return data
+        }
+    }
+
+    // What LoadBgDataWorker would store for these readings if every smoothed value came out as [smoothed].
+    private fun storedSmoothed(readings: List<GV>, smoothed: Double): List<InMemoryGlucoseValue> =
+        readings.map { InMemoryGlucoseValue(timestamp = it.timestamp, value = it.value, trendArrow = it.trendArrow, smoothed = smoothed, sourceSensor = it.sourceSensor) }
+
     @Test fun rawPathJudgesStalenessByNewestRawReading() {
         // If the bucketed grid ever lags the newest raw reading, the raw path must still judge
         // staleness by the raw reading. Here the grid's newest point is 7.5 min old (past the 7-minute
