@@ -15,10 +15,11 @@ interface AutosensDataStore {
     var bucketedData: MutableList<InMemoryGlucoseValue>?
 
     /**
-     * Every reading of a CGM that AutoISF treats as 1-minute data, smoothed by the active smoothing plugin,
-     * newest first; null for other CGMs. LoadBgDataWorker fills it once per data load, right after it smooths
-     * [bucketedData]. The graph shows it and the AutoISF fit reads it, so neither has to smooth again.
-     * [bucketedData] stays a 5-minute grid, because autosens and COB count its points as 5-minute steps.
+     * The one smoothed curve of a CGM that AutoISF treats as 1-minute data: every reading, smoothed by the
+     * active smoothing plugin, newest first; null for other CGMs. LoadBgDataWorker makes it at each data
+     * load (OneMinuteCurve) and publishes it together with [bgReadings] and [bucketedData], whose smoothed
+     * values come from it. AutoISF and the graph read it directly. [bucketedData] stays a 5-minute grid,
+     * because autosens and COB count its points as 5-minute steps.
      */
     var smoothedReadings: List<InMemoryGlucoseValue>?
     var lastUsed5minCalculation: Boolean?

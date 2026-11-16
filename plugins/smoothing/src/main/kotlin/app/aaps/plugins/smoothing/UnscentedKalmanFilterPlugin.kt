@@ -318,11 +318,10 @@ open class UnscentedKalmanFilterPlugin protected constructor(
 
         val timeDiffMinutes = (currentTimestamp - lastProcessedTimestamp) / millisPerMinute
 
-        // This singleton is fed several streams when AutoISF's raw path is active: LoadBgDataWorker with
-        // the bucketed 5-minute grid and with every 1-minute reading, and GlucoseStatusCalculatorAutoIsf
-        // with the last hour of readings when the stored ones are a data load behind, from several threads.
-        // Their newest points can be a reading or two apart in either order; treating that as "went
-        // backwards" would wipe learned R.
+        // LoadBgDataWorker feeds this singleton the 5-minute grid or, with a CGM that AutoISF treats as
+        // 1-minute data, the last two hours of readings (all of them at the first load). Calls can come
+        // from several threads, and their newest points can be a reading or two apart in either order;
+        // treating that as "went backwards" would wipe learned R.
         if (timeDiffMinutes < -backwardsToleranceMinutes) {
             aapsLogger.info(LTag.GLUCOSE, "UKF: Timestamp went backwards, resetting learning")
             return true
@@ -368,10 +367,8 @@ open class UnscentedKalmanFilterPlugin protected constructor(
     // MAIN FILTERING API
     // ============================================================
 
-    // Synchronized: LoadBgDataWorker calls this for the 5-minute grid and, with a 1-minute CGM, for every
-    // reading; AutoISF's raw path also calls it from getGlucoseStatusData() whenever those stored readings
-    // are a data load behind, and UI, widget, wear, automation and loop code all hit that on their own
-    // threads. The learned-R state and innovation deques below aren't thread-safe.
+    // Synchronized: LoadBgDataWorker runs for the live data and for the history browser on their own
+    // threads, and the learned-R state and innovation deques below aren't thread-safe.
     @Synchronized
     override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
         if (data.isEmpty()) return data

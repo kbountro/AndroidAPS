@@ -8,7 +8,6 @@ import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.AutosensDataStore
 import app.aaps.core.interfaces.aps.DuraIsfStart
 import app.aaps.core.interfaces.aps.GlucoseStatusAutoIsf
-import app.aaps.core.interfaces.smoothing.Smoothing
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.LongKey
@@ -34,6 +33,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     fun prepare() {
         whenever(dateUtil.now()).thenReturn(1514766900000L + T.mins(1).msecs())
         whenever(iobCobCalculator.ads).thenReturn(autosensDataStore)
+        whenever(autosensDataStore.dataLock).thenReturn(Any()) // the calculator reads one consistent snapshot under it
     }
 
     @Test fun toStringShouldBeOverloaded() {
@@ -77,13 +77,12 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     @Test fun calculateValidLibreGlucoseStatusAutoIsf() {
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyBgData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidLibreData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateValidLibreData()))
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
         // Raw path: glucose is the newest (smoothed) raw reading, not the bucketed grid point. The two
         // fixtures here were never consistent with each other (214... bucketed vs 114... raw) - that
@@ -115,13 +114,12 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         // is not what dura_ISF counts on; the raw readings give 46 minutes, to the minute.
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyBgData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSteadyLibreRawData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateSteadyLibreRawData()))
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
         assertThat(glucoseStatus.duraISFminutes).isEqualTo(46.0)
         assertThat(glucoseStatus.duraISFaverage).isWithin(1e-9).of(200.0)
@@ -132,18 +130,17 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     @Test fun calculateValidForced1MinuteRawGlucoseStatusAutoIsf() {
         // Same data as calculateValidLibreGlucoseStatusAutoIsf above, byte-for-byte, except the
         // sensor is SYAI_TAG - not on the hardcoded Libre allowlist - and ApsAutoIsfForce1MinuteRaw
-        // is on instead. If the flag genuinely widens eligibility for the raw-data path (rather than,
-        // say, silently no-oping), this must produce the exact same fit results as that Libre test.
+        // is on instead, so LoadBgDataWorker stores the curve for it too (see OneMinuteDataExtensionTest).
+        // On that curve the fit must give exactly the same results as for the Libre.
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyNonLibreData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidNonLibreRawData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateValidNonLibreRawData()))
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
         assertThat(glucoseStatus.glucose).isWithin(0.001).of(114.0) // newest raw reading, as in the Libre test
         assertThat(glucoseStatus.delta).isWithin(0.0001).of(-2.0) // sliding delta: same fixture as calculateValidLibreGlucoseStatusAutoIsf's -2.0
@@ -158,7 +155,7 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     }
 
     @Test fun nonLibreSensorWithoutForceFlagShouldUseBucketedPath() {
-        // Identical non-Libre data to the test above, but the flag is explicitly off. Must match
+        // Identical non-Libre data to the test above, but the flag is off, so no curve is stored. Must match
         // calculateValidGlucoseStatusAutoIsf's bucketed-path numbers exactly, not the raw-path ones -
         // confirms the gate actually gates, rather than the raw path leaking through some other way.
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
@@ -189,14 +186,13 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         // sliding path actually ran, not that it coincidentally matched the bucketed one.
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSlidingDeltaRawData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateSlidingDeltaRawData()))
 
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
 
@@ -209,18 +205,18 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
 
     @Test fun rawPathSurvivesOneLateReading() {
         // Newest 3 readings span 210 s (one late reading), which used to drop the whole status onto the
-        // 5-minute grid. The newest 4 still fall within 10 minutes, so the raw path must run: sliding
-        // delta 20.0 (120 now vs 100 five minutes ago) rather than the bucketed 10.0.
+        // 5-minute grid. The newest 4 still fall within 10 minutes, so LoadBgDataWorker stores the curve
+        // (see OneMinuteDataExtensionTest) and the raw path runs: sliding delta 20.0 (120 now vs 100 five
+        // minutes ago) rather than the bucketed 10.0.
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateIrregularRawData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateIrregularRawData()))
 
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
 
@@ -229,12 +225,10 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     }
 
     @Test fun bucketedDeltaWhenForce1MinuteRawDisabled() {
-        // Identical fixtures to the test above, flag off: delta must stay on the bucketed 10.0,
-        // not the raw 20.0 - confirms the gate actually gates the delta too, not just the fit.
+        // Identical fixtures to the test above, flag off, so LoadBgDataWorker stores no curve: delta must
+        // stay on the bucketed 10.0, not the raw 20.0 - the gate gates the delta too, not just the fit.
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
@@ -249,25 +243,19 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     }
 
     @Test fun slidingDeltaReflectsSmoothedNotRawValues() {
-        // Same raw fixture as above (raw delta would be 20.0), but the active smoothing plugin
-        // flattens every point to the same value - if delta read orig[].value directly instead of
-        // the smoothed stream's .recalculated, it would still come out 20.0. Getting exactly 0.0
-        // is only possible if the smoothed (flattened) values were actually used.
+        // Same raw fixture as above (raw delta would be 20.0), but the stored curve has every point
+        // smoothed to the same value - if delta read the readings' values instead of the curve's
+        // .recalculated, it would still come out 20.0. Getting exactly 0.0 is only possible if the
+        // smoothed (flattened) values were actually used.
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(object : Smoothing {
-            override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
-                data.forEach { it.smoothed = 500.0 }
-                return data
-            }
-        })
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSlidingDeltaRawData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateSlidingDeltaRawData(), smoothed = 500.0))
 
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
 
@@ -275,70 +263,28 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         assertThat(glucoseStatus.glucose).isWithin(0.001).of(500.0) // glucose is the smoothed value too
     }
 
-    @Test fun rawPathUsesTheStoredSmoothedReadings() {
-        // LoadBgDataWorker stores every 1-minute reading as smoothed at the last data load (the graph shows
-        // them). When they hold exactly the readings of this status, the fit and the sliding delta read them
-        // and do not smooth again: the stored values are all 500, while the active smoothing plugin would
-        // make them 999 if it ran here.
-        val calculator = rawPathCalculator(constantSmoothing(999.0))
-        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(storedSmoothed(generateSlidingDeltaRawData(), 500.0))
-
-        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
-
-        assertThat(glucoseStatus.glucose).isWithin(0.001).of(500.0)
-        assertThat(glucoseStatus.delta).isWithin(0.001).of(0.0)
-    }
-
-    @Test fun rawPathSmoothsAgainWhenTheStoredReadingsAreBehind() {
-        // The stored values miss the newest reading (one data load behind), so they are not used: the window
-        // is smoothed here (identity), which gives the raw 120 and the raw sliding delta 20.
-        val calculator = rawPathCalculator(identitySmoothing())
-        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(storedSmoothed(generateSlidingDeltaRawData().drop(1), 500.0))
-
-        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
-
-        assertThat(glucoseStatus.glucose).isWithin(0.001).of(120.0)
-        assertThat(glucoseStatus.delta).isWithin(0.001).of(20.0)
-    }
-
-    @Test fun rawPathSmoothsAgainWhenAStoredReadingDiffers() {
-        // Same times, but one stored reading has another value (the reading changed after the data load), so
-        // the stored values are not these readings and the window is smoothed here.
-        val calculator = rawPathCalculator(identitySmoothing())
-        val stored = storedSmoothed(generateSlidingDeltaRawData(), 500.0).toMutableList()
-        stored[3] = stored[3].copy(value = 999.0)
-        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(stored)
-
-        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
-
-        assertThat(glucoseStatus.glucose).isWithin(0.001).of(120.0)
-        assertThat(glucoseStatus.delta).isWithin(0.001).of(20.0)
-    }
-
-    // The sliding-delta fixtures on the forced 1-minute path, with [smoothing] as the active smoothing plugin.
-    private fun rawPathCalculator(smoothing: Smoothing): GlucoseStatusCalculatorAutoIsf {
+    @Test fun aCurveThatMissesTheNewestReadingIsNotUsed() {
+        // LoadBgDataWorker publishes the readings and their curve together, so this should never happen.
+        // If it did, the curve would not belong to these readings: the status stays on the bucketed grid
+        // (glucose 200, delta 10), not on the curve (500, 0) nor the readings (120, 20).
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(smoothing)
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
-        whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSlidingDeltaRawData())
-        return calculator
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateSlidingDeltaRawData().drop(1), smoothed = 500.0))
+
+        val glucoseStatus = calculator.getGlucoseStatusData(false)!!
+
+        assertThat(glucoseStatus.glucose).isWithin(0.001).of(200.0)
+        assertThat(glucoseStatus.delta).isWithin(0.001).of(10.0)
     }
 
-    private fun constantSmoothing(value: Double): Smoothing = object : Smoothing {
-        override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> {
-            data.forEach { it.smoothed = value }
-            return data
-        }
-    }
-
-    // What LoadBgDataWorker would store for these readings if every smoothed value came out as [smoothed].
-    private fun storedSmoothed(readings: List<GV>, smoothed: Double): List<InMemoryGlucoseValue> =
+    // The one smoothed curve LoadBgDataWorker stores for these readings: their values as they are
+    // (smoothing that changes nothing), or every one smoothed to [smoothed].
+    private fun curveOf(readings: List<GV>, smoothed: Double? = null): List<InMemoryGlucoseValue> =
         readings.map { InMemoryGlucoseValue(timestamp = it.timestamp, value = it.value, trendArrow = it.trendArrow, smoothed = smoothed, sourceSensor = it.sourceSensor) }
 
     @Test fun rawPathJudgesStalenessByNewestRawReading() {
@@ -349,14 +295,13 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         whenever(dateUtil.now()).thenReturn(1514766900000L + T.secs(150).msecs())
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(30).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)).thenReturn(true)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateSlidingDeltaBucketedData().drop(1).toMutableList())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateSlidingDeltaRawData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateSlidingDeltaRawData()))
 
         val glucoseStatus = calculator.getGlucoseStatusData(false)
 
@@ -381,13 +326,12 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
     @Test fun recentCalibrationShouldReturnNoFit() {
         val calculator = GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator)
         calculator.preferences = preferences
-        calculator.activePlugin = activePlugin
-        whenever(activePlugin.activeSmoothing).thenReturn(identitySmoothing())
         whenever(preferences.get(IntKey.FslCalibrationDuration)).thenReturn(20)
         whenever(preferences.get(LongKey.FslCalibrationStart)).thenReturn(1514766900000L - T.mins(10).msecs())
         whenever(preferences.get(BooleanKey.FslCalibrationEnd)).thenReturn(false)
         whenever(autosensDataStore.getBucketedDataTableCopy()).thenReturn(generateDummyBgData())
         whenever(autosensDataStore.getBgReadingsDataTableCopy()).thenReturn(generateValidLibreData())
+        whenever(autosensDataStore.getSmoothedReadingsCopy()).thenReturn(curveOf(generateValidLibreData()))
         val glucoseStatus = calculator.getGlucoseStatusData(false)!!
         assertThat(glucoseStatus.corrSqu).isWithin(0.001).of(0.0) // parabola fit quality
         assertThat(calculator.lastFitProblem).contains("calibration in progress")
@@ -600,10 +544,6 @@ class GlucoseStatusTestAutoIsf : TestBaseWithProfile() {
         origData.add(GV(value = 124.0, timestamp = 1514766060000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
         origData.add(GV(value = 123.0, timestamp = 1514766000000, raw = 0.0, noise = 0.0, trendArrow = TrendArrow.FLAT, sourceSensor = SourceSensor.SYAI_TAG))
         return origData
-    }
-
-    private fun identitySmoothing(): Smoothing = object : Smoothing {
-        override fun smooth(data: MutableList<InMemoryGlucoseValue>): MutableList<InMemoryGlucoseValue> = data
     }
 
     // 5-minute-spaced bucketed data: delta/5min = (200-190)/5*5 = 10.0.

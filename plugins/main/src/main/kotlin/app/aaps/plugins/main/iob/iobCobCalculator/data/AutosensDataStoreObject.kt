@@ -57,8 +57,9 @@ class AutosensDataStoreObject : AutosensDataStore {
                 it.bgReadings = this.bgReadings.toMutableList()
                 it.autosensDataTable = LongSparseArray<AutosensData>(this.autosensDataTable.size).apply { putAll(this@AutosensDataStoreObject.autosensDataTable) }
                 it.bucketedData = this.bucketedData?.toMutableList()
-                // Workers swap iobCobCalculator.ads for this clone, so the 1-minute values must come along,
-                // or the graph and the AutoISF fit would lose them until the next data load.
+                // Workers swap iobCobCalculator.ads for this clone, so the 1-minute curve must come along:
+                // the graph and AutoISF read it, and the next data load keeps its older values instead of
+                // smoothing them again.
                 it.smoothedReadings = this.smoothedReadings?.toList()
                 // referenceTime is deliberately not carried over. Workers reassign iobCobCalculator.ads
                 // to this clone every cycle, so the grid in createBucketedDataRecalculated() re-anchors
