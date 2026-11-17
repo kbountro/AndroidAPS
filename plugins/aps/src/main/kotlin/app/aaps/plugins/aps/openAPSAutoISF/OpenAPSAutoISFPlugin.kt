@@ -24,7 +24,7 @@ import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.APS
 import app.aaps.core.interfaces.aps.APSResult
-import app.aaps.core.interfaces.aps.ActivityRestrictionHistory
+import app.aaps.core.interfaces.aps.ActivityMultiplierHistory
 import app.aaps.core.interfaces.aps.AutosensResult
 import app.aaps.core.interfaces.aps.CurrentTemp
 import app.aaps.core.interfaces.aps.DuraIsfStart
@@ -138,7 +138,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
 ), APS, PluginConstraints {
 
     @Inject lateinit var automationStateService: AutomationStateInterface
-    @Inject lateinit var activityRestrictionHistory: ActivityRestrictionHistory
+    @Inject lateinit var activityMultiplierHistory: ActivityMultiplierHistory
 
     // last values
     override var lastAPSRun: Long = 0
@@ -553,14 +553,16 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
             aapsLogger.debug(LTag.APS, "Result: $it")
             rxBus.send(EventAPSCalculationFinished())
         }
-        // The basal the activity monitor withholds is dropped instead of counted as missing (ActivityRestrictionHistory):
-        // record the fraction of the profile basal determine_basal treated as neutral because of it - the activity
-        // ratio while steps restrict the basal, unless a high or low temp target sets the ratio instead.
+        // Record the multiplier the activity monitor put on the profile basal rate (ActivityMultiplierHistory), so that
+        // the insulin engine keeps counting this time's basal against the profile basal the loop knew: the activity
+        // ratio whenever determine_basal applied it, for activity or inactivity, unless a high or low temp target set
+        // the ratio instead.
         val ttTarget = (oapsProfile.min_bg + oapsProfile.max_bg) / 2
         val tempTargetSetsRatio = oapsProfile.temptargetSet &&
             (((oapsProfile.exercise_mode || oapsProfile.high_temptarget_raises_sensitivity) && ttTarget > normalTarget) ||
                 (oapsProfile.low_temptarget_lowers_sensitivity && ttTarget < normalTarget))
-        activityRestrictionHistory.record(now, if (stepActivityDetected && !tempTargetSetsRatio) activityRatio else 1.0)
+        val activityApplied = (stepActivityDetected || stepInactivityDetected) && !tempTargetSetsRatio
+        activityMultiplierHistory.record(now, if (activityApplied) activityRatio else 1.0)
         autoIsfValues.timestamp = now
         //aapsLogger.debug(LTag.APS, "autoIsfValues to write contains: $autoIsfValues")
         disposable += persistenceLayer.insertOrUpdateAutoIsfValues(autoIsfValues).subscribe()

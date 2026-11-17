@@ -2,7 +2,7 @@ package app.aaps.plugins.aps.openAPSAutoISF
 
 import app.aaps.core.data.aps.SMBDefaults
 import app.aaps.core.data.configuration.Constants
-import app.aaps.core.interfaces.aps.ActivityRestrictionHistory
+import app.aaps.core.interfaces.aps.ActivityMultiplierHistory
 import app.aaps.core.interfaces.aps.GlucoseStatusAutoIsf
 import app.aaps.core.interfaces.aps.OapsProfileAutoIsf
 import app.aaps.core.interfaces.automation.AutomationStateInterface
@@ -33,7 +33,7 @@ class OpenAPSAutoISFPluginTest : TestBaseWithProfile() {
     @Mock lateinit var profiler: Profiler
     @Mock lateinit var uiInteraction: UiInteraction
     @Mock lateinit var automationStateService: AutomationStateInterface
-    @Mock lateinit var activityRestrictionHistory: ActivityRestrictionHistory
+    @Mock lateinit var activityMultiplierHistory: ActivityMultiplierHistory
     private lateinit var openAPSAutoISFPlugin: OpenAPSAutoISFPlugin
 
     @BeforeEach fun prepare() {
@@ -44,7 +44,7 @@ class OpenAPSAutoISFPluginTest : TestBaseWithProfile() {
             GlucoseStatusCalculatorAutoIsf(aapsLogger, iobCobCalculator, dateUtil, deltaCalculator), apsResultProvider
         )
         openAPSAutoISFPlugin.automationStateService = automationStateService
-        openAPSAutoISFPlugin.activityRestrictionHistory = activityRestrictionHistory
+        openAPSAutoISFPlugin.activityMultiplierHistory = activityMultiplierHistory
     }
 
     @Test

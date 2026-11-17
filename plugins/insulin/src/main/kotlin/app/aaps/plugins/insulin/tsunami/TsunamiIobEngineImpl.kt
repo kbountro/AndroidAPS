@@ -4,7 +4,7 @@ import app.aaps.core.data.model.BS
 import app.aaps.core.data.model.EB
 import app.aaps.core.data.model.TB
 import app.aaps.core.data.model.TE
-import app.aaps.core.interfaces.aps.ActivityRestrictionHistory
+import app.aaps.core.interfaces.aps.ActivityMultiplierHistory
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.insulin.Insulin
@@ -59,7 +59,7 @@ class TsunamiIobEngineImpl @Inject constructor(
     private val profileFunction: ProfileFunction,
     private val dateUtil: DateUtil,
     private val activePlugin: ActivePlugin,
-    private val activityRestrictionHistory: ActivityRestrictionHistory,
+    private val activityMultiplierHistory: ActivityMultiplierHistory,
     rxBus: RxBus
 ) : TsunamiIobEngine {
 
@@ -682,24 +682,17 @@ class TsunamiIobEngineImpl @Inject constructor(
                         }
                     }
 
+                    // 4. The profile basal the loop knew (ActivityMultiplierHistory): in a past minute in which
+                    // AutoISF's activity monitor had it multiply the profile basal rate (below 1 for activity, above
+                    // 1 for inactivity), that product is the minute's profile basal, now and later. It is the profile
+                    // baseline, and the autosens-adjusted baseline too, since the activity multiplier replaced the
+                    // autosens ratio then; the delivered basal counts against it whatever the loop chose to deliver.
+                    // The future minutes of the IOB arrays and of the zero-temp projection keep the profile rate.
+                    val activityMultiplier = if (bTime < currentNow) activityMultiplierHistory.multiplierAt(bTime) else 1.0
+                    val basalRate = profileRate * activityMultiplier
                     val absAmt = absoluteRate * (durationMins / 60.0)
-                    var profAmt = profileRate * (durationMins / 60.0)
-                    var autoProfAmt = (profileRate * sensitivityRatio) * (durationMins / 60.0)
-
-                    // 4. Drop the basal the activity monitor withheld (ActivityRestrictionHistory): in a past minute
-                    // in which it had the loop treat a fraction of the profile basal as neutral, each baseline comes
-                    // down to that fraction, but never below the basal actually delivered. So the basal it withheld
-                    // is not counted as missing, during the activity or after it; what a lower temp (a zero temp for
-                    // a low) withheld beyond that still is; and a loop that delivered the profile basal anyway (open
-                    // loop) loses nothing. The future minutes of the IOB arrays and of the zero-temp projection keep
-                    // the profile baseline.
-                    val activityRatio = if (bTime < currentNow) activityRestrictionHistory.ratioAt(bTime) else 1.0
-                    if (activityRatio < 1.0) {
-                        val delivered = if (isFakingTemps) absAmt + extBolusChunk else absAmt
-                        val floor = max(delivered, profileRate * activityRatio * (durationMins / 60.0))
-                        profAmt = min(profAmt, floor)
-                        autoProfAmt = min(autoProfAmt, floor)
-                    }
+                    val profAmt = basalRate * (durationMins / 60.0)
+                    val autoProfAmt = (if (activityMultiplier != 1.0) basalRate else profileRate * sensitivityRatio) * (durationMins / 60.0)
 
                     val dose = getOrCreate(nextTime)
 
@@ -744,11 +737,14 @@ class TsunamiIobEngineImpl @Inject constructor(
      *  - [DELIVERED]: all insulin actually delivered - boluses, SMBs, extended boluses and basal
      *    (profile rate, temp basals, zero temps and temps faked by extended boluses alike) - so an
      *    SMB cascade jams and a basal rate slows the doses given on top of it.
-     *  - [PROFILE]: the theoretical profile baseline, the profile basal alone, by the same rule.
+     *  - [PROFILE]: the theoretical profile baseline, the profile basal alone, by the same rule -
+     *    in the past minutes in which AutoISF's activity monitor multiplied it, the profile basal
+     *    the loop knew then (buildDoseEventTimeline, step 4).
      *    autoProfileBasal (which scales with sensitivityRatio) moves at the profile basal's rate and
      *    must never feed back into it, or the "ground truth" profile curve would shift with autosens
-     *    instead of reflecting only the programmed rate. With no temp basal and no other insulin on
-     *    board the delivered and profile basal evolve identically and net basal IOB stays zero.
+     *    instead of reflecting only the programmed rate. With no temp basal, no other insulin on
+     *    board and no activity multiplier the delivered and profile basal evolve identically and net
+     *    basal IOB stays zero.
      *    The loop's IOB, bolus + extended bolus + net basal (TsunamiAwareIobCobCalculator), is then
      *    the total on board of all [DELIVERED] insulin minus this profile baseline. At m > 0 boluses,
      *    SMBs and extended boluses slow the delivered basal's shared branch; the basal they hold back
