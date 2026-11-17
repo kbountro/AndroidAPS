@@ -4,6 +4,7 @@ import app.aaps.core.data.model.BS
 import app.aaps.core.data.model.EB
 import app.aaps.core.data.model.TB
 import app.aaps.core.data.model.TE
+import app.aaps.core.interfaces.aps.ActivityRestrictionHistory
 import app.aaps.core.interfaces.aps.IobTotal
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.insulin.Insulin
@@ -58,6 +59,7 @@ class TsunamiIobEngineImpl @Inject constructor(
     private val profileFunction: ProfileFunction,
     private val dateUtil: DateUtil,
     private val activePlugin: ActivePlugin,
+    private val activityRestrictionHistory: ActivityRestrictionHistory,
     rxBus: RxBus
 ) : TsunamiIobEngine {
 
@@ -681,12 +683,27 @@ class TsunamiIobEngineImpl @Inject constructor(
                     }
 
                     val absAmt = absoluteRate * (durationMins / 60.0)
-                    val profAmt = profileRate * (durationMins / 60.0)
-                    val autoProfAmt = (profileRate * sensitivityRatio) * (durationMins / 60.0)
+                    var profAmt = profileRate * (durationMins / 60.0)
+                    var autoProfAmt = (profileRate * sensitivityRatio) * (durationMins / 60.0)
+
+                    // 4. Drop the basal the activity monitor withheld (ActivityRestrictionHistory): in a past minute
+                    // in which it had the loop treat a fraction of the profile basal as neutral, each baseline comes
+                    // down to that fraction, but never below the basal actually delivered. So the basal it withheld
+                    // is not counted as missing, during the activity or after it; what a lower temp (a zero temp for
+                    // a low) withheld beyond that still is; and a loop that delivered the profile basal anyway (open
+                    // loop) loses nothing. The future minutes of the IOB arrays and of the zero-temp projection keep
+                    // the profile baseline.
+                    val activityRatio = if (bTime < currentNow) activityRestrictionHistory.ratioAt(bTime) else 1.0
+                    if (activityRatio < 1.0) {
+                        val delivered = if (isFakingTemps) absAmt + extBolusChunk else absAmt
+                        val floor = max(delivered, profileRate * activityRatio * (durationMins / 60.0))
+                        profAmt = min(profAmt, floor)
+                        autoProfAmt = min(autoProfAmt, floor)
+                    }
 
                     val dose = getOrCreate(nextTime)
 
-                    // 4. Map Faked Temps correctly without double-counting
+                    // 5. Map Faked Temps correctly without double-counting
                     if (isFakingTemps) {
                         dose.basalAbsAmt += absAmt + extBolusChunk
                         dose.extBolusAmt += 0.0

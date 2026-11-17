@@ -265,6 +265,29 @@ divided differences, and the series are evaluated by Horner's rule with no divis
 the lag costs about as much as one without. At 0 there is no fourth stage and every result is
 exactly as before.
 
+## Basal withheld by the activity monitor
+
+AutoISF's activity monitor lowers the basal while it counts steps: the loop treats a fraction of the
+profile basal (the activity ratio, e.g. 0.7) as neutral and sets temp basals around it. The engine
+counts basal against the profile, so the basal it withholds used to show as missing, negative basal
+IOB, and to stay owed for hours after the activity: an hour at 0.7 on a 1 U/h profile left -0.30 U of
+basal IOB at its end and -0.12 U two hours later, which the loop then made up for.
+
+Each AutoISF run now records the ratio it applied (`ActivityRestrictionHistory`, kept in the
+preferences for two days; the activity ratio while steps restrict the basal, unless a high or low temp
+target sets the ratio instead). For every past minute in which it applied, the engine lowers the
+profile baseline, and the autosens-adjusted one, to that fraction of the profile basal, but never
+below the basal actually delivered:
+
+    baseline = min(baseline, max(delivered basal, ratio * profile basal))
+
+So the withheld basal is dropped: the hour above leaves 0 U, during and after it. What a lower temp
+withheld beyond the activity target still counts (a 20-minute zero temp inside that hour leaves
+-0.24 U, against -0.53 U before); a loop that delivered the profile basal anyway (open loop) changes
+nothing; and if the loop stops, the restriction lapses with its last 30-minute temp. The future minutes
+of the IOB arrays and of the zero-temp projection keep the profile baseline. This acts in the Traffic
+Jam engine only; the stock calculator used by the other insulin models is unchanged.
+
 ## Real multi-dose behavior
 
 ![Real 12-dose cascade replay: Pool Compartment vs TsunamiMods vs conventional Tsunami](traffic_jam_cascade.svg)
