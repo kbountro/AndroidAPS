@@ -61,7 +61,8 @@ fun EB.iobCalc(time: Long, profile: Profile, insulinInterface: Insulin): IobTota
                 val tempBolusPart = BS(
                     timestamp = calcDate,
                     amount = tempBolusSize,
-                    type = BS.Type.NORMAL
+                    type = BS.Type.NORMAL,
+                    isBasalInsulin = true // delivered over time, never as a bolus (no micro-dose pulses in the Traffic Jam model)
                 )
                 val aIOB = insulinInterface.iobCalcForTreatment(tempBolusPart, time, dia)
                 result.iob += aIOB.iobContrib
@@ -111,7 +112,8 @@ fun EB.iobCalc(
                 val tempBolusPart = BS(
                     timestamp = calcDate,
                     amount = tempBolusSize,
-                    type = BS.Type.NORMAL
+                    type = BS.Type.NORMAL,
+                    isBasalInsulin = true // delivered over time, never as a bolus (no micro-dose pulses in the Traffic Jam model)
                 )
                 val aIOB = insulinInterface.iobCalcForTreatment(tempBolusPart, time, dia)
                 result.iob += aIOB.iobContrib

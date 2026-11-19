@@ -92,4 +92,10 @@ enum class DoubleKey(
     // 0 (default): no lag stage, exactly as before.
     InsulinTrafficJamCgmLag("insulin_traffic_jam_cgm_lag", 0.0, 0.0, 30.0, hideParentScreenIfHidden = true),
 
+    // Traffic Jam micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, shown only when it is on): the pump's pulse, U,
+    // and its bolus speed, U/min. Default 0.05 U at 1.5 U/min, one pulse every 2 s: 1.5 U/min is the standard bolus
+    // speed of the EPAR's pump study (MiniMed 640G). AAPS's Medtrum driver expects 1 U/min.
+    InsulinTrafficJamPulseSize("insulin_traffic_jam_pulse_size", 0.05, 0.01, 1.0, dependency = BooleanKey.InsulinTrafficJamMicroDoses),
+    InsulinTrafficJamBolusSpeed("insulin_traffic_jam_bolus_speed", 1.5, 0.1, 10.0, dependency = BooleanKey.InsulinTrafficJamMicroDoses),
+
 }

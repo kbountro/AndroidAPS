@@ -17,6 +17,7 @@ import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventNewHistoryData
 import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.utils.DateUtil
+import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.convertedToAbsolute
@@ -301,7 +302,17 @@ class TsunamiIobEngineImpl @Inject constructor(
         val pumpInterface = activePlugin.activePump
         val isFakingTemps = pumpInterface.isFakingTempsByExtendedBoluses
 
-        val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, records, isFakingTemps, assumeZeroTempAfter, now)
+        // Micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, see [BolusPulses]): every bolus and SMB as the pump gives
+        // it, in pulses of the pulse size at the bolus speed, a minute of pulses at a time; off (default), each enters
+        // whole at its timestamp. Basal, temp basals and extended boluses stay one dose a minute either way.
+        val pulses = if (preferences.get(BooleanKey.InsulinTrafficJamMicroDoses))
+            BolusPulses(
+                preferences.get(DoubleKey.InsulinTrafficJamPulseSize).coerceIn(0.01, 1.0),
+                preferences.get(DoubleKey.InsulinTrafficJamBolusSpeed).coerceIn(0.1, 10.0)
+            )
+        else null
+
+        val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, records, isFakingTemps, assumeZeroTempAfter, now, pulses)
 
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
@@ -364,15 +375,17 @@ class TsunamiIobEngineImpl @Inject constructor(
         // in each category ([IndividualRun]). A basal rate is one dose every minute, so a stretch at one
         // rate is a single run, summed in a few steps ([PdModel.runState]) instead of dose by dose. A
         // profile-basal dose also carries its autoProfileBasal twin, which moves at the profile basal's
-        // rate and so is the same curve scaled by [IndividualRun.autoScale].
+        // rate and so is the same curve scaled by [IndividualRun.autoScale]. With micro-doses, a minute of a
+        // bolus's pulses is [scale] lone doses of the pulse size, and a long bolus's full minutes, a minute
+        // apart, one run.
         val individualRuns = ArrayList<IndividualRun>()
         val openRuns = arrayOfNulls<IndividualRun>(Category.entries.size)
         val curvesByAmount = HashMap<Double, PdModel.IsolatedCurve>()
-        fun addIndividual(timestamp: Long, cat: Category, amount: Double, autoScale: Double = 0.0) {
+        fun addIndividual(timestamp: Long, cat: Category, amount: Double, autoScale: Double = 0.0, scale: Double = 1.0) {
             val curve = curvesByAmount.getOrPut(amount) { PdModel.isolatedCurve(amount, speedFactor, kc) }
             val open = openRuns[cat.ordinal]
-            if (open != null && open.curve === curve && open.autoScale == autoScale && open.last + 60000L == timestamp) open.count++
-            else IndividualRun(cat, curve, autoScale, timestamp).also { individualRuns.add(it); openRuns[cat.ordinal] = it }
+            if (open != null && open.curve === curve && open.autoScale == autoScale && open.scale == scale && open.last + 60000L == timestamp) open.count++
+            else IndividualRun(cat, curve, autoScale, timestamp, scale).also { individualRuns.add(it); openRuns[cat.ordinal] = it }
         }
         val runState = DoubleArray(4)
         // Runs of whole-minute doses are all requestedTime's offset past the whole minute old; if requests
@@ -438,8 +451,8 @@ class TsunamiIobEngineImpl @Inject constructor(
                 val indAct = DoubleArray(Category.entries.size)
                 for (run in individualRuns) {
                     PdModel.runState(run.curve, tTarget - run.first, run.count, shiftWholeMinuteRuns && run.first % 60_000L == 0L, runState)
-                    val runIob = runState[0] + runState[1] + runState[2] + runState[3]
-                    val runAct = if (kc > 0.0) kc * runState[3] else ke * runState[2]
+                    val runIob = run.scale * (runState[0] + runState[1] + runState[2] + runState[3])
+                    val runAct = run.scale * (if (kc > 0.0) kc * runState[3] else ke * runState[2])
                     indIob[run.cat.ordinal] += runIob
                     indAct[run.cat.ordinal] += runAct
                     if (run.autoScale > 0.0) {
@@ -451,6 +464,19 @@ class TsunamiIobEngineImpl @Inject constructor(
                     iob[i] = mixing * iob[i] + (1.0 - mixing) * indIob[i]
                     act[i] = mixing * act[i] + (1.0 - mixing) * indAct[i]
                 }
+            }
+
+            // With micro-doses, the pulses of a bolus that are still to come at tTarget (in the chunks after it) are on
+            // board but not yet active: the bolus counts whole from its timestamp, as without micro-doses and in the stock
+            // calculators. Some drivers record a bolus as it starts (Medtrum's, with its full amount), so a loop run
+            // during a long bolus would otherwise miss the part not yet given.
+            if (pulses != null) {
+                var notGivenYet = 0.0
+                for (idx in 0 until bolusValidIdx) {
+                    val b = sortedBoluses[idx]
+                    if (b.amount > 0.0) notGivenYet += pulses.notGivenYet(b.amount, tTarget - b.timestamp)
+                }
+                iob[Category.BOLUS.ordinal] += notGivenYet
             }
 
             val bolus = Category.BOLUS.ordinal
@@ -497,9 +523,17 @@ class TsunamiIobEngineImpl @Inject constructor(
                 if (dose.autoProfileBasalAmt > 0.0) site.pools[Category.AUTO_PROFILE_BASAL.ordinal].D += dose.autoProfileBasalAmt
             }
 
-            // Individual branches, below m = 1.
+            // Individual branches, below m = 1. With micro-doses, a chunk's are its lone pulses: that many doses of the
+            // pulse size, and the smaller last pulse.
             if (mixing < 1.0) {
-                if (dose.bolusAmt > 0.0) addIndividual(dose.timestamp, Category.BOLUS, dose.bolusAmt)
+                if (dose.bolusAmt > 0.0) {
+                    val chunks = dose.bolusChunks
+                    if (chunks == null || pulses == null) addIndividual(dose.timestamp, Category.BOLUS, dose.bolusAmt)
+                    else for (chunk in chunks) {
+                        if (chunk.pulses > 0) addIndividual(dose.timestamp, Category.BOLUS, pulses.pulseSize, scale = chunk.pulses.toDouble())
+                        if (chunk.extra > 0.0) addIndividual(dose.timestamp, Category.BOLUS, chunk.extra)
+                    }
+                }
                 if (dose.extBolusAmt > 0.0) addIndividual(dose.timestamp, Category.EXT_BOLUS, dose.extBolusAmt)
                 if (dose.basalAbsAmt > 0.0) addIndividual(dose.timestamp, Category.BASAL_ABS, dose.basalAbsAmt)
                 // autoProfileBasal is the profile basal scaled by sensitivityRatio, so it comes with it.
@@ -589,7 +623,8 @@ class TsunamiIobEngineImpl @Inject constructor(
         records: Records,
         isFakingTemps: Boolean,
         assumeZeroTempAfter: Long,
-        currentNow: Long
+        currentNow: Long,
+        pulses: BolusPulses?
     ): List<DoseEvent> {
 
         val capacity = ((toTime - fromTime) / 60000L).toInt() + 10
@@ -606,7 +641,16 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         for (b in boluses) {
             if (b.isValid && b.timestamp in fromTime..toTime) {
-                getOrCreate(b.timestamp).bolusAmt += b.amount
+                if (pulses == null) getOrCreate(b.timestamp).bolusAmt += b.amount
+                else for (chunk in pulses.chunks(b.amount)) {
+                    // A minute of pulses at a time, at their average time ([BolusPulses]); the chunks after toTime are
+                    // after the requested time, and count as not given yet there (evaluatePools).
+                    val time = b.timestamp + chunk.offsetMs
+                    if (time > toTime) break
+                    val dose = getOrCreate(time)
+                    dose.bolusAmt += chunk.amount
+                    (dose.bolusChunks ?: ArrayList<BolusPulses.Chunk>(1).also { dose.bolusChunks = it }).add(chunk)
+                }
             }
         }
 
@@ -750,6 +794,14 @@ class TsunamiIobEngineImpl @Inject constructor(
      *    SMBs and extended boluses slow the delivered basal's shared branch; the basal they hold back
      *    in the depot (and its lower activity) is part of that total, and shows under net basal IOB
      *    even with no temp running.
+     *
+     * With micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, off by default), a bolus or SMB is not one
+     * dose but the pump's pulses ([BolusPulses]), taken a minute at a time: each minute's pulses enter the
+     * shared branch together, and each pulse's individual branch absorbs as a lone dose of the pulse size.
+     * At m = 1 a bolus then enters over its delivery time and otherwise absorbs as before. Below 1 the
+     * individual share of every bolus absorbs as fast as a lone pulse, whatever the bolus's size, so a lone
+     * bolus no longer follows the fitted curve at every m: at 0 it is the sum of its pulses' isolated curves.
+     * Basal, temp basals and extended boluses stay one dose a minute.
      */
     private enum class CrowdingGroup { DELIVERED, PROFILE }
 
@@ -791,11 +843,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     /**
      * [count] doses' individual branches in [cat], at a dose interaction below 1: doses of the same amount
-     * ([curve], see [PdModel.IsolatedCurve]) a minute apart, from [first] on. For profile basal, [autoScale]
-     * is the matching autoProfileBasal amount over the profile amount (its twin moves at the profile basal's
-     * rate, so its curve is the same scaled), otherwise 0.
+     * ([curve], see [PdModel.IsolatedCurve]) a minute apart, from [first] on, each [scale] times over (with
+     * micro-doses, a minute of a bolus's pulses; otherwise 1). For profile basal, [autoScale] is the matching
+     * autoProfileBasal amount over the profile amount (its twin moves at the profile basal's rate, so its
+     * curve is the same scaled), otherwise 0.
      */
-    private class IndividualRun(val cat: Category, val curve: PdModel.IsolatedCurve, val autoScale: Double, val first: Long) {
+    private class IndividualRun(val cat: Category, val curve: PdModel.IsolatedCurve, val autoScale: Double, val first: Long, val scale: Double = 1.0) {
 
         var count = 1
         val last: Long get() = first + (count - 1) * 60000L
@@ -804,6 +857,8 @@ class TsunamiIobEngineImpl @Inject constructor(
     private data class DoseEvent(
         val timestamp: Long,
         var bolusAmt: Double = 0.0,
+        /** With micro-doses, the bolus chunks [bolusAmt] is made of ([BolusPulses]), for their individual branches. */
+        var bolusChunks: ArrayList<BolusPulses.Chunk>? = null,
         var extBolusAmt: Double = 0.0,
         var basalAbsAmt: Double = 0.0,
         var profileBasalAmt: Double = 0.0,

@@ -41,6 +41,7 @@ import app.aaps.core.interfaces.utils.DecimalFormatter
 import app.aaps.core.interfaces.utils.MidnightTime
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.interfaces.workflow.CalculationWorkflow
+import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.IntNonKey
@@ -145,6 +146,9 @@ class IobCobCalculatorPlugin @Inject constructor(
                                event.isChanged(DoubleKey.InsulinTrafficJamSpeedMultiplier.key) ||
                                event.isChanged(DoubleKey.InsulinTrafficJamMixing.key) ||
                                event.isChanged(DoubleKey.InsulinTrafficJamCgmLag.key) ||
+                               event.isChanged(BooleanKey.InsulinTrafficJamMicroDoses.key) ||
+                               event.isChanged(DoubleKey.InsulinTrafficJamPulseSize.key) ||
+                               event.isChanged(DoubleKey.InsulinTrafficJamBolusSpeed.key) ||
                                event.isChanged(DoubleKey.ApsAmaBolusSnoozeDivisor.key)
                            ) {
                                resetDataAndRunCalculation("onEventPreferenceChange", event)

@@ -132,7 +132,7 @@ and the real data.
 
 ## Per-patient absorption speed
 
-A preference (Insulin settings → Absorption Speed and Dose Interaction → Absorption Speed,
+A preference (Insulin settings → Absorption Speed, Dose Interaction, CGM Lag and Micro-doses → Absorption Speed,
 `DoubleKey.InsulinTrafficJamSpeedMultiplier`, range 0.2-5.0, default 1.0) multiplies every
 stage's rate alike: the shared depot/transit rate and the active stage's rate. 2.0 makes insulin
 go through every stage twice as fast as standard, 0.5 half as fast, so the whole curve is
@@ -149,7 +149,7 @@ described above with no knob present at all.
 
 ## Dose interaction
 
-A second preference (Insulin settings → Absorption Speed and Dose Interaction → Dose Interaction,
+A second preference (Insulin settings → Absorption Speed, Dose Interaction, CGM Lag and Micro-doses → Dose Interaction,
 `DoubleKey.InsulinTrafficJamMixing`, range 0-1, default 1.0) sets the share of every dose that
 absorbs together with all insulin at the injection site. Every delivery is one dose: each bolus or
 SMB, and each minute's delivered basal (profile rate, temp basals, zero temps and temps faked by
@@ -242,7 +242,7 @@ smoothing adds more. AAPS compares the CGM's rate of change with the insulin's e
 counted before the CGM can show it. That reads as a rise unexplained by insulin, which invites the
 next SMB. The tail of each dose shows the opposite error.
 
-A preference (Insulin settings → Absorption Speed, Dose Interaction and CGM Lag → CGM Lag,
+A preference (Insulin settings → Absorption Speed, Dose Interaction, CGM Lag and Micro-doses → CGM Lag,
 `DoubleKey.InsulinTrafficJamCgmLag`, range 0-30 minutes, default 0) adds a fourth first-order stage C
 after the active one, at the fixed rate kc = 1/lag:
 
@@ -264,6 +264,42 @@ relative over the test's cases, those coincidences included. The stages share ex
 divided differences, and the series are evaluated by Horner's rule with no division, so a step with
 the lag costs about as much as one without. At 0 there is no fourth stage and every result is
 exactly as before.
+
+## Micro-doses
+
+A pump doesn't give a bolus all at once. It gives it in small pulses at its bolus speed: at 1.5 U/min,
+a 0.05 U pulse every 2 seconds. A preference (Insulin settings → Absorption Speed, Dose Interaction, CGM
+Lag and Micro-doses → Micro-doses, `BooleanKey.InsulinTrafficJamMicroDoses`, default off) has the
+engine model every bolus and SMB that way, with two more settings shown while it is on: the pulse size
+(`DoubleKey.InsulinTrafficJamPulseSize`, 0.01-1 U, default 0.05) and the bolus speed
+(`DoubleKey.InsulinTrafficJamBolusSpeed`, 0.1-10 U/min, default 1.5, the standard bolus speed in the
+EPAR's pump study; AAPS's Medtrum driver expects 1 U/min). Basal, temp basals and extended boluses stay
+one dose a minute. Off, every bolus enters whole at its timestamp and every result is exactly as before.
+
+Each pulse is a dose of its own, split by the dose interaction like any other. Its shared branch joins
+the pool, so at a dose interaction of 1 a bolus enters over its delivery time and otherwise absorbs as
+before. Its individual branch absorbs as a lone dose of the pulse size, so below 1 the individual share
+of every bolus absorbs as fast as a lone pulse, whatever the bolus's size. A lone 3U bolus at speed 1
+peaks at 89 minutes at a dose interaction of 1 and at 42 minutes at 0. A lone bolus therefore depends
+on the dose interaction, and turning micro-doses on changes the curves: the absorption speed and dose
+interaction chosen for whole boluses need choosing again.
+
+The engine takes each minute of pulses together, at the pulses' average time: they enter the shared
+pool at once, and their individual branches are that many copies of the pulse's isolated curve, summed
+like a basal run. An SMB of up to 1.5U is one such chunk (0.5U at 9 seconds), 6U four of them, at 29,
+89, 149 and 209 seconds. Every minute's pulses are given within it, so none moves by more than a minute,
+and a bolus costs about what it did as one dose. On two days of closed-loop history, one loop run's SMB
+IOB arrays take 31-35 ms with micro-doses on and 30-36 ms with them off (JVM on the cloud test machine,
+not a phone); treating every pulse as a bolus of its own takes about 55 ms. Over a month of closed-loop
+history, at speeds 0.85-1.41 and dose interactions 0.1-1 with an 8-minute CGM lag, the chunked activity
+stays within 0.003 U/h of the pulse-by-pulse one.
+
+A bolus still counts whole as insulin on board from its timestamp: the pulses still to come are on
+board but not yet active. Some pump drivers record a bolus as it starts (AAPS's Medtrum driver does, with
+the full amount), so a loop run during a long bolus still counts all of it. The bolus snooze and the SMB
+interval (`lastBolusTime`) use the bolus as recorded. The insulin plugin's own single-dose curve (its
+graph, and each treatment's IOB in the treatments list) gives a bolus the same pulses, at the dose
+interaction set, and matches the engine for a lone bolus to rounding.
 
 ## The activity monitor's multiplier on the profile basal
 

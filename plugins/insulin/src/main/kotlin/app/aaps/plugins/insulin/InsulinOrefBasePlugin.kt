@@ -17,8 +17,10 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
+import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.plugins.insulin.tsunami.BolusPulses
 import app.aaps.plugins.insulin.tsunami.CgmLagStage
 import javax.inject.Inject
 import kotlin.math.abs
@@ -212,11 +214,31 @@ abstract class InsulinOrefBasePlugin(
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
         // directly to every stage's rate, ke included). The dose interaction does not apply here: a
-        // dose alone is the same at every value. The CGM lag (DoubleKey.InsulinTrafficJamCgmLag, as in
-        // the engine: a stage C after the active one at 1/lag, reporting kc*C as the activity) does.
+        // dose alone is the same at every value, unless given in micro-doses (below). The CGM lag
+        // (DoubleKey.InsulinTrafficJamCgmLag, as in the engine: a stage C after the active one at 1/lag,
+        // reporting kc*C as the activity) does.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val lagMinutes = preferences.get(DoubleKey.InsulinTrafficJamCgmLag).coerceIn(0.0, 30.0)
         val kc = if (lagMinutes > 0.0) 1.0 / lagMinutes else 0.0
+
+        // Micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, as in the engine): the bolus in the pump's pulses
+        // ([BolusPulses]), the dose interaction's share of them absorbing as one pool, filled a minute of pulses at a
+        // time, and the rest as lone pulses, so a lone bolus then depends on the dose interaction. Never for the stock
+        // calculator's basal, temp basal and extended bolus parts (isBasalInsulin), which the engine gives one dose a
+        // minute either way.
+        if (!bolus.isBasalInsulin && preferences.get(BooleanKey.InsulinTrafficJamMicroDoses)) {
+            val pulses = BolusPulses(
+                preferences.get(DoubleKey.InsulinTrafficJamPulseSize).coerceIn(0.01, 1.0),
+                preferences.get(DoubleKey.InsulinTrafficJamBolusSpeed).coerceIn(0.1, 10.0)
+            )
+            val mixing = preferences.get(DoubleKey.InsulinTrafficJamMixing).coerceIn(0.0, 1.0)
+            val now = trafficJamPulsed(bolus.amount, pulses, mixing, speedFactor, kc, t)
+            val end = trafficJamPulsed(bolus.amount, pulses, mixing, speedFactor, kc, TRAFFIC_JAM_HORIZON_MINUTES)
+            result.activityContrib = now[1]
+            result.iobContrib = now[0] - end[0]
+            return result
+        }
+
         val grid = trafficJamGrid(bolus.amount, speedFactor, kc)
         val s = trafficJamState(grid, speedFactor, kc, t)
 
@@ -228,6 +250,110 @@ abstract class InsulinOrefBasePlugin(
         result.iobContrib = (s[0] + s[1] + s[2] + s[3]) - (h[0] + h[1] + h[2] + h[3])
 
         return result
+    }
+
+    /**
+     * IOB and activity of a bolus of [amount] given in [pulses], [t] minutes after its timestamp: [mixing] of it as one pool
+     * ([trafficJamPooledState]), the rest as lone pulses, each of the pulse size's isolated curve, and the pulses still to
+     * come on board but not yet active, as in the engine.
+     */
+    private fun trafficJamPulsed(amount: Double, pulses: BolusPulses, mixing: Double, speedFactor: Double, kc: Double, t: Double): DoubleArray {
+        val ke = speedFactor * TRAFFIC_JAM_KE
+        val chunks = pulses.chunks(amount)
+        var iob = 0.0
+        var activity = 0.0
+        if (mixing > 0.0) {
+            val s = trafficJamPooledState(amount, chunks, pulses, speedFactor, kc, t)
+            iob += mixing * (s[0] + s[1] + s[2] + s[3])
+            activity += mixing * (if (kc > 0.0) kc * s[3] else ke * s[2])
+        }
+        for (chunk in chunks) {
+            val age = t - chunk.offsetMs / 60_000.0
+            if (age < 0.0) {
+                iob += chunk.amount // not given yet
+                continue
+            }
+            if (mixing == 1.0) continue
+            if (chunk.pulses > 0) {
+                val s = trafficJamState(trafficJamGrid(pulses.pulseSize, speedFactor, kc), speedFactor, kc, age)
+                iob += (1.0 - mixing) * chunk.pulses * (s[0] + s[1] + s[2] + s[3])
+                activity += (1.0 - mixing) * chunk.pulses * (if (kc > 0.0) kc * s[3] else ke * s[2])
+            }
+            if (chunk.extra > 0.0) {
+                val s = trafficJamState(trafficJamGrid(chunk.extra, speedFactor, kc), speedFactor, kc, age)
+                iob += (1.0 - mixing) * (s[0] + s[1] + s[2] + s[3])
+                activity += (1.0 - mixing) * (if (kc > 0.0) kc * s[3] else ke * s[2])
+            }
+        }
+        return doubleArrayOf(iob, activity)
+    }
+
+    private data class TrafficJamPooledKey(val amount: Double, val speedFactor: Double, val kc: Double, val pulseSize: Double, val intervalMs: Long)
+
+    /** [trafficJamPooledState]'s tables, the 64 last used. */
+    private val trafficJamPooledGrids = object : LinkedHashMap<TrafficJamPooledKey, Array<DoubleArray>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<TrafficJamPooledKey, Array<DoubleArray>>?): Boolean = size > 64
+    }
+
+    /**
+     * (D, X, A, C) [t] minutes after its timestamp of a bolus of [amount] whose [chunks] of pulses all enter one pool, its
+     * rate re-evaluated from the pool's depot mass at every whole minute and every chunk, as the engine does with its
+     * events: tabulated at whole minutes once per bolus and setting, then the chunks after the last whole minute replayed.
+     */
+    private fun trafficJamPooledState(
+        amount: Double, chunks: List<BolusPulses.Chunk>, pulses: BolusPulses, speedFactor: Double, kc: Double, t: Double
+    ): DoubleArray {
+        val state = DoubleArray(4)
+        if (t < 0.0) return state
+        val table = synchronized(trafficJamPooledGrids) {
+            trafficJamPooledGrids.getOrPut(TrafficJamPooledKey(amount, speedFactor, kc, pulses.pulseSize, pulses.intervalMs)) {
+                val n = TRAFFIC_JAM_HORIZON_MINUTES.toInt() + 1
+                val grid = Array(4) { DoubleArray(n) }
+                var time = 0.0
+                var k = trafficJamRate(speedFactor, 0.0)
+                var next = 0
+                for (i in 0 until n) {
+                    while (next < chunks.size && chunks[next].offsetMs / 60_000.0 <= i) {
+                        val at = chunks[next].offsetMs / 60_000.0
+                        trafficJamStep(state, k, speedFactor, kc, at - time)
+                        time = at
+                        state[0] += chunks[next].amount
+                        k = trafficJamRate(speedFactor, state[0])
+                        next++
+                    }
+                    trafficJamStep(state, k, speedFactor, kc, i - time)
+                    time = i.toDouble()
+                    k = trafficJamRate(speedFactor, state[0])
+                    for (s in 0..3) grid[s][i] = state[s]
+                }
+                grid
+            }
+        }
+        val i = min(t.toInt(), table[0].size - 1)
+        for (s in 0..3) state[s] = table[s][i]
+        var time = i.toDouble()
+        var k = trafficJamRate(speedFactor, state[0])
+        for (chunk in chunks) {
+            val at = chunk.offsetMs / 60_000.0
+            if (at <= i || at > t) continue
+            trafficJamStep(state, k, speedFactor, kc, at - time)
+            time = at
+            state[0] += chunk.amount
+            k = trafficJamRate(speedFactor, state[0])
+        }
+        trafficJamStep(state, k, speedFactor, kc, t - time)
+        return state
+    }
+
+    /** [state] (D, X, A, C) propagated by [dt] minutes (under a minute) in place, depot and transit at [k]. */
+    private fun trafficJamStep(state: DoubleArray, k: Double, speedFactor: Double, kc: Double, dt: Double) {
+        if (dt <= 0.0) return
+        val ke = speedFactor * TRAFFIC_JAM_KE
+        if (kc > 0.0) CgmLagStage.propagate(state[0], state[1], state[2], state[3], k, ke, kc, dt, state)
+        else {
+            val (d, x, a) = trafficJamPropagate(state[0], state[1], state[2], k, ke, dt)
+            state[0] = d; state[1] = x; state[2] = a
+        }
     }
 
     // Must match TsunamiIobEngineImpl.PdModel - see its doc comment for the fit.
