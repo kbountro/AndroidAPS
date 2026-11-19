@@ -3,7 +3,9 @@ package app.aaps.plugins.automation.actions
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.db.PersistenceLayer
+import app.aaps.core.interfaces.logging.UserEntryLogger
 import app.aaps.core.interfaces.profile.ProfileSource
+import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.interfaces.smsCommunicator.SmsCommunicator
 import app.aaps.plugins.automation.triggers.Trigger
 import app.aaps.shared.tests.TestBaseWithProfile
@@ -20,6 +22,8 @@ ActionsTestBase : TestBaseWithProfile() {
     @Mock lateinit var smsCommunicator: SmsCommunicator
     @Mock lateinit var loop: Loop
     @Mock lateinit var persistenceLayer: PersistenceLayer
+    @Mock lateinit var sp: SP
+    @Mock lateinit var uel: UserEntryLogger
 
     init {
         addInjector {
@@ -56,6 +60,14 @@ ActionsTestBase : TestBaseWithProfile() {
             if (it is ActionSMBChange) {
                 it.dateUtil = dateUtil
                 it.preferences = preferences
+            }
+            if (it is ActionSetBrakeWeight) {
+                it.sp = sp
+                it.uel = uel
+            }
+            if (it is ActionSetPpWeight) {
+                it.sp = sp
+                it.uel = uel
             }
             if (it is ActionCarePortalEvent) {
                 it.persistenceLayer = persistenceLayer

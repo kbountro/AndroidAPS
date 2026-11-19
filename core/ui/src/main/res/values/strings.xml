@@ -498,6 +498,8 @@
     <string name="uel_autoisf_disabled">AUTOISF DISABLED</string>
     <string name="uel_iobth_set">IOBTH SET</string>
     <string name="uel_acce_weight_set">ACCE WeIGHT SET</string>
+    <string name="uel_brake_weight_set">BRAKE WEIGHT SET</string>
+    <string name="uel_pp_weight_set">PP WEIGHT SET</string>
 
     <!-- Alerts -->
     <string name="raise_notifications_as_android_notifications">Use system notifications for alerts and notifications</string>

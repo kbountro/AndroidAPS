@@ -84,4 +84,12 @@ enum class DoubleKey(
     // path, one pooled depot, as fitted. Not fitted (the EPAR data has single doses with no basal only).
     InsulinTrafficJamMixing("insulin_traffic_jam_mixing", 1.0, 0.0, 1.0, hideParentScreenIfHidden = true),
 
+    // Traffic Jam CGM lag, minutes (CgmLagStage in plugins/insulin): one more first-order stage after the
+    // active one, at rate 1/lag, so the reported activity is the insulin's effect as the CGM sees it - the
+    // fitted curve is the effect in the blood (EPAR clamp data), and interstitial glucose and the sensor's
+    // own processing trail the blood. Delays and smooths every dose's activity by about this much, and
+    // counts the effect still on its way to the CGM as insulin on board. Not scaled by the speed setting.
+    // 0 (default): no lag stage, exactly as before.
+    InsulinTrafficJamCgmLag("insulin_traffic_jam_cgm_lag", 0.0, 0.0, 30.0, hideParentScreenIfHidden = true),
+
 }

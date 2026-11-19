@@ -1,8 +1,10 @@
 package app.aaps.plugins.source
 
+import androidx.preference.PreferenceGroup
 import app.aaps.core.data.model.GV
 import app.aaps.core.data.model.SourceSensor
 import app.aaps.core.data.model.TrendArrow
+import app.aaps.core.keys.BooleanKey
 import app.aaps.shared.tests.TestBaseWithProfile
 import com.google.common.truth.Truth.assertThat
 import org.junit.jupiter.api.BeforeEach
@@ -20,6 +22,18 @@ class XdripSourcePluginTest : TestBaseWithProfile() {
 
     @Test fun advancedFilteringSupported() {
         assertThat(xdripSourcePlugin.advancedFilteringSupported()).isFalse()
+    }
+
+    @Test
+    fun preferenceScreenHasTheTrendSwitch() {
+        val screen = preferenceManager.createPreferenceScreen(context)
+        xdripSourcePlugin.addPreferenceScreen(preferenceManager, screen, context, null)
+        // Not findPreference: it compares keys with TextUtils, which the unit-test android.jar stubs out.
+        fun keys(group: PreferenceGroup): List<String?> = (0 until group.preferenceCount).flatMap { index ->
+            val preference = group.getPreference(index)
+            listOf(preference.key) + if (preference is PreferenceGroup) keys(preference) else emptyList()
+        }
+        assertThat(keys(screen)).contains(BooleanKey.BgSourceXdripCalculateTrend.key)
     }
 
     @Test

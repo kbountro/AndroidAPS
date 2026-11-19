@@ -2,6 +2,7 @@ package app.aaps.implementation.di
 
 import app.aaps.core.interfaces.alerts.LocalAlertUtils
 import app.aaps.core.interfaces.aps.APSResult
+import app.aaps.core.interfaces.aps.ActivityMultiplierHistory
 import app.aaps.core.interfaces.aps.AutosensData
 import app.aaps.core.interfaces.db.ProcessedTbrEbData
 import app.aaps.core.interfaces.iob.GlucoseStatusProvider
@@ -42,6 +43,7 @@ import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.implementation.alerts.LocalAlertUtilsImpl
 import app.aaps.implementation.androidNotification.NotificationHolderImpl
+import app.aaps.implementation.aps.ActivityMultiplierHistoryImpl
 import app.aaps.implementation.aps.DetermineBasalResult
 import app.aaps.implementation.db.ProcessedTbrEbDataImpl
 import app.aaps.implementation.iob.AutosensDataObject
@@ -105,6 +107,7 @@ class ImplementationModule {
         @Binds fun bindActivePlugin(pluginStore: PluginStore): ActivePlugin
         @Binds fun bindLastBgData(lastBgData: LastBgDataImpl): LastBgData
         @Binds fun bindProcessedTbrEbData(pProcessedTbrEbData: ProcessedTbrEbDataImpl): ProcessedTbrEbData
+        @Binds fun bindActivityMultiplierHistory(activityMultiplierHistoryImpl: ActivityMultiplierHistoryImpl): ActivityMultiplierHistory
         @Binds fun bindUserEntryLogger(userEntryLoggerImpl: UserEntryLoggerImpl): UserEntryLogger
         @Binds fun bindDetailedBolusInfoStorage(detailedBolusInfoStorageImpl: DetailedBolusInfoStorageImpl): DetailedBolusInfoStorage
         @Binds fun bindTemporaryBasalStorage(temporaryBasalStorageImpl: TemporaryBasalStorageImpl): TemporaryBasalStorage

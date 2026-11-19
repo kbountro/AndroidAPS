@@ -28,6 +28,10 @@ abstract class AbstractBgSourceWithSensorInsertLogPlugin(
             initialExpandedChildrenCount = 0
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.BgSourceUploadToNs, title = app.aaps.core.ui.R.string.do_ns_upload_title))
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.BgSourceCreateSensorChange, summary = R.string.bgsource_log_sensor_change_summary, title = R.string.bgsource_log_sensor_change_title))
+            addSourcePreferences(this, context)
         }
     }
+
+    /** Settings only one source has, added to the same category after the shared ones. */
+    protected open fun addSourcePreferences(category: PreferenceCategory, context: Context) {}
 }

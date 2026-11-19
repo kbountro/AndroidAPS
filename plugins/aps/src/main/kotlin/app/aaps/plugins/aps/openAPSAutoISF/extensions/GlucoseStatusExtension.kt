@@ -25,6 +25,7 @@ fun GlucoseStatusAutoIsf.asRounded() = copy(
     longAvgDelta = Round.roundTo(longAvgDelta, 0.01),
     duraISFminutes = Round.roundTo(duraISFminutes, 0.1),
     duraISFaverage = Round.roundTo(duraISFaverage, 0.1),
+    duraISFcurveAverage = Round.roundTo(duraISFcurveAverage, 0.0001),
     parabolaMinutes = Round.roundTo(parabolaMinutes, 0.1),
     corrSqu = Round.roundTo(corrSqu, 0.0001),
     a0 = Round.roundTo(a0, 0.1),

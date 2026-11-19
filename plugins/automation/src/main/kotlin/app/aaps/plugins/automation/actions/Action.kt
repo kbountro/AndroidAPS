@@ -69,6 +69,8 @@ abstract class Action(val injector: HasAndroidInjector) {
                 ActionAutoisfEnable::class.java.simpleName        -> ActionAutoisfEnable(injector).fromJSON(data.toString())
                 ActionAutoisfDisable::class.java.simpleName       -> ActionAutoisfDisable(injector).fromJSON(data.toString())
                 ActionSetAcceWeight::class.java.simpleName        -> ActionSetAcceWeight(injector).fromJSON(data.toString())
+                ActionSetBrakeWeight::class.java.simpleName       -> ActionSetBrakeWeight(injector).fromJSON(data.toString())
+                ActionSetPpWeight::class.java.simpleName          -> ActionSetPpWeight(injector).fromJSON(data.toString())
                 ActionSetIobTH::class.java.simpleName             -> ActionSetIobTH(injector).fromJSON(data.toString())
                 ActionRunAutotune::class.java.simpleName          -> ActionRunAutotune(injector).fromJSON(data.toString())
                 ActionSendSMS::class.java.simpleName              -> ActionSendSMS(injector).fromJSON(data.toString())

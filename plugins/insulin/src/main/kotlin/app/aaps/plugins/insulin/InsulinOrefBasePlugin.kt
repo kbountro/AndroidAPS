@@ -19,6 +19,7 @@ import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.plugins.insulin.tsunami.CgmLagStage
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.exp
@@ -211,17 +212,20 @@ abstract class InsulinOrefBasePlugin(
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
         // directly to every stage's rate, ke included). The dose interaction does not apply here: a
-        // dose alone is the same at every value.
+        // dose alone is the same at every value. The CGM lag (DoubleKey.InsulinTrafficJamCgmLag, as in
+        // the engine: a stage C after the active one at 1/lag, reporting kc*C as the activity) does.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
-        val grid = trafficJamGrid(bolus.amount, speedFactor)
-        val (d, x, a) = trafficJamState(grid, speedFactor, t)
+        val lagMinutes = preferences.get(DoubleKey.InsulinTrafficJamCgmLag).coerceIn(0.0, 30.0)
+        val kc = if (lagMinutes > 0.0) 1.0 / lagMinutes else 0.0
+        val grid = trafficJamGrid(bolus.amount, speedFactor, kc)
+        val s = trafficJamState(grid, speedFactor, kc, t)
 
         // Subtract the (small, non-zero) residual right at the gating horizon so IOB reaches
         // exactly zero there instead of a visible cliff where the caller stops calling this at all.
-        val (dH, xH, aH) = trafficJamState(grid, speedFactor, TRAFFIC_JAM_HORIZON_MINUTES)
+        val h = trafficJamState(grid, speedFactor, kc, TRAFFIC_JAM_HORIZON_MINUTES)
 
-        result.activityContrib = speedFactor * TRAFFIC_JAM_KE * a
-        result.iobContrib = (d + x + a) - (dH + xH + aH)
+        result.activityContrib = if (kc > 0.0) kc * s[3] else speedFactor * TRAFFIC_JAM_KE * s[2]
+        result.iobContrib = (s[0] + s[1] + s[2] + s[3]) - (h[0] + h[1] + h[2] + h[3])
 
         return result
     }
@@ -230,33 +234,49 @@ abstract class InsulinOrefBasePlugin(
     private fun trafficJamRate(speedFactor: Double, depotMass: Double): Double =
         speedFactor * TRAFFIC_JAM_K1_B0 * max(depotMass, 1e-6).pow(TRAFFIC_JAM_K1_B1)
 
-    /** (D, X, A) in U of an isolated dose of [amount] at whole minutes 0..TRAFFIC_JAM_HORIZON_MINUTES. */
-    private val trafficJamGrids = object : LinkedHashMap<Pair<Double, Double>, Array<DoubleArray>>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Double, Double>, Array<DoubleArray>>?): Boolean = size > 256
+    /**
+     * (D, X, A, C) in U of an isolated dose of [amount] at whole minutes 0..TRAFFIC_JAM_HORIZON_MINUTES, C
+     * being the CGM lag stage at rate [kc] (all zero at kc = 0).
+     */
+    private val trafficJamGrids = object : LinkedHashMap<Triple<Double, Double, Double>, Array<DoubleArray>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Triple<Double, Double, Double>, Array<DoubleArray>>?): Boolean = size > 256
     }
 
-    private fun trafficJamGrid(amount: Double, speedFactor: Double): Array<DoubleArray> = synchronized(trafficJamGrids) {
-        trafficJamGrids.getOrPut(Pair(amount, speedFactor)) {
+    private fun trafficJamGrid(amount: Double, speedFactor: Double, kc: Double): Array<DoubleArray> = synchronized(trafficJamGrids) {
+        trafficJamGrids.getOrPut(Triple(amount, speedFactor, kc)) {
             val n = TRAFFIC_JAM_HORIZON_MINUTES.toInt() + 1
             val d = DoubleArray(n)
             val x = DoubleArray(n)
             val a = DoubleArray(n)
+            val c = DoubleArray(n)
             d[0] = amount
+            val step = DoubleArray(4)
             for (i in 1 until n) {
                 val k1 = trafficJamRate(speedFactor, d[i - 1])
-                val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, 1.0)
-                d[i] = nd; x[i] = nx; a[i] = na
+                if (kc > 0.0) {
+                    CgmLagStage.propagate(d[i - 1], x[i - 1], a[i - 1], c[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, kc, 1.0, step)
+                    d[i] = step[0]; x[i] = step[1]; a[i] = step[2]; c[i] = step[3]
+                } else {
+                    val (nd, nx, na) = trafficJamPropagate(d[i - 1], x[i - 1], a[i - 1], k1, speedFactor * TRAFFIC_JAM_KE, 1.0)
+                    d[i] = nd; x[i] = nx; a[i] = na
+                }
             }
-            arrayOf(d, x, a)
+            arrayOf(d, x, a, c)
         }
     }
 
-    /** The dose's (D, X, A) [t] minutes after it: the grid point at or before [t], then exact propagation. */
-    private fun trafficJamState(grid: Array<DoubleArray>, speedFactor: Double, t: Double): Triple<Double, Double, Double> {
-        if (t <= 0.0) return Triple(grid[0][0], 0.0, 0.0)
+    /**
+     * The dose's (D, X, A, C) [t] minutes after it: the grid point at or before [t], then exact propagation
+     * (by less than a minute: callers stay within the grid, so no step needs [CgmLagStage]'s long-interval care).
+     */
+    private fun trafficJamState(grid: Array<DoubleArray>, speedFactor: Double, kc: Double, t: Double): DoubleArray {
+        if (t <= 0.0) return doubleArrayOf(grid[0][0], 0.0, 0.0, 0.0)
         val i = min(t.toInt(), grid[0].size - 1)
         val k1 = trafficJamRate(speedFactor, grid[0][i])
-        return trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, speedFactor * TRAFFIC_JAM_KE, t - i)
+        val ke = speedFactor * TRAFFIC_JAM_KE
+        if (kc > 0.0) return DoubleArray(4).also { CgmLagStage.propagate(grid[0][i], grid[1][i], grid[2][i], grid[3][i], k1, ke, kc, t - i, it) }
+        val (d, x, a) = trafficJamPropagate(grid[0][i], grid[1][i], grid[2][i], k1, ke, t - i)
+        return doubleArrayOf(d, x, a, 0.0)
     }
 
     /** Exact propagation of (D, X, A) by [dt] minutes with depot and transit at [k1] and the active stage at [ke]. */

@@ -1,5 +1,8 @@
 package app.aaps.plugins.aps.openAPSAutoISF
 
+import app.aaps.core.data.iob.InMemoryGlucoseValue
+import app.aaps.core.data.model.GV
+import app.aaps.core.interfaces.aps.DuraIsfStart
 import app.aaps.core.interfaces.aps.GlucoseStatusAutoIsf
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
@@ -9,13 +12,13 @@ import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.LongKey
+import app.aaps.core.objects.extensions.isLibre1Minute
 import app.aaps.plugins.aps.openAPS.DeltaCalculator
 import app.aaps.plugins.aps.openAPSAutoISF.extensions.asRounded
 import dagger.Reusable
 import javax.inject.Inject
 import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.roundToLong
 
 @Reusable
 class GlucoseStatusCalculatorAutoIsf @Inject constructor(
@@ -27,17 +30,22 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
 
     @Inject lateinit var preferences: Preferences
 
+    // Why the last call's parabola fit scored no window at all (empty when it did). AutoISF prints it
+    // next to "correlation ... is too low", which can't otherwise tell a skipped fit from a poor one.
+    @Volatile var lastFitProblem: String = ""
+        private set
+
     fun getGlucoseStatusData(allowOldData: Boolean): GlucoseStatusAutoIsf? {
-        val data = iobCobCalculator.ads.getBucketedDataTableCopy() ?: return null
-        val orig = iobCobCalculator.ads.getBgReadingsDataTableCopy()
+        // One consistent snapshot: LoadBgDataWorker publishes the readings, the grid and the curve together.
+        val ads = iobCobCalculator.ads
+        val (bucketed, orig, oneMinute) = synchronized(ads.dataLock) {
+            Triple(ads.getBucketedDataTableCopy(), ads.getBgReadingsDataTableCopy(), ads.getSmoothedReadingsCopy().orEmpty())
+        }
+        val data = bucketed ?: return null
 
         var sizeRecords = data.size
         if (sizeRecords == 0) {
             aapsLogger.debug(LTag.GLUCOSE, "sizeRecords==0")
-            return null
-        }
-        if (data[0].timestamp < dateUtil.now() - 7 * 60 * 1000L && !allowOldData) {
-            aapsLogger.debug(LTag.GLUCOSE, "oldData")
             return null
         }
         val now = data[0]
@@ -47,28 +55,45 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         val smooth = now.smoothed
         val filled = now.filledGap
         val cgm = now.sourceSensor
+        val isLibre = cgm.isLibre1Minute()   // || cgm.text=="G7"
+        // Raw (1-minute) path: whenever LoadBgDataWorker has made the one smoothed curve of the readings
+        // (OneMinuteCurve). It does so for a CGM that AutoISF treats as 1-minute data (isOneMinuteRawData:
+        // the newest 4 readings within 10 minutes, from an allowlisted Libre or, with
+        // ApsAutoIsfForce1MinuteRaw, any sensor). The fit, dura_ISF, the sliding delta, glucose and the
+        // staleness check then all read that curve, and nothing is smoothed here.
+        val use1MinuteRaw = oneMinute.isNotEmpty() && oneMinute[0].timestamp == orig.firstOrNull()?.timestamp
+        // On the raw path "now" is the newest raw reading. The bucketed grid re-anchors on it every
+        // cycle (see AutosensDataStoreObject.clone()), but taking it from orig directly keeps glucose,
+        // date, the staleness check, the sliding delta and the parabola fit on that same instant even
+        // if the grid ever lags it - otherwise eventualBG would pair an older BG with a current delta,
+        // overestimating BG while it falls.
+        val statusDate = if (use1MinuteRaw) oneMinute[0].timestamp else nowDate
+        if (statusDate < dateUtil.now() - 7 * 60 * 1000L && !allowOldData) {
+            aapsLogger.debug(LTag.GLUCOSE, "oldData")
+            return null
+        }
+        // The last hour of the curve: all that dura_ISF looks at, and more than the sliding delta needs
+        val smoothedRawWindow = if (use1MinuteRaw) oneMinute.takeWhile { it.timestamp >= oneMinute[0].timestamp - 60 * 60_000L } else emptyList()
+        val statusGlucose = smoothedRawWindow.firstOrNull()?.recalculated ?: now.recalculated
         val fsl = orig[0]
         val fslDate = fsl.timestamp
         val fslValue = fsl.raw
         val fslRaw = fsl.noise
         val fslSmooth = fsl.value
-        // Force1MinuteRaw only widens eligibility to the empirical timing check just below
-        // (orig[0]-orig[2] under 3 minutes) - it does not skip that check, so a sensor that
-        // isn't actually sampling faster than 5 minutes still falls back to bucketed data.
-        val fslReally = cgm.text=="Libre2" || cgm.text=="Libre2 Native" || cgm.text=="Libre3" ||   // || cgm.text=="G7"
-            preferences.get(BooleanKey.ApsAutoIsfForce1MinuteRaw)
-        var fslMinDur = 15
+        val fslMinDur = if (use1MinuteRaw) 10 else 15
         if (sizeRecords == 1) {
             aapsLogger.debug(LTag.GLUCOSE, "sizeRecords==1")
+            lastFitProblem = "only one bucketed value"
             return GlucoseStatusAutoIsf(
-                glucose = now.recalculated,
+                glucose = statusGlucose,
                 noise = 0.0,
                 delta = 0.0,
                 shortAvgDelta = 0.0,
                 longAvgDelta = 0.0,
-                date = nowDate,
+                date = statusDate,
                 duraISFminutes = 0.0,
                 duraISFaverage = now.value,
+                duraISFstart = if (now.value > DuraIsfWindow.FLOOR_MGDL) DuraIsfStart.OLDEST else DuraIsfStart.NOT_ABOVE_FLOOR,
                 parabolaMinutes = 0.0,
                 deltaPl = 0.0,
                 deltaPn = 0.0,
@@ -81,32 +106,16 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         }
 
         val deltaResult = deltaCalculator.calculateDeltas(data)
+        // On the raw path, delta is a sliding 5-minutes-ago comparison on the curve rather than on the
+        // bucketed grid. shortAvgDelta and longAvgDelta stay on the grid, which takes its values from the
+        // same curve. fitValueAt is only called on the raw path.
+        val fitValueAt = { i: Int -> oneMinute[i].recalculated }
+        val delta = (if (use1MinuteRaw) slidingDelta(smoothedRawWindow) else null) ?: deltaResult.delta
 
-        // calculate 2 variables for 5% range; still using 5 minute data
-        val bw = 0.05
-        var sumBG: Double = now.recalculated
-        var oldAvg: Double = sumBG
-        var minutesDur = 0L
-        var n = 1
-        for (i in 1 until sizeRecords) {
-            if (data[i].value > 39 && !data[i].filledGap) {
-                n += 1
-                val then = data[i]
-                val thenDate: Long = then.timestamp
-                //  stop the series if there was a CGM gap greater than 13 minutes, i.e. 2 regular readings
-                //  needs shorter gap for Libre?
-                if (((nowDate - thenDate) / (1000.0 * 60)).roundToInt() - minutesDur > 13) {
-                    break
-                }
-                if (then.recalculated > oldAvg * (1 - bw) && then.recalculated < oldAvg * (1 + bw)) {
-                    sumBG += then.recalculated
-                    oldAvg = sumBG / n  // was: (i + 1)
-                    minutesDur = ((nowDate - thenDate) / (1000.0 * 60)).roundToLong()
-                } else {
-                    break
-                }
-            }
-        }
+        // dura_ISF: how long, within the last hour, glucose has been at its current level above 150 mg/dL, rise included,
+        // and the ISF curve's average over that time - on the raw path counted on the same smoothed 1-minute readings as the
+        // sliding delta (the last hour of them, all DuraIsfWindow looks at), to the minute; else on the 5-minute grid
+        val duraWindow = DuraIsfWindow.of(if (use1MinuteRaw && smoothedRawWindow.isNotEmpty()) smoothedRawWindow else data)
 
         // calculate best parabola and determine delta by extending it 5 minutes into the future
         // after https://www.codeproject.com/Articles/63170/Least-Squares-Regression-for-Quadratic-Curve-Fitti
@@ -122,22 +131,18 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
         var a1 = 0.0
         var a2 = 0.0
         //var b = 0.0
-        var use1MinuteRaw = false
-        if ( fslReally ) {
-            if (orig.size>2) {
-                if ( orig[0].timestamp - orig[2].timestamp < 3 * 60000 ) {
-                    use1MinuteRaw = true
-                    sizeRecords = orig.size
-                    fslMinDur = 10
-                }
-            }
+        if (use1MinuteRaw) {
+            sizeRecords = oneMinute.size
         }
-        aapsLogger.debug(LTag.GLUCOSE, "BgReadings stamp=$fslDate; raw=$fslRaw; value=$fslValue; Libre=$fslReally; fitMinutes=$fslMinDur; fslSmooth=$fslSmooth; " +
+        aapsLogger.debug(LTag.GLUCOSE, "BgReadings stamp=$fslDate; raw=$fslRaw; value=$fslValue; Libre=$isLibre; raw1min=$use1MinuteRaw; fitMinutes=$fslMinDur; fslSmooth=$fslSmooth; " +
             "BgBucketed value=$nowValue; recalc=$recalc; smooth=$smooth; filled=$filled; CGM=$cgm")
 
         val calibrationDuration = preferences.get(IntKey.FslCalibrationDuration)
         val calibrationMinutes = calibrationDuration - (dateUtil.now() - preferences.get(LongKey.FslCalibrationStart)) / 60000
         val calibrationStopsSMB = calibrationMinutes > 0 && !preferences.get(BooleanKey.FslCalibrationEnd)
+        var fitStop = ""
+        var windowsTried = 0
+        var windowScored = false
         if (sizeRecords > 3 && !calibrationStopsSMB) {
             var sy = 0.0 // y
             var sx = 0.0 // x
@@ -146,7 +151,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             var sx4 = 0.0 // x^4
             var sxy = 0.0 // x*y
             var sx2y = 0.0 // x^2*y
-            val time0 = if (use1MinuteRaw) orig[0].timestamp else data[0].timestamp
+            val time0 = if (use1MinuteRaw) oneMinute[0].timestamp else data[0].timestamp
             var tiLast = 0.0
             //# for best numerical accuracy time and bg must be of same order of magnitude
             val scaleTime = 1.0 // was 00.0 // in 5m; values are  0, -1, -2, -3, -4, ...
@@ -156,15 +161,15 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             var n = 0
             for (i in 0 until sizeRecords) {
                 val noGap = if (use1MinuteRaw) true else !data[i].filledGap
-                val usableValue = if (use1MinuteRaw) orig[i].value else data[i].value
+                val usableValue = if (use1MinuteRaw) fitValueAt(i) else data[i].value
                 if (usableValue > 39 && noGap) {
                     n += 1
                     val thenDate: Long
                     var bg: Double
                     if (use1MinuteRaw) {
-                        val then = orig[i]
+                        val then = oneMinute[i]
                         thenDate = then.timestamp
-                        bg = then.value / scaleBg
+                        bg = fitValueAt(i) / scaleBg
                     } else {    // all other including standard 5m CGM smoothed
                         val then = data[i]
                         thenDate = then.timestamp
@@ -184,6 +189,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                             a1 = 0.0
                             a2 = 0.0
                         }
+                        fitStop = "gap of ${tenths((tiLast - ti) * scaleTime / 60.0)} min after the newest ${tenths(-tiLast * scaleTime / 60.0)} min"
                         break
                     }
                     tiLast = ti
@@ -206,6 +212,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                         detC = sx4 * (sx2 * sy - sx * sxy) - sx3 * (sx3 * sy - sx * sx2y) + sx2 * (sx3 * sxy - sx2 * sx2y)
                     }
                     if (detH != 0.0) {
+                        windowsTried++
                         val a: Double = detA / detH * scaleBg * (300 / scaleTime).pow(2.0)
                         val b = detB / detH * scaleBg * (300 / scaleTime)
                         val c: Double = detC / detH * scaleBg
@@ -215,8 +222,8 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                         //var rawBg: Double
                         for (j in 0..i) {
                             if (use1MinuteRaw) {
-                                val before = orig[j]
-                                val scaledBg = before.value / scaleBg
+                                val before = oneMinute[j]
+                                val scaledBg = fitValueAt(j) / scaleBg
                                 sSquares += (scaledBg - yMean).pow(2.0)
                                 val deltaT: Double = (before.timestamp - time0) / 1000.0 / 300
                                 val bgj: Double = a * deltaT.pow(2.0) + b * deltaT + c
@@ -235,6 +242,7 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                             rSqu = 1 - sResidualSquares / sSquares
                         }
                         if (rSqu >= corrMax) {
+                            windowScored = true
                             corrMax = rSqu
 
                             duraP = -ti * scaleTime / 60.0 // remember we are going backwards in time
@@ -249,18 +257,22 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
                     }
                 }
             }
-        }
+        } else fitStop = if (calibrationStopsSMB) "calibration in progress" else "only $sizeRecords records"
+        lastFitProblem = if (windowScored) "" else describeFitProblem(fitStop, windowsTried, fslMinDur, use1MinuteRaw, orig, oneMinute, data)
+        if (!windowScored) aapsLogger.debug(LTag.GLUCOSE, "Parabola fit scored no window: $lastFitProblem")
         // End parabola fit
 
         return GlucoseStatusAutoIsf(
-            glucose = now.recalculated,
-            date = nowDate,
+            glucose = statusGlucose,
+            date = statusDate,
             noise = 0.0, //for now set to nothing as not all CGMs report noise
             shortAvgDelta = deltaResult.shortAvgDelta,
-            delta = deltaResult.delta,
+            delta = delta,
             longAvgDelta = deltaResult.longAvgDelta,
-            duraISFminutes = minutesDur.toDouble(),
-            duraISFaverage = oldAvg,
+            duraISFminutes = duraWindow.minutes.toDouble(),
+            duraISFaverage = duraWindow.average,
+            duraISFcurveAverage = duraWindow.curveAverage,
+            duraISFstart = duraWindow.start,
             parabolaMinutes = duraP,
             deltaPl = deltaPl,
             deltaPn = deltaPn,
@@ -270,6 +282,58 @@ class GlucoseStatusCalculatorAutoIsf @Inject constructor(
             a1 = a1,
             a2 = a2,
         )   //.also { aapsLogger.debug(LTag.GLUCOSE, it.log(decimalFormatter)) }.asRounded()
+    }
+
+    // "now" and "~5 minutes ago" interpolated off the smoothed curve. Its last 2 hours are smoothed again
+    // at every data load, so this is the smoother's current estimate for that instant, not whatever it
+    // gave when that reading first arrived. Returns null (caller keeps the bucketed delta) when there
+    // isn't enough lookback yet.
+    private fun slidingDelta(smoothed: List<InMemoryGlucoseValue>): Double? {
+        if (smoothed.size < 2) return null
+        val now = smoothed[0].timestamp
+        val target = now - 5 * 60_000L
+        if (smoothed.last().timestamp > target) return null // not enough history yet
+        val thenValue = interpolateAt(smoothed, target) ?: return null
+        return smoothed[0].recalculated - thenValue
+    }
+
+    // smoothed is newest-first. Finds the pair straddling `time` and linearly interpolates; returns
+    // null if that pair's gap is too large to trust a linear interpolation across (matching
+    // DeltaCalculator's own 13-minute gap-abort convention).
+    private fun interpolateAt(smoothed: List<InMemoryGlucoseValue>, time: Long): Double? {
+        for (i in 1 until smoothed.size) {
+            val newer = smoothed[i - 1]
+            val older = smoothed[i]
+            if (older.timestamp <= time) {
+                if (newer.timestamp - older.timestamp > 13 * 60_000L) return null
+                if (newer.timestamp == older.timestamp) return newer.recalculated
+                val frac = (newer.timestamp - time).toDouble() / (newer.timestamp - older.timestamp)
+                return newer.recalculated - frac * (newer.recalculated - older.recalculated)
+            }
+        }
+        return null
+    }
+
+    private fun tenths(x: Double): Double = (x * 10).roundToInt() / 10.0
+
+    // One line saying why no window was scored plus the newest values the fit actually saw, as
+    // "seconds ago:mg/dL" pairs. NaN is printed as such rather than rounded (roundToInt would throw).
+    private fun describeFitProblem(
+        stop: String, windowsTried: Int, minMinutes: Int, use1MinuteRaw: Boolean,
+        orig: List<GV>, oneMinute: List<InMemoryGlucoseValue>, data: List<InMemoryGlucoseValue>
+    ): String {
+        fun mgdl(v: Double) = if (v.isNaN()) "NaN" else v.roundToInt().toString()
+        val reason = stop.ifEmpty {
+            if (windowsTried > 0) "$windowsTried windows, none with a valid correlation"
+            else "never reached $minMinutes min with 4+ usable values"
+        }
+        val path = if (use1MinuteRaw) "1-min path"
+        else "5-min path" + if (orig.size > 3) " (newest 4 readings span ${(orig[0].timestamp - orig[3].timestamp) / 1000}s)" else ""
+        val newest = if (use1MinuteRaw)
+            (0 until minOf(oneMinute.size, 12)).joinToString(" ") { "${(oneMinute[0].timestamp - oneMinute[it].timestamp) / 1000}:${mgdl(oneMinute[it].recalculated)}" }
+        else
+            (0 until minOf(data.size, 8)).joinToString(" ") { "${(data[0].timestamp - data[it].timestamp) / 1000}:${mgdl(data[it].value)}${if (data[it].filledGap) "*" else ""}" }
+        return "$path: $reason; newest (s ago:mg/dL${if (use1MinuteRaw) "" else ", *=gap-filled"}) $newest"
     }
 
     companion object {

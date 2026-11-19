@@ -152,8 +152,12 @@
     <string name="bgAccel_ISF_weight" translatable="false">bgAccel_ISF_weight</string>
     <string name="iob_threshold_percent" translatable="false">iob_threshold_percent</string>
     <string name="automate_set_acce_weight">Set bgAccel_ISF_weight to %1$.2f</string>
+    <string name="automate_set_brake_weight">Set bgBrake_ISF_weight to %1$.2f</string>
+    <string name="automate_set_pp_weight">Set pp_ISF_weight to %1$.3f</string>
     <string name="automate_set_iobTH_percent">Set iobTH to %1$d%%</string>
     <string name="autoisf_acce_weight">BgAccel weight</string>
+    <string name="autoisf_brake_weight">BgBrake weight</string>
+    <string name="autoisf_pp_weight">pp weight</string>
     <string name="autoisf_iobTH_percent">iobTH percent</string>
     <string name="acceweightcompared">acce weight %1$s %2$s</string>
     <string name="iobTHpercentcompared">iobTH percent %1$s %2$s</string>

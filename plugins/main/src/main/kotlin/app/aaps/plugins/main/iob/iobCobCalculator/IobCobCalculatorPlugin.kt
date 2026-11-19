@@ -144,6 +144,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                                // now-stale results until something else happens to clear the cache.
                                event.isChanged(DoubleKey.InsulinTrafficJamSpeedMultiplier.key) ||
                                event.isChanged(DoubleKey.InsulinTrafficJamMixing.key) ||
+                               event.isChanged(DoubleKey.InsulinTrafficJamCgmLag.key) ||
                                event.isChanged(DoubleKey.ApsAmaBolusSnoozeDivisor.key)
                            ) {
                                resetDataAndRunCalculation("onEventPreferenceChange", event)

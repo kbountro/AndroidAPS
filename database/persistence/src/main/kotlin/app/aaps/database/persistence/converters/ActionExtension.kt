@@ -99,6 +99,8 @@ fun UserEntry.Action.fromDb(): Action =
         UserEntry.Action.AUTOISF_DISABLED                -> Action.AUTOISF_DISABLED
         UserEntry.Action.IOB_TH_SET                      -> Action.IOB_TH_SET
         UserEntry.Action.ACCE_WEIGHT_SET                 -> Action.ACCE_WEIGHT_SET
+        UserEntry.Action.BRAKE_WEIGHT_SET                -> Action.BRAKE_WEIGHT_SET
+        UserEntry.Action.PP_WEIGHT_SET                   -> Action.PP_WEIGHT_SET
         UserEntry.Action.UNKNOWN                         -> Action.UNKNOWN
         UserEntry.Action.RUNNING_MODE                    -> Action.RUNNING_MODE
         UserEntry.Action.RUNNING_MODE_REMOVED            -> Action.RUNNING_MODE_REMOVED
@@ -201,6 +203,8 @@ fun Action.toDb(): UserEntry.Action =
         Action.AUTOISF_DISABLED                -> UserEntry.Action.AUTOISF_DISABLED
         Action.IOB_TH_SET                      -> UserEntry.Action.IOB_TH_SET
         Action.ACCE_WEIGHT_SET                 -> UserEntry.Action.ACCE_WEIGHT_SET
+        Action.BRAKE_WEIGHT_SET                -> UserEntry.Action.BRAKE_WEIGHT_SET
+        Action.PP_WEIGHT_SET                   -> UserEntry.Action.PP_WEIGHT_SET
         Action.UNKNOWN                         -> UserEntry.Action.UNKNOWN
         Action.RUNNING_MODE         -> UserEntry.Action.RUNNING_MODE
         Action.RUNNING_MODE_REMOVED -> UserEntry.Action.RUNNING_MODE_REMOVED

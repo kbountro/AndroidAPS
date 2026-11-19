@@ -35,6 +35,7 @@ import app.aaps.plugins.sensitivity.SensitivityWeightedAveragePlugin
 import app.aaps.plugins.smoothing.AvgSmoothingPlugin
 import app.aaps.plugins.smoothing.ExponentialSmoothingPlugin
 import app.aaps.plugins.smoothing.NoSmoothingPlugin
+import app.aaps.plugins.smoothing.UnscentedKalmanFilterForwardPlugin
 import app.aaps.plugins.smoothing.UnscentedKalmanFilterPlugin
 import app.aaps.plugins.source.DexcomPlugin
 import app.aaps.plugins.source.GlimpPlugin
@@ -516,6 +517,12 @@ abstract class PluginsListModule {
     @IntoMap
     @IntKey(615)
     abstract fun bindUnscentedKalmanFilterPlugin(plugin: UnscentedKalmanFilterPlugin): PluginBase
+
+    @Binds
+    @AllConfigs
+    @IntoMap
+    @IntKey(616)
+    abstract fun bindUnscentedKalmanFilterForwardPlugin(plugin: UnscentedKalmanFilterForwardPlugin): PluginBase
 
     @Qualifier
     annotation class AllConfigs

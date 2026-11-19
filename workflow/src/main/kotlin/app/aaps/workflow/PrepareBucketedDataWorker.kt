@@ -40,7 +40,10 @@ class PrepareBucketedDataWorker(
 
         val toTime = data.overviewData.toTime
         val fromTime = data.overviewData.fromTime
-        val bucketedData = data.iobCobCalculator.ads.getBucketedDataTableCopy() ?: return Result.success()
+        // A CGM that AutoISF treats as 1-minute data: draw the one smoothed curve, a point per reading. The
+        // 5-minute grid of autosens and COB takes its values from it, so its points lie on this curve.
+        val bucketedData = data.iobCobCalculator.ads.getSmoothedReadingsCopy()?.takeIf { it.isNotEmpty() }
+            ?: data.iobCobCalculator.ads.getBucketedDataTableCopy() ?: return Result.success()
         if (bucketedData.isEmpty()) {
             aapsLogger.debug("No bucketed data.")
             return Result.success()
