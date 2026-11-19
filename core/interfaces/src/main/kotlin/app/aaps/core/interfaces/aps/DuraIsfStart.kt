@@ -12,10 +12,6 @@ enum class DuraIsfStart {
     /** Where glucose rose above 150 mg/dL: the next older reading's 5-minute average is 150 or less. */
     RISE,
 
-    /** After glucose last fell by 5% or more. No longer produced, since the count goes on through falls; kept so that stored
-     *  results that have it still read. */
-    FALL,
-
     /** An hour back: the count covers the whole hour it looks at. */
     HOUR,
 
