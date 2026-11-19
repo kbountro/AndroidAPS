@@ -949,7 +949,7 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
                 dura_ISF += dura05Weight * avg05Weight * curve05
                 sens_modified = true
                 consoleError.add("dura_ISF: $duraState")
-                consoleError.add("dura_ISF adaptation is ${round(dura_ISF, 2)} = 1 + ${dura05.toLong()}/60 × weight $weightISF × ${round(curve05, 3)}, the ISF curve averaged over those minutes")
+                consoleError.add("dura_ISF adaptation is ${round(dura_ISF, 2)}")
             }
         }
         autoIsfValues.duraIsf = dura_ISF
@@ -958,8 +958,9 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
         if (sens_modified) {
             //liftISF = max(dura_ISF, max(bg_ISF, max(acce_ISF, pp_ISF)))
             liftISF = max(bg_ISF, max(acce_ISF, pp_ISF))
+            consoleError.add("strongest autoISF factor is ${round(liftISF, 2)}")
             if (acce_ISF < 1.0) {
-                consoleError.add("strongest autoISF factor ${round(liftISF, 2)} weakened to ${round(liftISF * acce_ISF, 2)} as bg decelerates already")
+                consoleError.add("weakened to ${round(liftISF * acce_ISF, 2)} as bg decelerates already")
                 liftISF = liftISF * acce_ISF
             }
             if (dura_ISF > 1.0) {

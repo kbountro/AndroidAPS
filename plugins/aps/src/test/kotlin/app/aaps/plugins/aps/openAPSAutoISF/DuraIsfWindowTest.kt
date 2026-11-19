@@ -94,21 +94,20 @@ class DuraIsfWindowTest {
     }
 
     @Test
-    fun aFallOnOneMinuteReadingsIsTestedOnASlidingFiveMinuteAverage() {
-        // Falling 36 mg/dL/h to 200 now. At each reading, the average of it and the four before it is compared with the average
-        // of all the newer readings: 30 minutes ago that is 219.2 (readings 30 to 34 minutes old), 5% or more above the 208.7
-        // of the readings since, so the count ends at 29 minutes (on the table: 25; single readings: 33).
+    fun aFallWithinTheHourKeepsCounting() {
+        // Falling 36 mg/dL/h to 200 now: every reading of the last hour is above 150, so the whole hour counts, each minute at
+        // its own curve value. The curve is linear from 200 to 300, so over the hour it averages curve(218), 0.11 + 18 * 0.0014.
+        // (While the count stopped at a reading 5% or more above the average of the newer ones, it ended at 29 minutes.)
         val window = DuraIsfWindow.of((0..66).map { reading(it, 200.0 + 0.6 * it) })
-        assertThat(window.minutes).isEqualTo(29L)
-        assertThat(window.average).isWithin(1e-6).of(208.7)
-        assertThat(window.curveAverage).isWithin(1e-6).of(0.12218)
-        assertThat(window.start).isEqualTo(DuraIsfStart.FALL)
+        assertThat(window.minutes).isEqualTo(60L)
+        assertThat(window.average).isWithin(1e-9).of(218.0)
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.1352)
+        assertThat(window.start).isEqualTo(DuraIsfStart.HOUR)
     }
 
     @Test
     fun aSingleHighOneMinuteReadingDoesNotEndTheCount() {
-        // An hour at 200 with one reading at 212, 20 minutes ago: 6% above the average, which would end the count reading by
-        // reading, but every sliding 5-minute average that includes it is 202.4.
+        // An hour at 200 with one reading at 212, 20 minutes ago: it counts like the others, at its own curve value.
         val window = DuraIsfWindow.of((0..60).map { reading(it, if (it == 20) 212.0 else 200.0) })
         assertThat(window.minutes).isEqualTo(60L)
         assertThat(window.average).isWithin(1e-9).of((60 * 200.0 + 212.0) / 61)
@@ -169,18 +168,19 @@ class DuraIsfWindowTest {
     }
 
     @Test
-    fun aFallOfMoreThanFivePercentEndsTheCount() {
-        // Down from a plateau at 260: 220 is more than 5% above 200, so the count starts again from the fall.
+    fun aFallFromAPlateauKeepsCounting() {
+        // Down from a plateau at 260 to 200: all six readings count (the count used to start again from the fall, at 0 minutes).
+        // By trapezoids: 5 * ((0.11 + 0.138) / 2 + (0.138 + 0.166) / 2 + (0.166 + 0.194) / 2 + 0.194 + 0.194) / 25.
         val window = DuraIsfWindow.of(every5min(200.0, 220.0, 240.0, 260.0, 260.0, 260.0))
-        assertThat(window.minutes).isEqualTo(0L)
-        assertThat(window.average).isWithin(1e-9).of(200.0)
-        assertThat(window.curveAverage).isWithin(1e-9).of(0.11) // the newest reading alone; dura_ISF needs 10 minutes
-        assertThat(window.start).isEqualTo(DuraIsfStart.FALL)
+        assertThat(window.minutes).isEqualTo(25L)
+        assertThat(window.average).isWithin(1e-9).of(240.0)
+        assertThat(window.curveAverage).isWithin(1e-9).of(0.1688)
+        assertThat(window.start).isEqualTo(DuraIsfStart.OLDEST)
     }
 
     @Test
-    fun aSlowFallWithinFivePercentOfTheAverageKeepsCounting() {
-        // As before the change (GlucoseStatusTestAutoIsf's data): each older reading is within 5% of the newer ones' average.
+    fun aSlowFallCountsAsBefore() {
+        // GlucoseStatusTestAutoIsf's data, a slow fall that never came within reach of the old 5% rule.
         val window = DuraIsfWindow.of(every5min(214.0, 216.0, 219.0, 223.0, 222.0, 224.0, 226.0, 228.0))
         assertThat(window.minutes).isEqualTo(35L)
         assertThat(window.average).isWithin(0.1).of(221.5)
@@ -240,8 +240,6 @@ class DuraIsfWindowTest {
     fun theLogSaysHowLongGlucoseHasBeenAbove150AtWhatAverageAndSinceWhen() {
         assertThat(DuraIsfWindow.describe(45.0, 205.0, DuraIsfStart.RISE))
             .isEqualTo("glucose above 150 mg/dL for 45 min at an average of 205 mg/dL (since it rose above 150 mg/dL)")
-        assertThat(DuraIsfWindow.describe(20.0, 199.6, DuraIsfStart.FALL))
-            .isEqualTo("glucose above 150 mg/dL for 20 min at an average of 200 mg/dL (since it last fell by 5% or more)")
         assertThat(DuraIsfWindow.describe(60.0, 250.0, DuraIsfStart.HOUR))
             .isEqualTo("glucose above 150 mg/dL for 60 min at an average of 250 mg/dL (the whole hour counted)")
         assertThat(DuraIsfWindow.describe(12.0, 180.0, DuraIsfStart.GAP))

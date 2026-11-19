@@ -11,7 +11,6 @@ fun GlucoseStatusAutoIsf.log(decimalFormatter: DecimalFormatter): String = "Gluc
     "Long avg. delta: " + decimalFormatter.to2Decimal(longAvgDelta) + " mg/dl " +
     "Dura ISF minutes: " + decimalFormatter.to2Decimal(duraISFminutes) + " m " +
     "Dura ISF average: " + decimalFormatter.to2Decimal(duraISFaverage) + " mg/dl " +
-    "Dura ISF curve average: " + decimalFormatter.to3Decimal(duraISFcurveAverage) + " " +
     "Parabola minutes: " + decimalFormatter.to2Decimal(parabolaMinutes) + " m " +
     "Parabola correlation: " + decimalFormatter.to2Decimal(corrSqu) + " " +
     "Parabola fit a0: " + decimalFormatter.to2Decimal(a0) + " mg/dl " +
