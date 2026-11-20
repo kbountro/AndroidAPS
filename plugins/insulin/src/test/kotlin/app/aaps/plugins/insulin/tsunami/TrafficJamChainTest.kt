@@ -101,7 +101,7 @@ class TrafficJamChainTest {
     @Test
     fun theDepotRateFollowsTheFittedLaw() {
         assertThat(TrafficJamChain.rate(1.0, 1.0)).isWithin(1e-15).of(TrafficJamChain.K1_B0)
-        assertThat(TrafficJamChain.rate(0.49, 10.0)).isWithin(1e-15).of(0.49 * TrafficJamChain.K1_B0 * 10.0.pow(TrafficJamChain.K1_B1))
+        assertThat(TrafficJamChain.rate(0.47, 10.0)).isWithin(1e-15).of(0.47 * TrafficJamChain.K1_B0 * 10.0.pow(TrafficJamChain.K1_B1))
         // An empty depot is floored, not infinitely fast.
         assertThat(TrafficJamChain.rate(1.0, 0.0)).isWithin(1e-12).of(TrafficJamChain.K1_B0 * 1e-6.pow(TrafficJamChain.K1_B1))
     }
@@ -109,11 +109,11 @@ class TrafficJamChainTest {
     @Test
     fun aNewSiteReachesFullSpeedAfter48Hours() {
         val hour = 3_600_000L
-        assertThat(TrafficJamChain.siteFactor(0.49, 0L)).isEqualTo(0.49)
-        assertThat(TrafficJamChain.siteFactor(0.49, 24 * hour)).isWithin(1e-15).of(0.745)
-        assertThat(TrafficJamChain.siteFactor(0.49, 48 * hour)).isEqualTo(1.0)
-        assertThat(TrafficJamChain.siteFactor(0.49, 100 * hour)).isEqualTo(1.0)
-        assertThat(TrafficJamChain.siteFactor(0.49, -hour)).isEqualTo(0.49)
+        assertThat(TrafficJamChain.siteFactor(0.47, 0L)).isEqualTo(0.47)
+        assertThat(TrafficJamChain.siteFactor(0.47, 24 * hour)).isWithin(1e-15).of(0.735)
+        assertThat(TrafficJamChain.siteFactor(0.47, 48 * hour)).isEqualTo(1.0)
+        assertThat(TrafficJamChain.siteFactor(0.47, 100 * hour)).isEqualTo(1.0)
+        assertThat(TrafficJamChain.siteFactor(0.47, -hour)).isEqualTo(0.47)
         assertThat(TrafficJamChain.siteFactor(1.0, 5 * hour)).isEqualTo(1.0)
     }
 

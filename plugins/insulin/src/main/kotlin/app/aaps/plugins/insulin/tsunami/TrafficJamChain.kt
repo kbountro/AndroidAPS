@@ -25,10 +25,11 @@ import kotlin.math.sinh
  * day 3 of one 3-day infusion set, single wave (1.5 U/min) and dual wave (half at 1.5 U/min, half over 3 hours). The
  * pump delivery is replayed as given: the bolus in 0.05 U pulses a minute at a time, the basal and the square wave a
  * dose a minute, all of it in one depot (dose interaction 1), serum taken as proportional to X with one scale for all
- * four curves. Fitted: K1_B0 0.08736466 /min (a day-3 site with 1 U in the depot, half-life 7.9 min), K1_B1 -0.25557946,
- * the plasma half-life held at the published 44 min (left free, the fit puts it at 41-52 min), and day 1 at 0.4915 times
- * day 3's speed; R^2 0.994 / 0.987 (day 1, single / dual wave), 0.974 / 0.970 (day 3). The report does not give the bolus
- * size; with 10 U assumed (6-15 U: K1_B1 -0.21 to -0.30, day 1 0.46-0.51).
+ * four curves. Fitted: K1_B0 0.11391363 /min (a day-3 site with 1 U in the depot, half-life 6.1 min), K1_B1 -0.32231826,
+ * the plasma half-life 51.5 min, and day 1 at 0.47 times day 3's speed; R^2 0.993 / 0.986 (day 1, single / dual wave),
+ * 0.983 / 0.972 (day 3). Held at the published 44 min instead, the plasma stage fits day 3 worse (0.974 / 0.970). The
+ * report does not give the bolus size; with 10 U assumed (6 / 15 U: K1_B1 -0.36 / -0.28, day 1 0.49 / 0.44, plasma
+ * 51-52 min).
  *
  * The effect stage is the delay from insulin in the blood to its effect. In the report's studies that measured serum
  * insulin and the glucose infusion rate in the same people, the infusion rate trails serum by a half-life of 24 min in
@@ -37,13 +38,13 @@ import kotlin.math.sinh
  * insulin's effect. The 8 min is the half-life that explained a month of real-world closed-loop pump and CGM data best,
  * with the absorption above, its site age, dose interaction 1 and an 8-minute CGM lag (scanned from 2 to 32 min).
  *
- * The site: a new infusion site absorbs at the start speed (DoubleKey.InsulinTrafficJamSiteStartSpeed, default 0.49, the
+ * The site: a new infusion site absorbs at the start speed (DoubleKey.InsulinTrafficJamSiteStartSpeed, default 0.47, the
  * pump study's day 1 against its day 3), rising linearly to full speed 48 hours after the change (day 1 to day 3).
  *
  * A 0.5 U SMB on a day-3 site at speed 1, given on a 1 U/h basal, no CGM lag: share of it still on board after 30 min
- * 0.85, 1 h 0.56, 2 h 0.22, 3 h 0.09, activity peak at 38 min; on a new site (start speed 0.49) 0.91, 0.68, 0.29, 0.12,
- * peak at 54 min. A 10 U bolus on a day-3 site: 0.65 after 1 h, 0.26 after 2 h, 0.10 after 3 h, peak at 51 min. With a
- * 24-min effect stage instead, that bolus would leave 0.79 / 0.40 / 0.17, as the study's measured day-3 serum does
+ * 0.84, 1 h 0.58, 2 h 0.26, 3 h 0.12, activity peak at 35 min; on a new site (start speed 0.47) 0.91, 0.67, 0.31, 0.14,
+ * peak at 50 min. A 10 U bolus on a day-3 site: 0.67 after 1 h, 0.30 after 2 h, 0.13 after 3 h, peak at 50 min. With a
+ * 24-min effect stage instead, that bolus would leave 0.80 / 0.43 / 0.20, as the study's measured day-3 serum does
  * through the same plasma and effect stages (0.81 / 0.44 / 0.19): the absorption fit carries the measured serum over.
  *
  * [propagate] advances the chain exactly for constant rates, any of them coinciding: k1 varies continuously and crosses
@@ -57,12 +58,12 @@ internal object TrafficJamChain {
     private const val LN2 = 0.6931471805599453
 
     /** Depot rate with 1 U in the depot on a settled (day-3) pump site at speed 1, 1/min. */
-    const val K1_B0 = 0.08736466
+    const val K1_B0 = 0.11391363
 
     /** Crowding exponent: the depot rate is K1_B0 * D^K1_B1, D the depot mass in U. */
-    const val K1_B1 = -0.25557946
+    const val K1_B1 = -0.32231826
 
-    const val PLASMA_HALF_LIFE_MINUTES = 44.0
+    const val PLASMA_HALF_LIFE_MINUTES = 51.5
     const val EFFECT_HALF_LIFE_MINUTES = 8.0
 
     /** X's exit rate (insulin leaving the blood), 1/min. */

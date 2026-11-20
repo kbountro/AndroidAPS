@@ -5,7 +5,7 @@ This is the "Lyumjev U100 (Tsunami Traffic Jam)" insulin model, built around one
 There's another implementation of this idea on branch `AAPS_dev_TsunamiMods` (one curve
 per dose, rather than the shared tanks below) — see its own README. The present method tackles the problem of activity curve's discontinuity: here activity never jumps, neither when a dose is given nor when the rates are re-evaluated (see below).
 
-Traffic Jam is inspired by piecycle's Tsunami PD model (https://github.com/piecycle/tsunami), which adapts the absorption rate based solely on the individual dose. This branch started as an expansion of that model, but the target curve itself has since changed: the current constants are fitted to a pump study's serum insulin, not to clamp activity curves (see "Absorption rates and the fit"). On a settled pump site the depot is fast (half-life about 8 minutes with 1U in it), so most of a dose's timing comes from its time in the blood (44 minutes) and the delay to its effect (8 minutes), and crowding adds minutes, not hours, to an SMB cascade. A lone 1U dose's activity peaks at 46 minutes with the default 8-minute CGM lag (37 without), and 1 - IOB/dose reaches 0.9 after 177 minutes (169 without).
+Traffic Jam is inspired by piecycle's Tsunami PD model (https://github.com/piecycle/tsunami), which adapts the absorption rate based solely on the individual dose. This branch started as an expansion of that model, but the target curve itself has since changed: the current constants are fitted to a pump study's serum insulin, not to clamp activity curves (see "Absorption rates and the fit"). On a settled pump site the depot is fast (half-life about 6 minutes with 1U in it), so most of a dose's timing comes from its time in the blood (half-life 51.5 minutes) and the delay to its effect (8 minutes), and crowding adds minutes, not hours, to an SMB cascade. A lone 1U dose's activity peaks at 44 minutes with the default 8-minute CGM lag (34 without), and 1 - IOB/dose reaches 0.9 after 199 minutes (191 without).
 
 ## How it works
 
@@ -16,7 +16,7 @@ fourth, the effect the CGM has yet to show. A dose adds straight into the depot 
 chain. Reported IOB is whatever's left across all stages; reported activity is the rate at which
 the last stage empties.
 
-Only the depot crowds: the more insulin sits in it, the slower it empties. Plasma (half-life 44
+Only the depot crowds: the more insulin sits in it, the slower it empties. Plasma (half-life 51.5
 minutes) and effect (half-life 8 minutes) are the body's and drain at fixed rates that nothing
 changes, not even the speed setting. The depot's rate is re-evaluated at every whole minute and
 right after every bolus, from the insulin then in the depot, and held in between. Boluses, SMBs,
@@ -26,17 +26,17 @@ doses given on top of it. Crowding stays within one infusion site: insulin given
 cannula/site change never crowds insulin given after it. How strongly doses crowd each other is a
 setting, the dose interaction (see "Dose interaction" below); at its default of 1 they all share one
 rate, as described here. With the fitted constants (below) the depot's rate on a settled site is
-0.157 per minute with 0.1U in the depot (half-life 4.4 minutes), 0.0874 with 1U (7.9 minutes) and
-0.0485 with 10U (14.3 minutes).
+0.239 per minute with 0.1U in the depot (half-life 2.9 minutes), 0.114 with 1U (6.1 minutes) and
+0.0542 with 10U (12.8 minutes).
 
-A new infusion site absorbs more slowly: at the new-site speed (0.49 by default) right after the
+A new infusion site absorbs more slowly: at the new-site speed (0.47 by default) right after the
 change, rising to full speed 48 hours later (see "Site age" below).
 
 A new dose goes into the depot, and the depot's rate is re-evaluated right after it with the dose
 included, so from then on it slows insulin still in the depot. The dose adds nothing to the later
 stages, whose rates are fixed, so the reported activity never jumps, neither when a dose is given
 nor when the depot's rate is re-evaluated. During an SMB cascade activity can still dip slightly, as
-each SMB slows the insulin leaving the depot: in the 12-SMB cascade further below, by at most 0.35%
+each SMB slows the insulin leaving the depot: in the 12-SMB cascade further below, by at most 0.36%
 of its peak from one minute to the next (Python replica of the engine).
 
 Profile basal (the true baseline, evaluated as if nothing else was happening) is tracked independently as usual, following the same mechanism among its own doses only: each minute of profile basal interacts with the rest of the profile basal by the dose interaction value (see below), never with delivered insulin, so with no temp basal and no other insulin running it evolves identically to delivered basal, and it is the same every day for the same profile. The IOB the loop uses (bolus IOB + net basal IOB) is total IOB minus profile basal IOB, where total IOB is all insulin on board at the site (boluses, SMBs, extended boluses and delivered basal), computed every minute as above. Above a dose interaction of 0, boluses, SMBs and extended boluses also slow the delivered basal; the basal they hold back is part of total IOB, and AAPS shows it under net basal IOB even with no temp running. The zero-temp IOB used for the zero-temp prediction is the same difference from a run with delivered basal stopped one minute from now, IOB and activity both.
@@ -52,13 +52,14 @@ of pulses at a time, and the basal and the square wave a dose a minute, all of i
 interaction 1, as insulin from one cannula pools). Serum is taken as proportional to the plasma
 stage, with one scale for all four curves. The report doesn't give the bolus size; 10U is assumed.
 
-Fitted (masses in U, rates per minute): depot rate 0.08736466 * D^-0.25557946 on a day-3 site, D
-the depot mass, the plasma half-life held at the published 44 minutes, and day 1 at 0.4915 times day
-3's speed. R^2: 0.994 / 0.987 on day 1 (single / dual wave), 0.974 / 0.970 on day 3. Left free, the
-plasma half-life comes out at 41-52 minutes, and a two-speed depot (part of every dose absorbed
-without crowding) fits only slightly better. Held at 5 minutes instead, the plasma stage fits these
-curves much worse (R^2 0.82-0.96). Assuming a 6U or 15U bolus instead of 10U moves the crowding exponent to -0.21 to
--0.30 and day 1 to 0.46-0.51 of day 3.
+Fitted (masses in U, rates per minute): depot rate 0.11391363 * D^-0.32231826 on a day-3 site, D
+the depot mass, the plasma half-life 51.5 minutes, and day 1 at 0.47 times day 3's speed. R^2: 0.993
+/ 0.986 on day 1 (single / dual wave), 0.983 / 0.972 on day 3. The previous constants held the plasma
+half-life at the published 44 minutes (depot rate 0.08736466 * D^-0.25557946, day 1 at 0.4915), which
+fits these curves worse: R^2 0.994 / 0.987 on day 1 but 0.974 / 0.970 on day 3; the four fall short of
+1 by 0.075 in all, against 0.066 now. Held at 5 minutes instead, the plasma stage fits them much worse
+(R^2 0.82-0.96). Assuming a 6U or 15U bolus instead of 10U moves the crowding exponent to -0.36 or
+-0.28 and day 1 to 0.49 or 0.44 of day 3, and leaves the plasma half-life at 51-52 minutes.
 
 The effect stage is the delay from insulin in the blood to its effect. The report has three studies
 that measured serum insulin and the glucose infusion rate in the same people. Fitted directly from the
@@ -71,33 +72,43 @@ glucose, so it trails the insulin's effect. The 8 minutes is the half-life that 
 real-world closed-loop pump and CGM data best, with the absorption above, its site age, dose
 interaction 1 and an 8-minute CGM lag, scanned from 2 to 32 minutes.
 
+Other structures were tested against the same curves and the same month. A depot that absorbs part of
+every dose without crowding fits the pump curves slightly better (R^2 0.993 / 0.986 / 0.985 / 0.980)
+but explained the month less well than the fitted plasma stage. Two effect stages in parallel, a fast
+and a slow one, fit all three clamp studies' infusion rates better than one stage (ITRR: R^2 0.987
+against 0.982), with 20-28% of the effect in the fast stage; that split explained the month much
+worse. A split fitted to the month itself (about 75% fast, the slow stage's half-life about 75
+minutes) explained it better than one stage, but contradicts the clamp studies and adds two settings,
+so the model keeps one depot and one effect stage.
+
 Minutes until 1 - IOB/dose of an isolated dose reaches 0.5 / 0.9, and its activity peak (nothing
-else in the system, no basal, absorption speed 1.0, a settled site, whole curve). The last column is
-the previous fit's (crowded depot and transit, a 5.3-minute active stage, fitted to the report's
-clamp activity curves; no CGM lag):
+else in the system, no basal, absorption speed 1.0, a settled site, whole curve). The last two columns
+are earlier fits': the plasma stage held at 44 minutes (the previous constants, with the default CGM
+lag), and the clamp fit before it (crowded depot and transit, a 5.3-minute active stage, fitted to the
+report's clamp activity curves; no CGM lag):
 
-| Dose | No CGM lag | CGM lag 8 minutes (default) | Previous fit |
-|------|------------|-----------------------------|--------------|
-| 0.1U | 62 / 164, peak 30 | 70 / 173, peak 41 | 55 / 97 |
-| 0.3U | 64 / 166, peak 33 | 72 / 175, peak 43 | 68 / 121 |
-| 1U   | 66 / 169, peak 37 | 75 / 177, peak 46 | 86 / 155 |
-| 3U   | 69 / 172, peak 41 | 78 / 180, peak 51 | 108 / 195 |
-| 5U   | 71 / 174, peak 44 | 80 / 182, peak 53 | 120 / 217 |
+| Dose | No CGM lag | CGM lag 8 minutes (default) | Plasma at 44 minutes, lag 8 | Clamp fit |
+|------|------------|-----------------------------|-----------------------------|-----------|
+| 0.1U | 67 / 187, peak 29 | 76 / 195, peak 40 | 70 / 173, peak 41 | 55 / 97 |
+| 0.3U | 69 / 188, peak 31 | 77 / 197, peak 42 | 72 / 175, peak 43 | 68 / 121 |
+| 1U   | 71 / 191, peak 34 | 79 / 199, peak 44 | 75 / 177, peak 46 | 86 / 155 |
+| 3U   | 74 / 194, peak 38 | 82 / 202, peak 48 | 78 / 180, peak 51 | 108 / 195 |
+| 5U   | 76 / 195, peak 41 | 84 / 204, peak 51 | 80 / 182, peak 53 | 120 / 217 |
 
-The previous fits used the clamp curves of 7, 15 and 30U injections, normalized to unit area. Those
+The clamp fits used the clamp curves of 7, 15 and 30U injections, normalized to unit area. Those
 curves come from healthy subjects, whose glucose infusion rate saturates (above), so the 30U curve
 looked broad and slow, and the fits read that as crowding: small doses came out much faster than
 large ones. Serum insulin shows much less dependence on the dose. Their constants, for reference:
-depot and transit 0.01784168 * M^-0.2224188, active stage 0.1297809 (the fit before this one);
+depot and transit 0.01784168 * M^-0.2224188, active stage 0.1297809 (the last of them);
 before that a crowded active stage (K1_B0 0.01617986, K1_B1 -0.03676295, KE_E0 0.0427785, KE_E1
 -0.4966087), EPAR plus TsunamiMods' small-dose curves (0.017258, -0.215412, KE 0.4389397), the rate
 held per dose (0.032072, -0.303093, KE 0.0315818; raw EPAR 0.044874, -0.339993, KE 0.0170232), and a
 depot-only version (0.069092 * M^-0.596593, K2 0.031796, KE ln(2)/44).
 
-The engine drops a dose 480 minutes after it is given. With the default 8-minute CGM lag, 0.085% of
-a 1U dose and 0.107% of 30U are still on board by then at speed 1 on a settled site; 0.10-0.18% at
-speed 0.5 or on a new site; 0.15-0.63% at speed 0.5 on a new site. Only at the lowest settings does
-it matter: at speed 0.2 with a new-site speed of 0.2, 11% of 1U and 44% of 30U.
+The engine drops a dose 480 minutes after it is given. With the default 8-minute CGM lag, 0.23% of
+a 1U dose and 0.28% of 30U are still on board by then at speed 1 on a settled site; 0.25-0.41% at
+speed 0.5 or on a new site; 0.32-0.98% at speed 0.5 on a new site. Only at the lowest settings does
+it matter: at speed 0.2 with a new-site speed of 0.2, 4.5% of 1U and 43% of 30U.
 
 The plots below were generated with the depot-only version's constants and have not been
 regenerated yet.
@@ -120,15 +131,15 @@ the pump study's did on day 3 of the infusion set. It's a direct multiplier appl
 ## Site age
 
 A preference (Insulin settings → Absorption Speed, New Site Speed, Dose Interaction, CGM Lag and Micro-doses → New Site Speed,
-`DoubleKey.InsulinTrafficJamSiteStartSpeed`, range 0.2-1.0, default 0.49) sets how fast a new
+`DoubleKey.InsulinTrafficJamSiteStartSpeed`, range 0.2-1.0, default 0.47) sets how fast a new
 infusion site absorbs, as a share of a settled site's speed. Right after a cannula/site change
 (`TE.Type.CANNULA_CHANGE`) the site absorbs at this share of the absorption speed, rising linearly to
 the full absorption speed 48 hours later: the pump study's day 1 against its day 3, two days apart. 1.0
 turns it off.
 
 A dose given right at a site change, with the defaults, no basal: 1U reaches 1 - IOB/dose of 0.5 / 0.9
-after 85 / 188 minutes and peaks at 59 (24 hours after the change 78 / 181 and 51; settled 75 / 177
-and 46); 3U 92 / 196 and 66 (82 / 185 and 56; settled 78 / 180 and 51).
+after 87 / 207 minutes and peaks at 55 (24 hours after the change 82 / 202 and 48; settled 79 / 199
+and 44); 3U 94 / 214 and 64 (86 / 206 and 54; settled 82 / 202 and 48).
 
 Each site generation (see "Dose interaction") absorbs at its own age: the depot's rate is
 re-evaluated with the site's age factor at every event, and insulin left at an old site keeps the old
@@ -171,16 +182,17 @@ the pump study, where all insulin from the one cannula is in one depot.
 A cascade of 12 SMBs totalling 7.85U (0.9, 0.6, 1.3, 0.4, 0.7, 0.5, 0.3, 0.8, 0.5, 0.4, 0.55 and 0.9U
 at minutes 0, 10, 20, 35, 45, 60, 75, 90, 105, 120, 140 and 160; Python replica, default 8-minute CGM
 lag, settled site): minutes by which its delivered insulin minus IOB reaches 50% / 90% of 7.85U later
-than for the same SMBs computed one at a time with no basal (147.8 / 266.5 minutes), and the largest
-excess of its IOB over theirs. The previous fit, with depot and transit crowded, gave 46.5 / 68.9
-minutes and 23.2% at a dose interaction of 1:
+than for the same SMBs computed one at a time with no basal (154.3 / 285.2 minutes), and the largest
+excess of its IOB over theirs. At a dose interaction of 1 the previous constants (plasma at 44
+minutes) gave 1.3 / 0.8 minutes and 0.7%, and the clamp fit, with depot and transit crowded, 46.5 /
+68.9 minutes and 23.2%:
 
 | Dose interaction | No basal: delay at 50% / 90% | Largest extra IOB | On 0.5 U/h | On 1 U/h |
 |---|---|---|---|---|
-| 1 (default) | 1.3 / 0.8 | 0.7% of 7.85U | 2.7 / 2.5 | 3.7 / 3.7 |
-| 0.5 | 0.7 / 0.4 | 0.4% | 1.3 / 1.3 | 1.8 / 1.9 |
-| 0.3 | 0.4 / 0.3 | 0.2% | 0.8 / 0.8 | 1.1 / 1.1 |
-| 0.1 | 0.1 / 0.1 | 0.1% | | |
+| 1 (default) | 0.49 / 0.28 | 0.34% of 7.85U | 1.52 / 1.37 | 2.35 / 2.26 |
+| 0.5 | 0.25 / 0.14 | 0.17% | 0.76 / 0.69 | 1.18 / 1.14 |
+| 0.3 | 0.15 / 0.09 | 0.10% | 0.46 / 0.41 | 0.71 / 0.69 |
+| 0.1 | 0.05 / 0.03 | 0.03% | | |
 | 0 | 0 / 0 | 0% | 0 / 0 | 0 / 0 |
 
 A single dose on a steady basal rate, minutes until 1 - (its own IOB)/dose reaches 0.5 / 0.9 (DI:
@@ -189,15 +201,15 @@ basal rate at dose interaction 0, as in the table further above):
 
 | Dose | DI 1, 0.5 U/h | DI 1, 1 U/h | DI 0.5, 0.5 U/h | DI 0.5, 1 U/h | DI 0.3, 0.5 U/h | DI 0.3, 1 U/h |
 |---|---|---|---|---|---|---|
-| 0.1U | 73 / 176 | 75 / 177 | 72 / 174 | 73 / 175 | 71 / 174 | 72 / 174 |
-| 0.3U | 74 / 177 | 76 / 178 | 73 / 176 | 74 / 176 | 73 / 175 | 73 / 176 |
-| 1U | 76 / 179 | 77 / 180 | 75 / 178 | 76 / 178 | 75 / 178 | 75 / 178 |
-| 3U | 79 / 182 | 80 / 182 | 78 / 181 | 79 / 181 | 78 / 181 | 78 / 181 |
-| 5U | 80 / 183 | 81 / 184 | 80 / 183 | 80 / 183 | 80 / 183 | 80 / 183 |
+| 0.1U | 77 / 197 | 79 / 198 | 77 / 196 | 77 / 197 | 76 / 196 | 77 / 196 |
+| 0.3U | 78 / 198 | 79 / 199 | 78 / 197 | 78 / 198 | 77 / 197 | 78 / 198 |
+| 1U | 80 / 200 | 81 / 201 | 80 / 200 | 80 / 200 | 80 / 199 | 80 / 200 |
+| 3U | 83 / 203 | 84 / 203 | 83 / 202 | 83 / 203 | 83 / 202 | 83 / 202 |
+| 5U | 85 / 205 | 85 / 205 | 84 / 204 | 85 / 204 | 84 / 204 | 84 / 204 |
 
 At the default dose interaction of 1, a basal rate started with no insulin on board (rate/60 U
-delivered at the end of every minute) reaches 50% / 90% of its steady-state activity after 72 / 174
-minutes at 0.5 U/h and 73 / 176 minutes at 1 U/h.
+delivered at the end of every minute) reaches 50% / 90% of its steady-state activity after 76 / 196
+minutes at 0.5 U/h and 77 / 197 minutes at 1 U/h.
 
 Below 1 the shared branches are the engine run at 1, one pool per category for all doses, and the
 individual branches come from each amount's isolated curve, tabulated once on a 1-minute grid (the
@@ -244,8 +256,8 @@ stage, at the fixed rate kc = 1/lag:
 
 Every dose's activity is then delayed and smoothed by about the lag, to when the CGM can see it,
 and C, effect that has happened in the blood but not yet on the CGM, counts as insulin on board. A
-dose's total effect is unchanged. A lone 1U dose's activity peaks at 37 minutes with no lag, 43 at 5
-minutes, 46 at 8 and 51 at 12 (Python replica). Insulin still enters the depot at its real time, so
+dose's total effect is unchanged. A lone 1U dose's activity peaks at 34 minutes with no lag, 40 at 5
+minutes, 44 at 8 and 50 at 12 (Python replica). Insulin still enters the depot at its real time, so
 crowding, treatment times and the SMB interval are untouched. The lag is the sensor's, not the
 insulin's, so the speed setting doesn't scale it. The default of 8 minutes is the lag the effect
 stage was fitted with (see "Absorption rates and the fit"); 0 removes the stage.
@@ -275,7 +287,7 @@ Each pulse is a dose of its own, split by the dose interaction like any other. I
 the pool, so at a dose interaction of 1 a bolus enters over its delivery time and otherwise absorbs as
 before. Its individual branch absorbs as a lone dose of the pulse size, so below 1 the individual share
 of every bolus absorbs as fast as a lone pulse, whatever the bolus's size. A lone 3U bolus at speed 1,
-with the default lag, peaks at 52 minutes at a dose interaction of 1 and at about 41 minutes at 0. A
+with the default lag, peaks at 49 minutes at a dose interaction of 1 and at about 41 minutes at 0. A
 lone bolus therefore depends on the dose interaction, and turning micro-doses on changes the curves
 somewhat.
 
@@ -287,7 +299,7 @@ and a bolus costs about what it did as one dose. On two days of closed-loop hist
 IOB arrays take 36 ms with micro-doses on and 37 ms with them off at a dose interaction of 1 (49 / 49
 at 0.55; JVM on the cloud test machine, not a phone); treating every pulse as a bolus of its own takes
 61-77 ms. Over a month of closed-loop history, at speeds 0.8-1.4 and dose interactions 0.1-1 with an
-8-minute CGM lag, the chunked activity stays within 0.003 U/h of the pulse-by-pulse one.
+8-minute CGM lag, the chunked activity stays within 0.004 U/h of the pulse-by-pulse one.
 
 A bolus still counts whole as insulin on board from its timestamp: the pulses still to come are on
 board but not yet active. Some pump drivers record a bolus as it starts (AAPS's Medtrum driver does, with
@@ -295,7 +307,7 @@ the full amount), so a loop run during a long bolus still counts all of it. The 
 interval (`lastBolusTime`) use the bolus as recorded. The insulin plugin's own single-dose curve (its
 graph, and each treatment's IOB in the treatments list) gives a bolus the same pulses, at the dose
 interaction set, and matches the engine for a lone bolus on a settled site given at a whole minute: its
-activity to rounding, its IOB less the 0.09% still on board at the 480-minute horizon, which the curve
+activity to rounding, its IOB less the 0.23-0.28% still on board at the 480-minute horizon, which the curve
 subtracts so that it ends at 0 there.
 
 ## The activity monitor's multiplier on the profile basal

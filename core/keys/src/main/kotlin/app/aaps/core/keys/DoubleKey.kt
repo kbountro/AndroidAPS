@@ -72,8 +72,8 @@ enum class DoubleKey(
     // Traffic Jam new-site speed: a new infusion site's absorption speed, as a share of a settled site's
     // (TrafficJamChain.siteFactor in plugins/insulin). The site starts at this share of the speed setting
     // at its cannula change and reaches the full setting linearly 48 h later, the EMA report's pump study's
-    // day 1 to day 3. Default 0.49, that study's day 1 against its day 3; 1.0 turns it off.
-    InsulinTrafficJamSiteStartSpeed("insulin_traffic_jam_site_start_speed", 0.49, 0.2, 1.0, hideParentScreenIfHidden = true),
+    // day 1 to day 3. Default 0.47, that study's day 1 against its day 3; 1.0 turns it off.
+    InsulinTrafficJamSiteStartSpeed("insulin_traffic_jam_site_start_speed", 0.47, 0.2, 1.0, hideParentScreenIfHidden = true),
 
     // Traffic Jam dose interaction (shown as "Dose Interaction"; CrowdingGroup in TsunamiIobEngineImpl):
     // the share of every dose that absorbs together with all insulin at the site. Every delivery is
