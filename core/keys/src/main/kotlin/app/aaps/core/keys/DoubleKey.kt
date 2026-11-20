@@ -62,16 +62,18 @@ enum class DoubleKey(
     ActivityScaleFactor("activity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
     InactivityScaleFactor("inactivity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
 
-    // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on every
-    // stage's rate alike, the shared depot/transit rate (K1_B0) and the active stage's exit rate
-    // (KE, PdModel in TsunamiIobEngineImpl), applied as-is - no derived "effective DIA" or other
-    // indirect framing, since this model's decay is dose-dependent (crowding) and asymptotic, so no
-    // single duration number would actually be dose-independent or exact. 2.0 doubles every rate and
-    // 0.5 halves it, which compresses or stretches the whole curve in time by that factor, up to the
-    // once-a-minute rate refresh: the time to the activity peak is divided by it and the peak height
-    // multiplied by it (single doses of 0.1-10 U: within 0.6 min and 0.4% at 0.5-2, 1.5 min and
-    // 1.5% at 0.2-5). Default 1.0 reproduces the unscaled fitted constants.
+    // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on the depot's
+    // rate (K1_B0, TrafficJamChain in plugins/insulin), the absorption from the infusion site, applied
+    // as-is. The plasma and effect stages are the body's and stay as fitted, so 2.0 speeds up the
+    // absorption only, not the whole curve. Default 1.0: a settled (day-3) pump site, as fitted to the
+    // EMA report's pump study.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
+
+    // Traffic Jam new-site speed: a new infusion site's absorption speed, as a share of a settled site's
+    // (TrafficJamChain.siteFactor in plugins/insulin). The site starts at this share of the speed setting
+    // at its cannula change and reaches the full setting linearly 48 h later, the EMA report's pump study's
+    // day 1 to day 3. Default 0.49, that study's day 1 against its day 3; 1.0 turns it off.
+    InsulinTrafficJamSiteStartSpeed("insulin_traffic_jam_site_start_speed", 0.49, 0.2, 1.0, hideParentScreenIfHidden = true),
 
     // Traffic Jam dose interaction (shown as "Dose Interaction"; CrowdingGroup in TsunamiIobEngineImpl):
     // the share of every dose that absorbs together with all insulin at the site. Every delivery is
@@ -84,13 +86,13 @@ enum class DoubleKey(
     // path, one pooled depot, as fitted. Not fitted (the EPAR data has single doses with no basal only).
     InsulinTrafficJamMixing("insulin_traffic_jam_mixing", 1.0, 0.0, 1.0, hideParentScreenIfHidden = true),
 
-    // Traffic Jam CGM lag, minutes (CgmLagStage in plugins/insulin): one more first-order stage after the
-    // active one, at rate 1/lag, so the reported activity is the insulin's effect as the CGM sees it - the
-    // fitted curve is the effect in the blood (EPAR clamp data), and interstitial glucose and the sensor's
-    // own processing trail the blood. Delays and smooths every dose's activity by about this much, and
-    // counts the effect still on its way to the CGM as insulin on board. Not scaled by the speed setting.
-    // 0 (default): no lag stage, exactly as before.
-    InsulinTrafficJamCgmLag("insulin_traffic_jam_cgm_lag", 0.0, 0.0, 30.0, hideParentScreenIfHidden = true),
+    // Traffic Jam CGM lag, minutes (TrafficJamChain in plugins/insulin): one more first-order stage after the
+    // effect stage, at rate 1/lag, so the reported activity is the insulin's effect as the CGM sees it -
+    // interstitial glucose and the sensor's own processing trail the blood. Delays and smooths every dose's
+    // activity by about this much, and counts the effect still on its way to the CGM as insulin on board. Not
+    // scaled by the speed setting. Default 8: the effect stage's 8 minutes were fitted with this 8-minute lag.
+    // 0: no lag stage.
+    InsulinTrafficJamCgmLag("insulin_traffic_jam_cgm_lag", 8.0, 0.0, 30.0, hideParentScreenIfHidden = true),
 
     // Traffic Jam micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, shown only when it is on): the pump's pulse, U,
     // and its bolus speed, U/min. Default 0.05 U at 1.5 U/min, one pulse every 2 s: 1.5 U/min is the standard bolus

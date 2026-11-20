@@ -42,6 +42,7 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
     override fun configuration(): JSONObject =
         JSONObject()
             .put(DoubleKey.InsulinTrafficJamSpeedMultiplier, preferences)
+            .put(DoubleKey.InsulinTrafficJamSiteStartSpeed, preferences)
             .put(DoubleKey.InsulinTrafficJamMixing, preferences)
             .put(DoubleKey.InsulinTrafficJamCgmLag, preferences)
             .put(BooleanKey.InsulinTrafficJamMicroDoses, preferences)
@@ -51,6 +52,7 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
     override fun applyConfiguration(configuration: JSONObject) {
         configuration
             .store(DoubleKey.InsulinTrafficJamSpeedMultiplier, preferences)
+            .store(DoubleKey.InsulinTrafficJamSiteStartSpeed, preferences)
             .store(DoubleKey.InsulinTrafficJamMixing, preferences)
             .store(DoubleKey.InsulinTrafficJamCgmLag, preferences)
             .store(BooleanKey.InsulinTrafficJamMicroDoses, preferences)
@@ -82,6 +84,12 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
                 AdaptiveDoublePreference(
                     ctx = context, doubleKey = DoubleKey.InsulinTrafficJamSpeedMultiplier,
                     dialogMessage = R.string.insulin_traffic_jam_speed_multiplier_summary, title = R.string.insulin_traffic_jam_speed_multiplier_title
+                )
+            )
+            addPreference(
+                AdaptiveDoublePreference(
+                    ctx = context, doubleKey = DoubleKey.InsulinTrafficJamSiteStartSpeed,
+                    dialogMessage = R.string.insulin_traffic_jam_site_start_speed_summary, title = R.string.insulin_traffic_jam_site_start_speed_title
                 )
             )
             addPreference(

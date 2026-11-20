@@ -26,11 +26,8 @@ import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 
 /**
  * "Traffic Jam" IOB engine backing [Insulin.InsulinType.OREF_LYUMJEV_U100_TRAFFIC_JAM].
@@ -38,8 +35,8 @@ import kotlin.math.pow
  * Models a shared subcutaneous depot as a small, continuously-evolving pool of linear
  * (first-order) compartments - not one independent closed-form curve per dose. Every dose
  * is an impulse added directly into its category's own depot state; crowding is expressed
- * as the shared depot/transit rate depending on how much mass is currently still in the
- * depot, evaluated live rather than snapshotted per dose. Because every state is a genuine ODE
+ * as the depot's rate depending on how much mass is currently still in it, evaluated live
+ * rather than snapshotted per dose. Because every state is a genuine ODE
  * state (not an age-parametrized curve), a rate constant can change value at any instant
  * with no reinterpretation needed - the state simply keeps evolving from wherever it
  * currently is. This is what the earlier per-dose-curve design could not do: that design
@@ -47,11 +44,11 @@ import kotlin.math.pow
  * change to `tp` had no continuous way to apply mid-flight, and had to be patched with a
  * "time warp" (retroactively inventing a new elapsed age to keep IOB continuous) that
  * unavoidably forced a discontinuous drop in reported activity every time the pool grew.
- * Here activity is KE * A with a constant KE, and a dose adds only to the depot, so activity
- * never jumps (see [PdModel]). An optional CGM lag stage after A ([CgmLagStage]) delays and smooths
- * the reported activity to when the CGM can see it.
+ * Here the chain is depot -> plasma -> effect ([TrafficJamChain]): activity is K_EFFECT * A with a constant
+ * K_EFFECT, only the depot's rate changes, and a dose adds only to the depot, so activity never jumps. An optional
+ * CGM lag stage after A delays and smooths the reported activity to when the CGM can see it.
  *
- * See [PdModel] for the full derivation and the calibration that replaced it.
+ * See [TrafficJamChain] for the fit and [PdModel] for the isolated curves of the dose interaction.
  */
 @Singleton
 class TsunamiIobEngineImpl @Inject constructor(
@@ -141,11 +138,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         // Boluses come by id, newest first, with timestamp >= from; sorted by timestamp here (stable, so equal
         // timestamps keep that order) to be cut by binary search. The rest come by timestamp: temp basals and
-        // extended boluses starting within [from, to], cannula changes from `from` on.
+        // extended boluses starting within [from, to], cannula changes from a site ramp (48 h) before `from` on, so
+        // that the age of the site in use at any request's start is known ([lastCannulaChangeBefore]).
         private val boluses = persistenceLayer.getBolusesFromTime(from, true).blockingGet().sortedBy { it.timestamp }
         private val tempBasals = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(from, to, true)
         private val extendedBoluses = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(from, to, true)
-        private val cannulaChanges = persistenceLayer.getTherapyEventDataFromTime(from, TE.Type.CANNULA_CHANGE, true)
+        private val cannulaChanges = persistenceLayer.getTherapyEventDataFromTime(from - TrafficJamChain.SITE_RAMP_MS, TE.Type.CANNULA_CHANGE, true)
 
         /** Every whole minute's profile and basal rate, looked up the first time a request needs it. */
         private val minuteBasals = arrayOfNulls<Any>(((to - from) / 60_000L).toInt() + 1)
@@ -163,6 +161,15 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         /** getTherapyEventDataFromTime(time, CANNULA_CHANGE). */
         fun cannulaChangesFrom(time: Long): List<TE> = cannulaChanges.subList(firstAtOrAfter(cannulaChanges, time) { it.timestamp }, cannulaChanges.size)
+
+        /**
+         * The last cannula change before [time], if one is within a site ramp (48 h) of it (and [time] is at least
+         * `from`); null otherwise: the site in use then has reached full speed ([TrafficJamChain.siteFactor]).
+         */
+        fun lastCannulaChangeBefore(time: Long): Long? {
+            val i = firstAtOrAfter(cannulaChanges, time) { it.timestamp } - 1
+            return if (i >= 0 && time - cannulaChanges[i].timestamp < TrafficJamChain.SITE_RAMP_MS) cannulaChanges[i].timestamp else null
+        }
 
         /** The profile at the whole minute [minute] and its basal rate then, or null without a profile. */
         fun minuteBasal(minute: Long): MinuteBasal? {
@@ -265,7 +272,7 @@ class TsunamiIobEngineImpl @Inject constructor(
     // THE TRAFFIC JAM DEPOT SIMULATION
     // Five attribution categories (bolus, extended bolus, absolute temp-basal delivery,
     // profile basal, autosens-adjusted profile basal) each carry their own persistent
-    // 3-compartment pool (depot -> transit -> active, see [PdModel]) so IOB/activity can
+    // pool (depot -> plasma -> effect, see [TrafficJamChain]) so IOB/activity can
     // still be broken down the same way AAPS expects. These pools hold the shared branch of every
     // dose: bolus, extBolus and basalAbs crowd each other, and profileBasal crowds only itself, with
     // autoProfileBasal moving at its rate. Below a dose interaction of 1 the rest of every dose
@@ -316,18 +323,17 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
-        // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier): scales
-        // every stage's rate alike, the crowded depot/transit rate and KE, so the whole curve
-        // stretches or compresses in time. Dose interaction
-        // (DoubleKey.InsulinTrafficJamMixing, see [CrowdingGroup]). Both read once per
-        // simulated window, like the fitted constants are effectively constant - a mid-window
-        // change to either preference is not retroactively applied to the past, same as those.
+        // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier): scales the
+        // depot's rate only, the site's absorption ([TrafficJamChain]; plasma and effect are the body's).
+        // A new site starts at DoubleKey.InsulinTrafficJamSiteStartSpeed times it, reaching it 48 h after
+        // the change ([TrafficJamChain.siteFactor]). Dose interaction (DoubleKey.InsulinTrafficJamMixing,
+        // see [CrowdingGroup]). All read once per simulated window, like the fitted constants are effectively
+        // constant - a mid-window change to any of them is not retroactively applied to the past, same as those.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
-        val ke = speedFactor * PdModel.KE
+        val siteStartSpeed = preferences.get(DoubleKey.InsulinTrafficJamSiteStartSpeed).coerceIn(0.2, 1.0)
         val mixing = preferences.get(DoubleKey.InsulinTrafficJamMixing).coerceIn(0.0, 1.0)
-        // CGM lag (DoubleKey.InsulinTrafficJamCgmLag, see [CgmLagStage]): the rate of the stage after the
-        // active one, or 0 for no such stage (the default, unchanged from before). Not scaled by the speed
-        // setting: it is the sensor's delay, not the insulin's.
+        // CGM lag (DoubleKey.InsulinTrafficJamCgmLag): the rate of the stage after the effect stage, or 0 for no
+        // such stage. Not scaled by the speed setting: it is the sensor's delay, not the insulin's.
         val lagMinutes = preferences.get(DoubleKey.InsulinTrafficJamCgmLag).coerceIn(0.0, 30.0)
         val kc = if (lagMinutes > 0.0) 1.0 / lagMinutes else 0.0
 
@@ -340,26 +346,36 @@ class TsunamiIobEngineImpl @Inject constructor(
         val siteChangeBoundaries = records.cannulaChangesFrom(startTime)
             .map { it.timestamp }
             .filter { it <= horizonTime }
+        // When the site in use at the window's start was put in, if less than 48 h before: generation 0's start.
+        val firstSiteStart = records.lastCannulaChangeBefore(startTime)
+
+        /** When site generation [gen] was put in, or null if it had reached full speed by the window's start. */
+        fun siteStart(gen: Int): Long? = if (gen >= 1) siteChangeBoundaries[gen - 1] else firstSiteStart
+
+        /** The absorption speed at [time] of a site put in at [start]: the speed setting times the site's age factor. */
+        fun absorptionSpeed(start: Long?, time: Long): Double =
+            if (start == null) speedFactor else speedFactor * TrafficJamChain.siteFactor(siteStartSpeed, time - start)
 
         // One persistent set of pools (and crowding rates) per site generation, never shared
         // across generations: the shared branch of every dose, one pool per category (see [CrowdingGroup]).
-        class SiteState {
+        class SiteState(val start: Long?) {
 
             // All of a group's shared branches share one rate, so one pool per category holds them exactly.
             val pools = Array(Category.entries.size) { Pool() }
 
             fun propagateInPlace(dtMinutes: Double) {
-                for (p in pools) p.propagateInPlace(ke, kc, dtMinutes)
+                for (p in pools) p.propagateInPlace(kc, dtMinutes)
             }
 
-            /** Every pool's depot/transit rate from its group's live depot mass (see [CrowdingGroup]). */
-            fun refreshRates() {
+            /** Every pool's depot rate from its group's live depot mass (see [CrowdingGroup]) and the site's age at [time]. */
+            fun refreshRates(time: Long) {
+                val speed = absorptionSpeed(start, time)
                 val deliveredDepot = groupDepotMass(pools, CrowdingGroup.DELIVERED)
                 val profileDepot = groupDepotMass(pools, CrowdingGroup.PROFILE)
                 for (cat in Category.entries) {
                     if (!cat.drivesGroupRate) continue
                     val groupDepot = if (cat.group == CrowdingGroup.DELIVERED) deliveredDepot else profileDepot
-                    pools[cat.ordinal].k = PdModel.rate(speedFactor, groupDepot)
+                    pools[cat.ordinal].k = TrafficJamChain.rate(speed, groupDepot)
                 }
                 // autoProfileBasal moves at the profile basal's rate, never at its own.
                 pools[Category.AUTO_PROFILE_BASAL.ordinal].k = pools[Category.PROFILE_BASAL.ordinal].k
@@ -367,7 +383,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         }
 
         val sites = HashMap<Int, SiteState>()
-        fun siteFor(gen: Int): SiteState = sites.getOrPut(gen) { SiteState() }
+        fun siteFor(gen: Int): SiteState = sites.getOrPut(gen) { SiteState(siteStart(gen)) }
         var lastTime = startTime
 
         // The individual branch of every dose given so far, at a dose interaction below 1: its isolated
@@ -377,12 +393,14 @@ class TsunamiIobEngineImpl @Inject constructor(
         // profile-basal dose also carries its autoProfileBasal twin, which moves at the profile basal's
         // rate and so is the same curve scaled by [IndividualRun.autoScale]. With micro-doses, a minute of a
         // bolus's pulses is [scale] lone doses of the pulse size, and a long bolus's full minutes, a minute
-        // apart, one run.
+        // apart, one run. An isolated curve absorbs at the site's speed when its dose is given, its age factor rounded to
+        // 0.01 ([PdModel.siteSpeed]) so that a new site's first 48 h need some 50 curves per amount, not one per minute.
         val individualRuns = ArrayList<IndividualRun>()
         val openRuns = arrayOfNulls<IndividualRun>(Category.entries.size)
-        val curvesByAmount = HashMap<Double, PdModel.IsolatedCurve>()
-        fun addIndividual(timestamp: Long, cat: Category, amount: Double, autoScale: Double = 0.0, scale: Double = 1.0) {
-            val curve = curvesByAmount.getOrPut(amount) { PdModel.isolatedCurve(amount, speedFactor, kc) }
+        val curvesByAmount = HashMap<Pair<Double, Double>, PdModel.IsolatedCurve>()
+        fun addIndividual(timestamp: Long, siteStart: Long?, cat: Category, amount: Double, autoScale: Double = 0.0, scale: Double = 1.0) {
+            val speed = PdModel.siteSpeed(speedFactor, siteStartSpeed, siteStart, timestamp)
+            val curve = curvesByAmount.getOrPut(Pair(amount, speed)) { PdModel.isolatedCurve(amount, speed, kc) }
             val open = openRuns[cat.ordinal]
             if (open != null && open.curve === curve && open.autoScale == autoScale && open.scale == scale && open.last + 60000L == timestamp) open.count++
             else IndividualRun(cat, curve, autoScale, timestamp, scale).also { individualRuns.add(it); openRuns[cat.ordinal] = it }
@@ -427,8 +445,9 @@ class TsunamiIobEngineImpl @Inject constructor(
                     // for every divisor value in the enforced [1, 10] range.
                     val tSnoozeElapsed = ((tTarget - b.timestamp) * divisor) / 60000.0
                     if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
-                        // Snooze reflects this bolus's own isolated pool, not shared crowding.
-                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount, speedFactor, kc)
+                        // Snooze reflects this bolus's own isolated pool, not shared crowding, at its site's speed.
+                        val speed = PdModel.siteSpeed(speedFactor, siteStartSpeed, siteStart(siteGenerationFor(b.timestamp, siteChangeBoundaries)), b.timestamp)
+                        bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount, speed, kc)
                     }
                 }
             }
@@ -439,9 +458,9 @@ class TsunamiIobEngineImpl @Inject constructor(
             val act = DoubleArray(Category.entries.size)
             for (cat in Category.entries) {
                 val sum = Pool()
-                for (site in sites.values) sum.add(site.pools[cat.ordinal].propagated(ke, kc, dtPeek))
+                for (site in sites.values) sum.add(site.pools[cat.ordinal].propagated(kc, dtPeek))
                 iob[cat.ordinal] = sum.iob()
-                act[cat.ordinal] = sum.activity(ke, kc)
+                act[cat.ordinal] = sum.activity(kc)
             }
 
             // m times the shared branches, which the pools hold as they would at m = 1, plus 1 - m times
@@ -452,7 +471,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 for (run in individualRuns) {
                     PdModel.runState(run.curve, tTarget - run.first, run.count, shiftWholeMinuteRuns && run.first % 60_000L == 0L, runState)
                     val runIob = run.scale * (runState[0] + runState[1] + runState[2] + runState[3])
-                    val runAct = run.scale * (if (kc > 0.0) kc * runState[3] else ke * runState[2])
+                    val runAct = run.scale * (if (kc > 0.0) kc * runState[3] else TrafficJamChain.K_EFFECT * runState[2])
                     indIob[run.cat.ordinal] += runIob
                     indAct[run.cat.ordinal] += runAct
                     if (run.autoScale > 0.0) {
@@ -513,6 +532,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             lastTime = dose.timestamp
 
             val site = siteFor(siteGenerationFor(dose.timestamp, siteChangeBoundaries))
+            val doseSiteStart = site.start
 
             // Shared branches, held in the pools as they would be at m = 1 (see [CrowdingGroup]).
             if (dose.bolusAmt > 0.0) site.pools[Category.BOLUS.ordinal].D += dose.bolusAmt
@@ -528,17 +548,17 @@ class TsunamiIobEngineImpl @Inject constructor(
             if (mixing < 1.0) {
                 if (dose.bolusAmt > 0.0) {
                     val chunks = dose.bolusChunks
-                    if (chunks == null || pulses == null) addIndividual(dose.timestamp, Category.BOLUS, dose.bolusAmt)
+                    if (chunks == null || pulses == null) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, dose.bolusAmt)
                     else for (chunk in chunks) {
-                        if (chunk.pulses > 0) addIndividual(dose.timestamp, Category.BOLUS, pulses.pulseSize, scale = chunk.pulses.toDouble())
-                        if (chunk.extra > 0.0) addIndividual(dose.timestamp, Category.BOLUS, chunk.extra)
+                        if (chunk.pulses > 0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, pulses.pulseSize, scale = chunk.pulses.toDouble())
+                        if (chunk.extra > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, chunk.extra)
                     }
                 }
-                if (dose.extBolusAmt > 0.0) addIndividual(dose.timestamp, Category.EXT_BOLUS, dose.extBolusAmt)
-                if (dose.basalAbsAmt > 0.0) addIndividual(dose.timestamp, Category.BASAL_ABS, dose.basalAbsAmt)
+                if (dose.extBolusAmt > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.EXT_BOLUS, dose.extBolusAmt)
+                if (dose.basalAbsAmt > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.BASAL_ABS, dose.basalAbsAmt)
                 // autoProfileBasal is the profile basal scaled by sensitivityRatio, so it comes with it.
                 if (dose.profileBasalAmt > 0.0) {
-                    addIndividual(dose.timestamp, Category.PROFILE_BASAL, dose.profileBasalAmt, dose.autoProfileBasalAmt / dose.profileBasalAmt)
+                    addIndividual(dose.timestamp, doseSiteStart, Category.PROFILE_BASAL, dose.profileBasalAmt, dose.autoProfileBasalAmt / dose.profileBasalAmt)
                 }
             }
 
@@ -548,8 +568,9 @@ class TsunamiIobEngineImpl @Inject constructor(
             // projection included), so no rate is then held for more than a minute while its depot
             // empties. Where no profile exists, only boluses create events and the rates are held
             // between them. Every live generation too, since an old site's depot keeps emptying
-            // after dosing has moved to the new one.
-            for (s in sites.values) s.refreshRates()
+            // after dosing has moved to the new one. A new site's age factor changes slowly (over 48 h),
+            // so holding it with the rate between events is exact to well within a minute's change.
+            for (s in sites.values) s.refreshRates(lastTime)
         }
 
         return evaluatePools((requestedTime - lastTime) / 60000.0, requestedTime)
@@ -573,13 +594,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     /**
      * Mass still sitting in one site's category pools' depots for one crowding [group] (see
-     * [CrowdingGroup] for which pools crowd which). Deliberately D only, never D+X: X is mass that has already left
-     * the depot (past the crowding-limited step, in transit toward the active/eliminated stage),
-     * so it no longer competes for SC depot space and must not inflate the rate that governs the
-     * depot's own outflow. Getting this wrong compounds under sustained dosing - X never fully
+     * [CrowdingGroup] for which pools crowd which). Deliberately D only, never D+X: X is insulin that has already left
+     * the depot (in the blood), so it no longer competes for SC depot space and must not inflate the rate that
+     * governs the depot's own outflow. Getting this wrong compounds under sustained dosing - X never fully
      * clears between frequent small doses (real SMB/TBR cadence), so including it keeps dragging
      * k1 down further the longer a session runs. [pools] is always one site generation's own
-     * pools, never mixed across sites. Floored inside [PdModel.rate].
+     * pools, never mixed across sites. Floored inside [TrafficJamChain.rate].
      */
     private fun groupDepotMass(pools: Array<Pool>, group: CrowdingGroup): Double {
         var mass = 0.0
@@ -761,18 +781,18 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     /**
      * Which pools crowd each other, and how much: the dose interaction m
-     * (DoubleKey.InsulinTrafficJamMixing, 0 to 1, not fitted - the EPAR data has single doses with no
-     * basal only). Every delivery is one dose: each bolus/SMB, and each event's (each minute's)
-     * delivered basal, extended bolus and profile basal. Each dose is split into two branches, each a
-     * depot -> transit -> active chain:
+     * (DoubleKey.InsulinTrafficJamMixing, 0 to 1; the absorption is fitted at 1, with all of the pump study's
+     * insulin in one depot - see [TrafficJamChain]). Every delivery is one dose: each bolus/SMB, and each event's
+     * (each minute's) delivered basal, extended bolus and profile basal. Each dose is split into two branches, each a
+     * depot -> plasma -> effect chain:
      *  - a shared branch, m of the dose, absorbing together with the shared branches of all the other
      *    doses of its group. Its rate follows the group's whole depot mass as if all of that insulin
      *    were in the shared branches, so together they are m times the one pooled (D, X, A) per group
      *    that the engine runs at m = 1, one pool per category, exactly as fitted.
      *  - an individual branch, 1 - m of the dose, absorbing on its own. Its rate follows its own depot
      *    mass as if the whole dose were in it, so it is 1 - m times the dose's isolated curve
-     *    ([PdModel.isolatedState]), which depends on the dose's amount alone and is tabulated once per
-     *    amount.
+     *    ([PdModel.isolatedState]), which depends on the dose's amount and its site's speed when it is
+     *    given ([PdModel.siteSpeed]) and is tabulated once per amount and speed.
      * Every IOB and activity is therefore m times its value at m = 1 plus 1 - m times the sum of the
      * doses' isolated curves, and a dose with no other insulin on board follows the fitted curve at
      * every m. At m = 1 (default) all insulin follows the same path. At m = 0 no dose interacts with
@@ -811,33 +831,29 @@ class TsunamiIobEngineImpl @Inject constructor(
     }
 
     /**
-     * One pool's live state: mass still in the SC depot (D), in transit (X), or active (A), and the
-     * depot/transit rate [k] it was last given (SiteState.refreshRates, at every event). With a CGM lag
-     * (kc > 0, see [CgmLagStage]) also C, insulin whose effect the CGM has yet to see: activity is then
-     * kc*C instead of ke*A, and C counts as on board. With kc = 0, C stays 0 and nothing changes.
+     * One pool's live state ([TrafficJamChain]): insulin still in the SC depot (D), in the blood (X), effect still to
+     * come (A), and the depot rate [k] it was last given (SiteState.refreshRates, at every event). With a CGM lag (kc > 0)
+     * also C, the effect the CGM has yet to show: activity is then kc*C instead of K_EFFECT*A, and C counts as on board.
+     * With kc = 0, C stays 0 and nothing changes.
      */
     private class Pool(var D: Double = 0.0, var X: Double = 0.0, var A: Double = 0.0, var C: Double = 0.0, var k: Double = 0.0) {
 
+        private val step = DoubleArray(4)
+
         fun iob(): Double = D + X + A + C
-        fun activity(ke: Double, kc: Double): Double = if (kc > 0.0) kc * C else ke * A
+        fun activity(kc: Double): Double = if (kc > 0.0) kc * C else TrafficJamChain.K_EFFECT * A
 
         fun add(p: Pool) {
             D += p.D; X += p.X; A += p.A; C += p.C
         }
 
-        fun propagated(ke: Double, kc: Double, dtMinutes: Double): Pool =
-            Pool(D, X, A, C, k).also { it.propagateInPlace(ke, kc, dtMinutes) }
+        fun propagated(kc: Double, dtMinutes: Double): Pool =
+            Pool(D, X, A, C, k).also { it.propagateInPlace(kc, dtMinutes) }
 
-        fun propagateInPlace(ke: Double, kc: Double, dtMinutes: Double) {
+        fun propagateInPlace(kc: Double, dtMinutes: Double) {
             if (dtMinutes <= 0.0 || (D == 0.0 && X == 0.0 && A == 0.0 && C == 0.0)) return
-            if (kc > 0.0) {
-                val s = DoubleArray(4)
-                PdModel.propagateWithLag(D, X, A, C, k, ke, kc, dtMinutes, s)
-                D = s[0]; X = s[1]; A = s[2]; C = s[3]
-            } else {
-                val (nd, nx, na) = PdModel.propagate(D, X, A, k, k, ke, dtMinutes)
-                D = nd; X = nx; A = na
-            }
+            TrafficJamChain.propagate(D, X, A, C, k, kc, dtMinutes, step)
+            D = step[0]; X = step[1]; A = step[2]; C = step[3]
         }
     }
 
@@ -866,158 +882,27 @@ class TsunamiIobEngineImpl @Inject constructor(
     )
 
     /**
-     * Three linked first-order compartments: D (SC depot) -> X (transit) -> A (active, reported as
-     * activity = KE*A). IOB(t) = D(t) + X(t) + A(t): mass not yet through the final step.
-     * With a CGM lag set (DoubleKey.InsulinTrafficJamCgmLag), a fourth, C, follows A at the fixed rate
-     * kc = 1/lag ([CgmLagStage]): activity is then kc*C and IOB D + X + A + C, the effect as the CGM sees
-     * it. The lag stage is not part of the fit below - the EPAR clamp curves measure the effect in the blood.
-     *
-     * Depot and transit share ONE crowding-dependent rate, K(M) = K1_B0 * M^K1_B1 ([rate]), where M
-     * is the live depot mass of the dose's crowding group (D only - see groupDepotMass and
-     * CrowdingGroup; at a dose interaction below 1, this is the shared branch, and the individual
-     * branch is the dose's isolated curve, with M its own depot mass). It is re-evaluated at
-     * every event (every whole minute and every bolus timestamp, right after that event's doses
-     * enter D; for an isolated curve, every whole minute of the dose's age) and held until the next,
-     * and each interval is solved exactly. [KE] is fixed and
-     * never touched by crowding (only the speed setting scales it, like every other rate), so
-     * activity = KE*A stays exactly continuous through every dose event: a new dose slows mass
-     * still in the depot or transit, never mass already in the active stage. With K1_B1 < 0 the
-     * rate rises as a dose's own depot empties, so absorption speeds up late in each dose: 0.0298 /min at 0.1U,
-     * 0.0178 at 1U, 0.0116 at 7U, 0.0084 at 30U, 0.385 /min (half-life 1.80 min) at an empty depot
-     * (the 1e-6U floor). That gives the flatter, more symmetric top of the EPAR curves, which no
-     * chain of stages with rates held fixed per dose can produce (its skewness for a given CV is at
-     * least an Erlang curve's). Each SMB of a cascade lowers the rate at once, and with KE's
-     * half-life of 5.3 min the active stage passes that on within minutes: in the 12-SMB cascade
-     * below, activity falls by up to 0.7% of its peak from one minute to the next while the SMBs
-     * are being given, without jumping.
-     *
-     * Why the rate is live: earlier constants were fitted with the rate held at K(dose) for the
-     * whole dose, while this engine re-evaluates it from the live depot mass. Run the way the
-     * engine runs them with no basal, those constants scored EPAR activity R^2 0.654 / 0.533 /
-     * 0.449 at 7 / 15 / 30U. When constants were fitted to EPAR plus TsunamiMods' small-dose curves
-     * given on a basal rate, with the basal depot mass counted in full in the SMBs' crowding mass
-     * (dose interaction 1), no constants fitted both (KE ran to the upper end of any search range, and
-     * the EPAR objective defined below stayed near 0.26 at 0.5 U/h). The current constants are
-     * fitted to EPAR alone, with no basal; how much a basal rate slows the doses given on it is set
-     * by the dose interaction (see below).
-     *
-     * Fit, in two steps, to the digitized EPAR GIR clamp curves (Lyumjev/LY900014, 7/15/30U, points
-     * up to 480 min, no basal insulin infused). Both steps use curves truncated at 480 min: every
-     * curve, target and model alike, is cut at 480 min and normalized over 0-480 min. Activity is
-     * divided by its integral over 0-480 min, and IOB is 1 minus the cumulative activity divided by
-     * its value at 480 min (1 at 0, 0 at 480 min); for the model's isolated single-dose activity
-     * a(t) and IOB fraction S(t), that is a(t) / (1 - S(480)) and (S(t) - S(480)) / (1 - S(480)).
-     * Step 1: TsunamiMods' Weibull form fitted to each EPAR dose alone (activity and IOB together,
-     * each curve's squared errors divided by its total sum of squares) gives each dose's activity
-     * peak: 103.34 / 127.31 / 138.45 min, height 5.4654 / 4.5913 / 3.9392e-3 /min at 7 / 15 / 30U.
-     * Step 2: K1_B0, K1_B1 and KE fitted, with the rate re-evaluated every minute as above, to those
-     * peaks: the sum over 7 / 15 / 30U of ln^2(model peak time / step-1 peak time) + ln^2(model
-     * peak height / step-1 peak height), the model's peak taken on its cut, normalized activity
-     * (sampled at whole minutes, parabola through the 3 samples around the maximum). The model's
-     * peaks: 104.9 / 122.6 / 141.7 min, heights within 0.4% of step 1's. Scored on the EPAR curves
-     * themselves (model sampled at whole minutes, right after each re-evaluation, interpolated
-     * linearly to the EPAR sample times), the sum over the 6 curves of (1 - R^2) is 0.0672 (the
-     * previous constants, fitted directly to that sum with four constants: 0.0441; TsunamiMods'
-     * Weibull form fitted directly to it: 0.0582, a0 69.944 min, a1 0.2177, p 1.9017, within 2.0%
-     * of TsunamiMods' constants). R^2 activity / IOB: 0.982 / 0.997, 0.988 / 0.999, 0.969 / 0.998
-     * at 7 / 15 / 30U. No curve below 7U is in the fit, so the small-dose timing below is the
-     * fitted law's extrapolation. Isolated dose with no basal at speed 1.0, minutes until 1 -
-     * IOB/dose reaches 0.5 / 0.9 (whole curve, not cut at 480 min): 0.1U 55 / 97 (TsunamiMods
-     * 52 / 97), 0.3U 68 / 121 (65 / 122), 1U 86 / 155 (84 / 158), 3U 108 / 195 (106 / 200), 5U
-     * 120 / 217 (119 / 223). Given on a steady basal rate, the basal depot slows the dose (see
-     * CrowdingGroup.DELIVERED; as with no basal at dose interaction 0, slower above): on 0.5 / 1
-     * U/h, 0.3U 90 / 192 and 104 / 227, 1U 100 / 206 and 110 / 236, 3U 116 / 230 and 123 / 253 at
-     * dose interaction 1; 0.3U 73 / 140 and 75 / 150, 1U 90 / 168 and 92 / 176, 3U 110 / 204 and
-     * 112 / 210 at 0.3. Still on board at the 480-min horizon, where the engine drops a dose: at speed
-     * 1.0, at most 1.1e-8% of a dose up to 7U and 0.09% of 30U; at speed 0.5 (every stage at half
-     * its rate), 0.038% of 1U, 2.3% of 3U, 5.5% of 5U and 28% of 30U.
-     * Python replica of this engine without its 480-min window (equal to this file run on the JVM
-     * within 4.1e-8U of IOB over the first 480 min of the doses below, at speed 0.5 to 2), 12 SMBs
-     * totalling 7.85U in one group (0.9U at 0 min, 0.6 at 10, 1.3 at 20, 0.4 at 35, 0.7 at 45, 0.5
-     * at 60, 0.3 at 75, 0.8 at 90, 0.5 at 105, 0.4 at 120, 0.55 at 140, 0.9 at 160): the cascade's
-     * IOB exceeds the sum of its SMBs' separate IOB contributions by up to 23.2% of 7.85U, and its
-     * delivered insulin minus IOB reaches 50% / 90% of 7.85U 46.5 / 68.9 min later than for the
-     * same SMBs computed separately and summed, with no basal (previous constants: 9.7%, 22.8 /
-     * 23.7 min). That is at the default dose interaction of 1 (CrowdingGroup); at 0.5 / 0.3 / 0.1 /
-     * 0 (that times the extra IOB, by the two branches): up to 11.6 / 7.0 / 2.3 / 0% of 7.85U, and
-     * 20.1 / 40.9, 11.3 / 25.6, 3.5 / 8.6 and 0 / 0 min later. On a steady 0.5 / 1 U/h basal rate,
-     * against the same reference: 52.6 / 92.5 and 58.2 / 110.7 min later at dose interaction 1, 12.5
-     * / 31.7 and 13.6 / 37.0 at 0.3, 0 / 0 at 0. At dose interaction 1, a basal rate started with no other
-     * insulin on board (rate/60 U at the end of every minute) reaches 50% / 90% of its steady-state activity after
-     * 81 / 196 min at 0.5 U/h and 96 / 237 min at 1 U/h (previous constants: 106 / 246 and 113 /
-     * 262).
-     *
-     * Fitted constants (masses in U, rates in 1/min):
-     *  - K(M) = K1_B0 * M^K1_B1, K1_B0 = 0.01784168, K1_B1 = -0.2224188 (depot and transit)
-     *  - KE   = 0.1297809 (t1/2 5.34 min; the active stage)
-     * Previous (active stage crowding too, KE(A) = KE_E0 * A^KE_E1, fitted directly to the EPAR
-     * curves): K1_B0 = 0.01617986, K1_B1 = -0.03676295, KE_E0 = 0.0427785, KE_E1 = -0.4966087.
-     * Before that (live rate, EPAR plus TsunamiMods' 0.2-3.5U curves): K1_B0 = 0.017258, K1_B1 =
-     * -0.215412, KE = 0.4389397 (t1/2 1.6 min).
-     * Before that (rate held per dose): K1_B0 = 0.032072, K1_B1 = -0.303093, KE = 0.0315818.
-     * Raw-EPAR fit, rate held per dose: K1_B0 = 0.044874, K1_B1 = -0.339993, KE = 0.0170232.
-     * Depot-only model: K1_B0 = 0.069092, K1_B1 = -0.596593 (depot only), K2 = 0.031796,
-     * KE = ln(2)/44.
+     * Isolated single doses, for the individual branches of the dose interaction ([CrowdingGroup]) and the bolus snooze:
+     * a dose of some amount alone at its site, its depot rate re-evaluated every whole minute of its age from its own
+     * depot mass ([TrafficJamChain.rate]), as the engine re-evaluates the pools' rates at every event. Tabulated once per
+     * (amount, absorption speed, CGM lag) on a 1-minute grid ([IsolatedCurve]) and evaluated in between by exact
+     * propagation ([TrafficJamChain.propagate]); runs of equal doses a minute apart are summed in a few steps
+     * ([runState]). The chain and its fit: [TrafficJamChain].
      */
     internal object PdModel {
-        const val KE = 0.1297809 // fitted; t1/2 5.34 min
-
-        const val K1_B0 = 0.01784168
-        const val K1_B1 = -0.2224188
-
-        /** Never feed a literal zero into the negative-exponent power law. */
-        private const val MASS_FLOOR = 1e-6
 
         /** Isolated single-dose state is tabulated on a 1-min grid this long. */
         private const val ISOLATED_GRID_MINUTES = 600
 
-        private const val RATE_EPS = 1e-7
-
         /**
-         * [propagateWithLag] splits longer intervals into steps this long - exact, since rates are constant
-         * within one call - so that exp() of the scaled rate differences in [CgmLagStage] stays finite.
+         * The absorption speed of the isolated curve of a dose given at [time] on a site put in at [siteStart] (null: at
+         * full speed by then): [speedFactor] times the site's age factor at [time], rounded to 0.01 - a new site's age
+         * factor changes every minute, and an isolated curve is tabulated per speed.
          */
-        private const val LAG_STEP_MINUTES = 60.0
-
-        /**
-         * Exact closed-form propagation of (D, X, A) forward by [dt] minutes under constant
-         * rates (k1, k2, ke) - equivalent to integrating the linear ODE
-         *   dD/dt = -k1*D ; dX/dt = k1*D - k2*X ; dA/dt = k2*X - ke*A
-         * with no discretization error for any dt. Built from two primitives ([chainStage2] and
-         * [threeStageA]) so every place a rate-difference would divide by (near) zero is routed
-         * through an explicit, numerically-safe degenerate branch instead - callers pass the same
-         * crowded rate for k1 and k2, and crowding continuously varies it, so it crossing
-         * arbitrarily close to the fixed KE is an expected, not exceptional, case.
-         */
-        fun propagate(d0: Double, x0: Double, a0: Double, k1: Double, k2: Double, ke: Double, dt: Double): Triple<Double, Double, Double> {
-            val d = d0 * exp(-k1 * dt)
-            val x = x0 * exp(-k2 * dt) + chainStage2(d0, k1, k2, dt)
-            val a = a0 * exp(-ke * dt) + chainStage2(x0, k2, ke, dt) + threeStageA(d0, k1, k2, ke, dt)
-            return Triple(d, x, a)
-        }
-
-        /**
-         * Depot/transit rate of a pool whose crowding mass is [depotMass], at the
-         * per-patient absorption [speedFactor] (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied
-         * directly - see that key's doc comment). KE is scaled by the same factor at every caller.
-         */
-        fun rate(speedFactor: Double, depotMass: Double): Double =
-            speedFactor * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
-
-        /**
-         * [propagate] with the CGM lag stage ([CgmLagStage]) at rate [kc] after the active stage, depot and
-         * transit both at [k]: (D, X, A, C) after [dt] minutes, written into [out]. D and X come out exactly as
-         * from [propagate]; A is the same exact solution, without [propagate]'s rounding of rates closer than
-         * RATE_EPS to equal.
-         */
-        fun propagateWithLag(d0: Double, x0: Double, a0: Double, c0: Double, k: Double, ke: Double, kc: Double, dt: Double, out: DoubleArray) {
-            out[0] = d0; out[1] = x0; out[2] = a0; out[3] = c0
-            var left = dt
-            while (left > 0.0) {
-                val step = min(left, LAG_STEP_MINUTES)
-                CgmLagStage.propagate(out[0], out[1], out[2], out[3], k, ke, kc, step, out)
-                left -= step
-            }
+        fun siteSpeed(speedFactor: Double, siteStartSpeed: Double, siteStart: Long?, time: Long): Double {
+            if (siteStart == null) return speedFactor
+            val factor = TrafficJamChain.siteFactor(siteStartSpeed, time - siteStart)
+            return if (factor >= 1.0) speedFactor else speedFactor * (Math.round(factor * 100.0) / 100.0)
         }
 
         /** Isolated curves ([IsolatedCurve]) per (amount, speedFactor, kc), the 256 last used. */
@@ -1032,9 +917,9 @@ class TsunamiIobEngineImpl @Inject constructor(
         fun isolatedGrid(amount: Double, speedFactor: Double, kc: Double): Array<DoubleArray> = isolatedCurve(amount, speedFactor, kc).grid
 
         /**
-         * An isolated dose of [amount] at [speedFactor] and [kc]: its table ([grid]) and what [runState] needs to sum
-         * runs of such doses a minute apart, each made the first time it is needed (a dose evaluated only at its own
-         * time, one given right at the requested time, never tabulates anything).
+         * An isolated dose of [amount] at absorption speed [speedFactor] and [kc]: its table ([grid]) and what [runState]
+         * needs to sum runs of such doses a minute apart, each made the first time it is needed (a dose evaluated only at
+         * its own time, one given right at the requested time, never tabulates anything).
          */
         class IsolatedCurve(val amount: Double, val speedFactor: Double, val kc: Double) {
 
@@ -1045,7 +930,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             val sums: Array<DoubleArray> by lazy { runningSums(grid) }
 
             /** Past the table the rate is held at its last value, so a step of a minute is a fixed linear map M there. */
-            val tailRate: Double by lazy { rate(speedFactor, grid[0][ISOLATED_GRID_MINUTES]) }
+            val tailRate: Double by lazy { TrafficJamChain.rate(speedFactor, grid[0][ISOLATED_GRID_MINUTES]) }
 
             /**
              * The sum over m >= 0 of M^m applied to the table's last state g - every state still to come - which is
@@ -1091,14 +976,8 @@ class TsunamiIobEngineImpl @Inject constructor(
             d[0] = amount
             val step = DoubleArray(4)
             for (i in 1 until n) {
-                val k1 = rate(speedFactor, d[i - 1])
-                if (kc > 0.0) {
-                    CgmLagStage.propagate(d[i - 1], x[i - 1], a[i - 1], c[i - 1], k1, speedFactor * KE, kc, 1.0, step)
-                    d[i] = step[0]; x[i] = step[1]; a[i] = step[2]; c[i] = step[3]
-                } else {
-                    val (nd, nx, na) = propagate(d[i - 1], x[i - 1], a[i - 1], k1, k1, speedFactor * KE, 1.0)
-                    d[i] = nd; x[i] = nx; a[i] = na
-                }
+                TrafficJamChain.propagate(d[i - 1], x[i - 1], a[i - 1], c[i - 1], TrafficJamChain.rate(speedFactor, d[i - 1]), kc, 1.0, step)
+                d[i] = step[0]; x[i] = step[1]; a[i] = step[2]; c[i] = step[3]
             }
             return arrayOf(d, x, a, c)
         }
@@ -1110,14 +989,8 @@ class TsunamiIobEngineImpl @Inject constructor(
         }
 
         /** [s] stepped by [minutes] at [curve]'s held tail rate, written into [out], as the table's tail is ([isolatedStateOnGrid]). */
-        private fun held(s: DoubleArray, curve: IsolatedCurve, minutes: Double, out: DoubleArray) {
-            val ke = curve.speedFactor * KE
-            if (curve.kc > 0.0) propagateWithLag(s[0], s[1], s[2], s[3], curve.tailRate, ke, curve.kc, minutes, out)
-            else {
-                val (d, x, a) = propagate(s[0], s[1], s[2], curve.tailRate, curve.tailRate, ke, minutes)
-                out[0] = d; out[1] = x; out[2] = a; out[3] = 0.0
-            }
-        }
+        private fun held(s: DoubleArray, curve: IsolatedCurve, minutes: Double, out: DoubleArray) =
+            TrafficJamChain.propagate(s[0], s[1], s[2], s[3], curve.tailRate, curve.kc, minutes, out)
 
         /**
          * The sum of [isolatedStateOnGrid] over [count] doses of [curve] given a minute apart, the oldest [ageMs]
@@ -1198,13 +1071,7 @@ class TsunamiIobEngineImpl @Inject constructor(
                 out[0] = grid[0][i]; out[1] = grid[1][i]; out[2] = grid[2][i]; out[3] = grid[3][i]
                 return
             }
-            val k1 = rate(speedFactor, grid[0][i])
-            if (kc > 0.0) {
-                propagateWithLag(grid[0][i], grid[1][i], grid[2][i], grid[3][i], k1, speedFactor * KE, kc, dt, out)
-            } else {
-                val (d, x, a) = propagate(grid[0][i], grid[1][i], grid[2][i], k1, k1, speedFactor * KE, dt)
-                out[0] = d; out[1] = x; out[2] = a; out[3] = 0.0
-            }
+            TrafficJamChain.propagate(grid[0][i], grid[1][i], grid[2][i], grid[3][i], TrafficJamChain.rate(speedFactor, grid[0][i]), kc, dt, out)
         }
 
         /** Isolated (unpooled) fraction of [amount] still on board [tElapsed] minutes after a single dose. */
@@ -1212,53 +1079,6 @@ class TsunamiIobEngineImpl @Inject constructor(
             if (amount <= 0.0) return 0.0
             val s = isolatedState(tElapsed, amount, speedFactor, kc)
             return (s[0] + s[1] + s[2] + s[3]) / amount
-        }
-
-        /** Second stage (X) of a 2-compartment chain fed by [q0] entering at rate [r1], draining at [r2]. */
-        private fun chainStage2(q0: Double, r1: Double, r2: Double, t: Double): Double {
-            if (q0 == 0.0) return 0.0
-            return if (abs(r2 - r1) < RATE_EPS) {
-                q0 * r1 * t * exp(-r1 * t)
-            } else {
-                q0 * r1 * (exp(-r1 * t) - exp(-r2 * t)) / (r2 - r1)
-            }
-        }
-
-        /** Third stage (A) impulse response fed by [d0] entering the chain (k1, k2, ke) at t=0. */
-        private fun threeStageA(d0: Double, k1: Double, k2: Double, ke: Double, t: Double): Double {
-            if (d0 == 0.0) return 0.0
-            val k1k2 = abs(k2 - k1) < RATE_EPS
-            val k1ke = abs(ke - k1) < RATE_EPS
-            val k2ke = abs(ke - k2) < RATE_EPS
-
-            return when {
-                k1k2 && k1ke -> d0 * k1 * k1 * t * t / 2.0 * exp(-k1 * t) // all three rates equal (Erlang-3)
-                k1k2         -> { // k1 == k2 != ke - the normal case, since depot and transit share one rate
-                    val q = ke - k1
-                    // Series near q*t -> 0: the closed form cancels catastrophically there, and the
-                    // shared crowded rate crosses ke as a depot empties (0.385 /min at an empty depot
-                    // against ke 0.130 at speed 1.0: equal at about 1.3e-4U of crowding mass, at any
-                    // speed since both scale with it).
-                    if (abs(q * t) < 1e-3) d0 * k1 * k1 * exp(-k1 * t) * t * t * (0.5 - q * t / 6.0 + q * q * t * t / 24.0)
-                    else d0 * k1 * k1 * (t * exp(-k1 * t) / q - (exp(-k1 * t) - exp(-ke * t)) / (q * q))
-                }
-
-                k1ke         -> { // k1 == ke != k2
-                    val d = k2 - k1
-                    d0 * k1 * k2 * t * exp(-k1 * t) / d - d0 * k1 * k2 * (exp(-k1 * t) - exp(-k2 * t)) / (d * d)
-                }
-
-                k2ke         -> { // k2 == ke != k1
-                    val d = k2 - k1
-                    d0 * k1 * k2 * (exp(-k1 * t) - exp(-k2 * t)) / (d * d) - d0 * k1 * k2 * t * exp(-k2 * t) / d
-                }
-
-                else         -> d0 * k1 * k2 * (
-                    exp(-k1 * t) / ((k2 - k1) * (ke - k1)) +
-                        exp(-k2 * t) / ((k1 - k2) * (ke - k2)) +
-                        exp(-ke * t) / ((k1 - ke) * (k2 - ke))
-                    )
-            }
         }
     }
 }

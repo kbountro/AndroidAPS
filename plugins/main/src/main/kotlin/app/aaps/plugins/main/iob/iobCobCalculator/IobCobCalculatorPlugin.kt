@@ -144,6 +144,7 @@ class IobCobCalculatorPlugin @Inject constructor(
                                // explicit cache invalidation here or it keeps serving pre-computed,
                                // now-stale results until something else happens to clear the cache.
                                event.isChanged(DoubleKey.InsulinTrafficJamSpeedMultiplier.key) ||
+                               event.isChanged(DoubleKey.InsulinTrafficJamSiteStartSpeed.key) ||
                                event.isChanged(DoubleKey.InsulinTrafficJamMixing.key) ||
                                event.isChanged(DoubleKey.InsulinTrafficJamCgmLag.key) ||
                                event.isChanged(BooleanKey.InsulinTrafficJamMicroDoses.key) ||

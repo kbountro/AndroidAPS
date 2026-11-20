@@ -23,9 +23,11 @@
     <!-- NEW: Traffic Jam Model -->
     <string name="lyumjev_U100_Traffic_Jam">Lyumjev U100 (Tsunami Traffic Jam)</string>
     <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 8-hour analytic depot pool to calculate dynamic Subcutaneous accumulation.</string>
-    <string name="insulin_traffic_jam_speed_settings">Absorption Speed, Dose Interaction, CGM Lag and Micro-doses</string>
+    <string name="insulin_traffic_jam_speed_settings">Absorption Speed, New Site Speed, Dose Interaction, CGM Lag and Micro-doses</string>
     <string name="insulin_traffic_jam_speed_multiplier_title">Absorption Speed [x]</string>
-    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard insulin acts. Every stage, from the injection site to the active stage, speeds up or slows down by this factor, so the time to the activity peak is divided by it and the peak height multiplied by it.</string>
+    <string name="insulin_traffic_jam_speed_multiplier_summary">How many times faster or slower than standard your infusion site absorbs insulin, once the site has settled (from 48 hours after a site change). Only the absorption from the site changes: the insulin\'s time in the blood and the delay to its effect are your body\'s and stay as they are. 1: as in the pump study the model is fitted to, on day 3 of the infusion set.</string>
+    <string name="insulin_traffic_jam_site_start_speed_title">New Site Speed [x]</string>
+    <string name="insulin_traffic_jam_site_start_speed_summary">How fast a new infusion site absorbs, as a share of a settled site\'s speed. Right after a site change the site absorbs at this share of Absorption Speed, and it reaches full Absorption Speed 48 hours later, as from day 1 to day 3 of the pump study the model is fitted to. 0.49: that study\'s day 1 against its day 3. 1 turns this off.</string>
     <string name="insulin_traffic_jam_mixing_title">Dose Interaction [0-1]</string>
     <string name="insulin_traffic_jam_mixing_summary">The share of every dose that absorbs together with all insulin at the injection site and is slowed by it: boluses, SMBs, extended boluses and basal, temp basals included. The rest of each dose absorbs on its own. 0 turns this off: no insulin interacts with any other, and every dose, each minute of basal included, absorbs on its own. 1: all insulin follows the same path, absorbing at the pace set by all insulin at the injection site.</string>
     <string name="insulin_traffic_jam_cgm_lag_title">CGM Lag [min]</string>
@@ -35,6 +37,6 @@
     <string name="insulin_traffic_jam_pulse_size_summary">The insulin your pump gives in one pulse during a bolus, for example 0.05 U.</string>
     <string name="insulin_traffic_jam_bolus_speed_title">Bolus Speed [U/min]</string>
     <string name="insulin_traffic_jam_bolus_speed_summary">How fast your pump gives a bolus, in units per minute: 1.5 U/min is one 0.05 U pulse every 2 seconds.</string>
-    <string name="insulin_traffic_jam_cgm_lag_summary">How many minutes your CGM trails your blood glucose. The insulin model is fitted to its effect in the blood; with a lag set, every dose\'s activity is delayed and smoothed by about this much, so it lines up with the glucose changes your CGM shows, and the part of the effect the CGM hasn\'t shown yet still counts as insulin on board. Includes your sensor\'s own smoothing. 0 turns it off.</string>
+    <string name="insulin_traffic_jam_cgm_lag_summary">How many minutes your CGM trails your blood glucose. Every dose\'s activity is delayed and smoothed by about this much, so it lines up with the glucose changes your CGM shows, and the part of the effect the CGM hasn\'t shown yet still counts as insulin on board. Includes your sensor\'s own smoothing. The model\'s delay from insulin in the blood to its effect was fitted together with 8 minutes here. 0 turns it off.</string>
 
 </resources>
