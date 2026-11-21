@@ -362,12 +362,19 @@ class TsunamiIobEngineImpl @Inject constructor(
             // All of a group's shared branches share one rate, so one pool per category holds them exactly.
             val pools = Array(Category.entries.size) { Pool() }
 
+            /** When insulin was last added to this site, and when its rates were last re-evaluated ([refreshRates]). */
+            var givenAt = Long.MIN_VALUE
+            var refreshed = false
+            var refreshedAt = 0L
+
             fun propagateInPlace(dtMinutes: Double) {
                 for (p in pools) p.propagateInPlace(kc, dtMinutes)
             }
 
             /** Every pool's depot rate from its group's live depot mass (see [CrowdingGroup]) and the site's age at [time]. */
             fun refreshRates(time: Long) {
+                refreshed = true
+                refreshedAt = time
                 val speed = absorptionSpeed(start, time)
                 val deliveredDepot = groupDepotMass(pools, CrowdingGroup.DELIVERED)
                 val profileDepot = groupDepotMass(pools, CrowdingGroup.PROFILE)
@@ -411,7 +418,8 @@ class TsunamiIobEngineImpl @Inject constructor(
         val shiftWholeMinuteRuns = mixing < 1.0 && offset != 0L && offsetRequestedOften(offset)
 
         // Sorted so the snooze/lastBolusTime bookkeeping below can sweep forward with monotonically
-        // advancing indices.
+        // advancing indices. Priming boluses count for lastBolusTime only, as in the stock calculator: their
+        // insulin fills the cannula or tubing and is never on board (no snooze, no pulses still to come).
         val sortedBoluses = boluses.filter { it.isValid }.sortedBy { it.timestamp }
         var bolusValidIdx = 0 // boluses folded into lastBolusTimeSeen so far (timestamp <= current tTarget)
         var bolusFrontIdx = 0 // boluses before this index have permanently expired snooze windows
@@ -436,7 +444,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             var bSnooze = 0.0
             for (idx in bolusFrontIdx until bolusValidIdx) {
                 val b = sortedBoluses[idx]
-                if (b.type != BS.Type.SMB) {
+                if (b.type != BS.Type.SMB && b.type != BS.Type.PRIMING) {
                     // Age used by this bolus's own isolated curve is divisor times the real elapsed
                     // time (matching the stock calculator's "evaluate the curve further in the future"
                     // technique - see IobCobCalculatorPlugin.calculateIobFromBolusToTime), NOT elapsed
@@ -492,7 +500,7 @@ class TsunamiIobEngineImpl @Inject constructor(
             var notGivenYet = 0.0
             for (idx in 0 until bolusValidIdx) {
                 val b = sortedBoluses[idx]
-                if (b.amount > 0.0) notGivenYet += pulses.notGivenYet(b.amount, tTarget - b.timestamp)
+                if (b.amount > 0.0 && b.type != BS.Type.PRIMING) notGivenYet += pulses.notGivenYet(b.amount, tTarget - b.timestamp)
             }
             iob[Category.BOLUS.ordinal] += notGivenYet
 
@@ -532,8 +540,15 @@ class TsunamiIobEngineImpl @Inject constructor(
             val site = siteFor(siteGenerationFor(dose.timestamp, siteChangeBoundaries))
             val doseSiteStart = site.start
 
-            // Shared branches, held in the pools as they would be at m = 1 (see [CrowdingGroup]).
-            if (dose.bolusAmt > 0.0) site.pools[Category.BOLUS.ordinal].D += dose.bolusAmt
+            // Shared branches, held in the pools as they would be at m = 1 (see [CrowdingGroup]). A bolus's pulses all go
+            // to the site in use when the bolus started, those given after a site change logged during it too: one bolus,
+            // one site. Basal and extended boluses go to the site in use at each minute.
+            dose.bolusParts?.forEach { part ->
+                val bolusSite = siteFor(siteGenerationFor(part.bolusTime, siteChangeBoundaries))
+                bolusSite.pools[Category.BOLUS.ordinal].D += part.chunk.amount
+                bolusSite.givenAt = lastTime
+            }
+            if (dose.extBolusAmt > 0.0 || dose.basalAbsAmt > 0.0 || dose.profileBasalAmt > 0.0) site.givenAt = lastTime
             if (dose.extBolusAmt > 0.0) site.pools[Category.EXT_BOLUS.ordinal].D += dose.extBolusAmt
             if (dose.basalAbsAmt > 0.0) site.pools[Category.BASAL_ABS.ordinal].D += dose.basalAbsAmt
             if (dose.profileBasalAmt > 0.0) {
@@ -544,9 +559,11 @@ class TsunamiIobEngineImpl @Inject constructor(
             // Individual branches, below m = 1. A bolus chunk's are its lone pulses: that many doses of the pulse size,
             // and the smaller last pulse.
             if (mixing < 1.0) {
-                dose.bolusChunks?.forEach { chunk ->
-                    if (chunk.pulses > 0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, pulses.pulseSize, scale = chunk.pulses.toDouble())
-                    if (chunk.extra > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, chunk.extra)
+                dose.bolusParts?.forEach { part ->
+                    val bolusSiteStart = siteFor(siteGenerationFor(part.bolusTime, siteChangeBoundaries)).start
+                    val chunk = part.chunk
+                    if (chunk.pulses > 0) addIndividual(dose.timestamp, bolusSiteStart, Category.BOLUS, pulses.pulseSize, scale = chunk.pulses.toDouble())
+                    if (chunk.extra > 0.0) addIndividual(dose.timestamp, bolusSiteStart, Category.BOLUS, chunk.extra)
                 }
                 if (dose.extBolusAmt > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.EXT_BOLUS, dose.extBolusAmt)
                 if (dose.basalAbsAmt > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.BASAL_ABS, dose.basalAbsAmt)
@@ -556,15 +573,20 @@ class TsunamiIobEngineImpl @Inject constructor(
                 }
             }
 
-            // Every rate follows its group's live depot mass, so it is re-evaluated at every event,
-            // whether or not this event injected anything into that group: buildDoseEventTimeline
-            // emits one event per minute wherever a profile exists (zero temps and the zero-temp
-            // projection included), so no rate is then held for more than a minute while its depot
-            // empties. Where no profile exists, only boluses create events and the rates are held
-            // between them. Every live generation too, since an old site's depot keeps emptying
-            // after dosing has moved to the new one. A new site's age factor is held with the rate between events
-            // too; it changes little in a minute (a site ramp is an hour at the shortest).
-            for (s in sites.values) s.refreshRates(lastTime)
+            // Every rate follows its group's live depot mass, so it is re-evaluated at every whole minute, whether or
+            // not this event injected anything into that group: buildDoseEventTimeline emits one event per minute
+            // wherever a profile exists (zero temps and the zero-temp projection included), so no rate is then held for
+            // more than a minute while its depot empties. Every live generation too, since an old site's depot keeps
+            // emptying after dosing has moved to the new one. Between whole minutes, at a bolus's pulses, only the sites
+            // given insulin are re-evaluated, so that one site's doses never change how another site's insulin is
+            // stepped: the sites stay independent. Where no profile exists only boluses create events, and a site given
+            // nothing is then re-evaluated at the first event a minute or more after its last. A new site's age factor
+            // is held with the rate between events too; it changes little in a minute (a site ramp is an hour at the
+            // shortest).
+            val wholeMinute = lastTime % 60_000L == 0L
+            for (s in sites.values) {
+                if (wholeMinute || s.givenAt == lastTime || !s.refreshed || lastTime - s.refreshedAt >= 60_000L) s.refreshRates(lastTime)
+            }
         }
 
         return evaluatePools((requestedTime - lastTime) / 60000.0, requestedTime)
@@ -654,15 +676,15 @@ class TsunamiIobEngineImpl @Inject constructor(
         }
 
         for (b in boluses) {
-            if (b.isValid && b.timestamp in fromTime..toTime) {
+            // A priming bolus fills the cannula or tubing: none of it is on board, as in the stock calculator.
+            if (b.isValid && b.type != BS.Type.PRIMING && b.timestamp in fromTime..toTime) {
                 for (chunk in pulses.chunks(b.amount)) {
                     // A minute of pulses at a time, at their average time ([BolusPulses]); the chunks after toTime are
                     // after the requested time, and count as not given yet there (evaluatePools).
                     val time = b.timestamp + chunk.offsetMs
                     if (time > toTime) break
                     val dose = getOrCreate(time)
-                    dose.bolusAmt += chunk.amount
-                    (dose.bolusChunks ?: ArrayList<BolusPulses.Chunk>(1).also { dose.bolusChunks = it }).add(chunk)
+                    (dose.bolusParts ?: ArrayList<BolusPart>(1).also { dose.bolusParts = it }).add(BolusPart(b.timestamp, chunk))
                 }
             }
         }
@@ -862,11 +884,13 @@ class TsunamiIobEngineImpl @Inject constructor(
         val last: Long get() = first + (count - 1) * 60000L
     }
 
+    /** One minute's pulses ([chunk], see [BolusPulses]) of the bolus given at [bolusTime], whose site they go to. */
+    private class BolusPart(val bolusTime: Long, val chunk: BolusPulses.Chunk)
+
     private data class DoseEvent(
         val timestamp: Long,
-        var bolusAmt: Double = 0.0,
-        /** The bolus chunks [bolusAmt] is made of ([BolusPulses]), for their individual branches; null without a bolus. */
-        var bolusChunks: ArrayList<BolusPulses.Chunk>? = null,
+        /** The bolus pulses given at [timestamp], a minute of a bolus's pulses each; null without a bolus. */
+        var bolusParts: ArrayList<BolusPart>? = null,
         var extBolusAmt: Double = 0.0,
         var basalAbsAmt: Double = 0.0,
         var profileBasalAmt: Double = 0.0,

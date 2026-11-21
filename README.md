@@ -19,7 +19,8 @@ left across all stages; reported activity is the rate at which the last stage em
 Only the depot crowds: the more insulin sits in it, the slower it empties. Plasma (half-life 51.5
 minutes) and effect (half-life 8 minutes) are the body's and drain at fixed rates that nothing
 changes, not even the speed setting. The depot's rate is re-evaluated at every whole minute and
-right after every bolus, from the insulin then in the depot, and held in between. Boluses, SMBs,
+right after every bolus (at the bolus's site), from the insulin then in the depot, and held in
+between. Boluses, SMBs,
 extended boluses and delivered basal (the profile rate, temp basals and zero temps alike) crowd
 each other: a cascade of SMBs slows every earlier SMB still in the depot, and a basal rate slows the
 doses given on top of it. Crowding stays within one infusion site: insulin given before a
@@ -147,13 +148,21 @@ A bolus given right at a site change, with the defaults, no basal: 1U reaches 1 
 0.9 after 88 / 207 minutes and peaks at 56 (24 hours after the change 82 / 202 and 48; settled 80 /
 199 and 45); 3U 95 / 215 and 65 (87 / 207 and 54; settled 83 / 203 and 49).
 
-Each site generation (see "Dose interaction") absorbs at its own age: the depot's rate is
-re-evaluated with the site's age factor at every event, and insulin left at an old site keeps the old
-site's speed. The engine loads site changes from a week (the longest ramp) before the records it reads,
-so the age of the site in use at the start of every window is known. Below a dose interaction of 1, a dose's
+Every site is independent of the others. Insulin given before a cannula/site change stays at the old
+site: it never crowds insulin given after the change, nor is crowded by it, and keeps absorbing at the
+old site's own speed (on the old site's own ramp, if that was still running); the ramp starts only
+for the new site and only the insulin given to it. A bolus belongs to the site in use when it starts,
+even if a site change is logged while its pulses are still being given. Between whole minutes only the
+site given insulin has its rate re-evaluated, so one site's doses don't even change the steps in which
+another site's insulin is computed: the insulin of the two sites is the sum of each alone, to
+rounding (SiteChangeTest). Priming boluses, which fill the cannula or the tubing, are never insulin on board, as
+in AAPS's own calculator, though they still count as the last bolus for the SMB interval.
+
+The engine loads site changes from a week (the longest ramp) before the records it reads, so the age
+of the site in use at the start of every window is known. Below a dose interaction of 1, a dose's
 individual branch absorbs at its site's speed when the dose is given, its age factor rounded to 0.01
-(a new site's ramp then needs about 50 isolated curves per amount, not one per minute). The
-insulin plugin's own single-dose curve doesn't know the site and shows a settled one.
+(a new site's ramp then needs about 50 isolated curves per amount, not one per minute). The insulin
+plugin's own single-dose curve doesn't know the site and shows a settled one.
 
 A month of closed-loop data was also checked for insulin that a site stops absorbing late in its life.
 Slowing every site down from a fixed age (72 or 96 hours) fitted the glucose data worse, so the model
