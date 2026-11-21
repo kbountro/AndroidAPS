@@ -30,7 +30,7 @@ rate, as described here. With the fitted constants (below) the depot's rate on a
 0.0542 with 10U (12.8 minutes).
 
 A new infusion site absorbs more slowly: at the new-site speed (0.47 by default) right after the
-change, rising to full speed 48 hours later (see "Site age" below).
+change, rising to full speed over the new-site ramp, 48 hours by default (see "Site age" below).
 
 A new dose goes into the depot, and the depot's rate is re-evaluated right after it with the dose
 included, so from then on it slows insulin still in the depot. The dose adds nothing to the later
@@ -123,7 +123,7 @@ and the real data.
 
 ## Per-patient absorption speed
 
-A preference (Insulin settings → Absorption Speed, New Site Speed, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed → Absorption Speed,
+A preference (Insulin settings → Absorption Speed, New Site Speed and Ramp, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed → Absorption Speed,
 `DoubleKey.InsulinTrafficJamSpeedMultiplier`, range 0.2-5.0, default 1.0) multiplies the depot's
 rate: the absorption from the site. Plasma and effect are the body's and stay as fitted, so 2.0 makes
 the site absorb twice as fast but doesn't halve a dose's whole action time. At 1.0 the site absorbs as
@@ -131,12 +131,17 @@ the pump study's did on day 3 of the infusion set. It's a direct multiplier appl
 
 ## Site age
 
-A preference (Insulin settings → Absorption Speed, New Site Speed, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed → New Site Speed,
+A preference (Insulin settings → Absorption Speed, New Site Speed and Ramp, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed → New Site Speed,
 `DoubleKey.InsulinTrafficJamSiteStartSpeed`, range 0.2-1.0, default 0.47) sets how fast a new
 infusion site absorbs, as a share of a settled site's speed. Right after a cannula/site change
 (`TE.Type.CANNULA_CHANGE`) the site absorbs at this share of the absorption speed, rising linearly to
-the full absorption speed 48 hours later: the pump study's day 1 against its day 3, two days apart. 1.0
-turns it off.
+the full absorption speed over the new-site ramp: the pump study's day 1 against its day 3, two days
+apart, by default. 1.0 turns it off.
+
+Another preference (Insulin settings → Absorption Speed, New Site Speed and Ramp, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed → New Site Ramp,
+`DoubleKey.InsulinTrafficJamSiteRamp`, range 1-168 hours, default 48) sets the ramp: how many hours a
+new site takes to reach the full absorption speed, how long the pump takes to settle the area. 48 is
+the pump study's day 1 to its day 3.
 
 A bolus given right at a site change, with the defaults, no basal: 1U reaches 1 - IOB/dose of 0.5 /
 0.9 after 88 / 207 minutes and peaks at 56 (24 hours after the change 82 / 202 and 48; settled 80 /
@@ -144,10 +149,10 @@ A bolus given right at a site change, with the defaults, no basal: 1U reaches 1 
 
 Each site generation (see "Dose interaction") absorbs at its own age: the depot's rate is
 re-evaluated with the site's age factor at every event, and insulin left at an old site keeps the old
-site's speed. The engine loads site changes from 48 hours before the records it reads, so the age of
-the site in use at the start of every window is known. Below a dose interaction of 1, a dose's
+site's speed. The engine loads site changes from a week (the longest ramp) before the records it reads,
+so the age of the site in use at the start of every window is known. Below a dose interaction of 1, a dose's
 individual branch absorbs at its site's speed when the dose is given, its age factor rounded to 0.01
-(a new site's first 48 hours then need about 50 isolated curves per amount, not one per minute). The
+(a new site's ramp then needs about 50 isolated curves per amount, not one per minute). The
 insulin plugin's own single-dose curve doesn't know the site and shows a settled one.
 
 A month of closed-loop data was also checked for insulin that a site stops absorbing late in its life.
@@ -157,8 +162,8 @@ handles.
 
 ## Dose interaction
 
-A second preference (Insulin settings → Absorption Speed, New Site Speed, Dose Interaction, CGM Lag,
-Pulse Size and Bolus Speed → Dose Interaction, `DoubleKey.InsulinTrafficJamMixing`, range 0-1,
+A second preference (Insulin settings → Absorption Speed, New Site Speed and Ramp, Dose Interaction, CGM
+Lag, Pulse Size and Bolus Speed → Dose Interaction, `DoubleKey.InsulinTrafficJamMixing`, range 0-1,
 default 1.0) sets the share of every dose that absorbs together with all insulin at the injection
 site. Every delivery is one dose: each pulse of a bolus or SMB (see "Micro-doses"), and each
 minute's delivered basal (profile rate, temp basals, zero temps and temps faked by extended
@@ -234,16 +239,16 @@ on the same machine: 31-43 ms). Before the windows were per request, every reque
 hours past the present, evaluating some 190 other times along the way to fill a cache those requests
 never hit, and summed the individual branches dose by dose: 530 ms at 0.5, 53 ms at 1.
 
-The windows read the treatment history (boluses, temp basals, extended boluses, site changes) and the
-profile basal of every minute. Each calculation run asks for about a thousand windows (autosens and
-the IOB graph at every 5-minute time over a day, the SMB IOB arrays, the overview), every minute with
-a 1-minute CGM, and each window used to query the database itself: four queries, and a profile lookup
-for every one of its 480 minutes. The engine now loads the history once per calculation run, for 48
-hours back to 12 hours ahead (site changes from 48 hours before that, for the site's age), looks each
-minute's profile basal up once, and cuts every window's records from that (the history browser gets a
-separate load around the day it shows). Any change to that history (a bolus, temp basal, extended
-bolus, profile switch or site change) drops the loaded records the moment it is saved. The database
-queries of a calculation run go from about 3000 to 4.
+The windows read the treatment history (boluses, temp basals, extended boluses, site changes) and
+the profile basal of every minute. Each calculation run asks for about a thousand windows (autosens
+and the IOB graph at every 5-minute time over a day, the SMB IOB arrays, the overview), every minute
+with a 1-minute CGM, and each window used to query the database itself: four queries, and a profile
+lookup for every one of its 480 minutes. The engine now loads the history once per calculation run,
+for 48 hours back to 12 hours ahead (site changes from a week before that, the longest site ramp,
+for the site's age), looks each minute's profile basal up once, and cuts every window's records from
+that (the history browser gets a separate load around the day it shows). Any change to that history
+(a bolus, temp basal, extended bolus, profile switch or site change) drops the loaded records the
+moment it is saved. The database queries of a calculation run go from about 3000 to 4.
 
 ## CGM lag
 
@@ -253,7 +258,7 @@ smoothing adds more. AAPS compares the CGM's rate of change with the insulin's e
 counted before the CGM can show it. That reads as a rise unexplained by insulin, which invites the
 next SMB. The tail of each dose shows the opposite error.
 
-A preference (Insulin settings → Absorption Speed, New Site Speed, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed → CGM Lag,
+A preference (Insulin settings → Absorption Speed, New Site Speed and Ramp, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed → CGM Lag,
 `DoubleKey.InsulinTrafficJamCgmLag`, range 0-30 minutes, default 8) adds a stage C after the effect
 stage, at the fixed rate kc = 1/lag:
 
@@ -281,7 +286,7 @@ exp() calls, four with the lag, and some arithmetic.
 A pump doesn't give a bolus all at once. It gives it in small pulses at its bolus speed: at 1.5 U/min,
 a 0.05 U pulse every 2 seconds. The engine models every bolus and SMB that way, as the absorption fit
 replays the pump study's boluses, with two settings (Insulin settings → Absorption Speed, New Site
-Speed, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed): the pulse size
+Speed and Ramp, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed): the pulse size
 (`DoubleKey.InsulinTrafficJamPulseSize`, 0.01-1 U, default 0.05) and the bolus speed
 (`DoubleKey.InsulinTrafficJamBolusSpeed`, 0.1-10 U/min, default 1.5, the standard bolus speed in the
 EPAR's pump study; AAPS's Medtrum driver expects 1 U/min). Basal, temp basals and extended boluses stay

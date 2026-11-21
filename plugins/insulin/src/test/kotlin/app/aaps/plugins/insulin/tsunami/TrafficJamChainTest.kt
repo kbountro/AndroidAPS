@@ -107,14 +107,23 @@ class TrafficJamChainTest {
     }
 
     @Test
-    fun aNewSiteReachesFullSpeedAfter48Hours() {
+    fun aNewSiteReachesFullSpeedAtTheEndOfItsRamp() {
         val hour = 3_600_000L
-        assertThat(TrafficJamChain.siteFactor(0.47, 0L)).isEqualTo(0.47)
-        assertThat(TrafficJamChain.siteFactor(0.47, 24 * hour)).isWithin(1e-15).of(0.735)
-        assertThat(TrafficJamChain.siteFactor(0.47, 48 * hour)).isEqualTo(1.0)
-        assertThat(TrafficJamChain.siteFactor(0.47, 100 * hour)).isEqualTo(1.0)
-        assertThat(TrafficJamChain.siteFactor(0.47, -hour)).isEqualTo(0.47)
-        assertThat(TrafficJamChain.siteFactor(1.0, 5 * hour)).isEqualTo(1.0)
+        val ramp = TrafficJamChain.siteRampMs(TrafficJamChain.SITE_RAMP_HOURS)
+        assertThat(ramp).isEqualTo(48 * hour)
+        assertThat(TrafficJamChain.siteFactor(0.47, ramp, 0L)).isEqualTo(0.47)
+        assertThat(TrafficJamChain.siteFactor(0.47, ramp, 24 * hour)).isWithin(1e-15).of(0.735)
+        assertThat(TrafficJamChain.siteFactor(0.47, ramp, 48 * hour)).isEqualTo(1.0)
+        assertThat(TrafficJamChain.siteFactor(0.47, ramp, 100 * hour)).isEqualTo(1.0)
+        assertThat(TrafficJamChain.siteFactor(0.47, ramp, -hour)).isEqualTo(0.47)
+        assertThat(TrafficJamChain.siteFactor(1.0, ramp, 5 * hour)).isEqualTo(1.0)
+        // A day's ramp: halfway at 12 h, full speed at 24 h.
+        val day = TrafficJamChain.siteRampMs(24.0)
+        assertThat(TrafficJamChain.siteFactor(0.47, day, 12 * hour)).isWithin(1e-15).of(0.735)
+        assertThat(TrafficJamChain.siteFactor(0.47, day, 24 * hour)).isEqualTo(1.0)
+        // The setting is kept within an hour and a week.
+        assertThat(TrafficJamChain.siteRampMs(0.0)).isEqualTo(hour)
+        assertThat(TrafficJamChain.siteRampMs(1000.0)).isEqualTo(TrafficJamChain.MAX_SITE_RAMP_MS)
     }
 
     /** exp(M dt) for the chain's rates, M lower bidiagonal (-rate on the diagonal, rate below it), to 60 digits. */

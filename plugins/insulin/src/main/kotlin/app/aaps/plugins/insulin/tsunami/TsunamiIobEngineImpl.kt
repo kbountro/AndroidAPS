@@ -137,12 +137,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         // Boluses come by id, newest first, with timestamp >= from; sorted by timestamp here (stable, so equal
         // timestamps keep that order) to be cut by binary search. The rest come by timestamp: temp basals and
-        // extended boluses starting within [from, to], cannula changes from a site ramp (48 h) before `from` on, so
-        // that the age of the site in use at any request's start is known ([lastCannulaChangeBefore]).
+        // extended boluses starting within [from, to], cannula changes from the longest site ramp (a week) before
+        // `from` on, so that the age of the site in use at any request's start is known ([lastCannulaChangeBefore]).
         private val boluses = persistenceLayer.getBolusesFromTime(from, true).blockingGet().sortedBy { it.timestamp }
         private val tempBasals = persistenceLayer.getTemporaryBasalsStartingFromTimeToTime(from, to, true)
         private val extendedBoluses = persistenceLayer.getExtendedBolusesStartingFromTimeToTime(from, to, true)
-        private val cannulaChanges = persistenceLayer.getTherapyEventDataFromTime(from - TrafficJamChain.SITE_RAMP_MS, TE.Type.CANNULA_CHANGE, true)
+        private val cannulaChanges = persistenceLayer.getTherapyEventDataFromTime(from - TrafficJamChain.MAX_SITE_RAMP_MS, TE.Type.CANNULA_CHANGE, true)
 
         /** Every whole minute's profile and basal rate, looked up the first time a request needs it. */
         private val minuteBasals = arrayOfNulls<Any>(((to - from) / 60_000L).toInt() + 1)
@@ -162,12 +162,12 @@ class TsunamiIobEngineImpl @Inject constructor(
         fun cannulaChangesFrom(time: Long): List<TE> = cannulaChanges.subList(firstAtOrAfter(cannulaChanges, time) { it.timestamp }, cannulaChanges.size)
 
         /**
-         * The last cannula change before [time], if one is within a site ramp (48 h) of it (and [time] is at least
+         * The last cannula change before [time], if one is within the site ramp [rampMs] of it (and [time] is at least
          * `from`); null otherwise: the site in use then has reached full speed ([TrafficJamChain.siteFactor]).
          */
-        fun lastCannulaChangeBefore(time: Long): Long? {
+        fun lastCannulaChangeBefore(time: Long, rampMs: Long): Long? {
             val i = firstAtOrAfter(cannulaChanges, time) { it.timestamp } - 1
-            return if (i >= 0 && time - cannulaChanges[i].timestamp < TrafficJamChain.SITE_RAMP_MS) cannulaChanges[i].timestamp else null
+            return if (i >= 0 && time - cannulaChanges[i].timestamp < rampMs) cannulaChanges[i].timestamp else null
         }
 
         /** The profile at the whole minute [minute] and its basal rate then, or null without a profile. */
@@ -320,14 +320,16 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         val divisor = preferences.get(DoubleKey.ApsAmaBolusSnoozeDivisor)
 
-        // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier): scales the
-        // depot's rate only, the site's absorption ([TrafficJamChain]; plasma and effect are the body's).
-        // A new site starts at DoubleKey.InsulinTrafficJamSiteStartSpeed times it, reaching it 48 h after
-        // the change ([TrafficJamChain.siteFactor]). Dose interaction (DoubleKey.InsulinTrafficJamMixing,
-        // see [CrowdingGroup]). All read once per simulated window, like the fitted constants are effectively
-        // constant - a mid-window change to any of them is not retroactively applied to the past, same as those.
+        // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier): scales the depot's rate
+        // only, the site's absorption ([TrafficJamChain]; plasma and effect are the body's). A new site starts at
+        // DoubleKey.InsulinTrafficJamSiteStartSpeed times it, reaching it after the site ramp
+        // (DoubleKey.InsulinTrafficJamSiteRamp, [TrafficJamChain.siteFactor]). Dose interaction
+        // (DoubleKey.InsulinTrafficJamMixing, see [CrowdingGroup]). All read once per simulated window, like the
+        // fitted constants are effectively constant - a mid-window change to any of them is not retroactively applied
+        // to the past, same as those.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val siteStartSpeed = preferences.get(DoubleKey.InsulinTrafficJamSiteStartSpeed).coerceIn(0.2, 1.0)
+        val siteRampMs = TrafficJamChain.siteRampMs(preferences.get(DoubleKey.InsulinTrafficJamSiteRamp))
         val mixing = preferences.get(DoubleKey.InsulinTrafficJamMixing).coerceIn(0.0, 1.0)
         // CGM lag (DoubleKey.InsulinTrafficJamCgmLag): the rate of the stage after the effect stage, or 0 for no
         // such stage. Not scaled by the speed setting: it is the sensor's delay, not the insulin's.
@@ -343,15 +345,15 @@ class TsunamiIobEngineImpl @Inject constructor(
         val siteChangeBoundaries = records.cannulaChangesFrom(startTime)
             .map { it.timestamp }
             .filter { it <= horizonTime }
-        // When the site in use at the window's start was put in, if less than 48 h before: generation 0's start.
-        val firstSiteStart = records.lastCannulaChangeBefore(startTime)
+        // When the site in use at the window's start was put in, if less than a site ramp before: generation 0's start.
+        val firstSiteStart = records.lastCannulaChangeBefore(startTime, siteRampMs)
 
         /** When site generation [gen] was put in, or null if it had reached full speed by the window's start. */
         fun siteStart(gen: Int): Long? = if (gen >= 1) siteChangeBoundaries[gen - 1] else firstSiteStart
 
         /** The absorption speed at [time] of a site put in at [start]: the speed setting times the site's age factor. */
         fun absorptionSpeed(start: Long?, time: Long): Double =
-            if (start == null) speedFactor else speedFactor * TrafficJamChain.siteFactor(siteStartSpeed, time - start)
+            if (start == null) speedFactor else speedFactor * TrafficJamChain.siteFactor(siteStartSpeed, siteRampMs, time - start)
 
         // One persistent set of pools (and crowding rates) per site generation, never shared
         // across generations: the shared branch of every dose, one pool per category (see [CrowdingGroup]).
@@ -391,12 +393,12 @@ class TsunamiIobEngineImpl @Inject constructor(
         // rate and so is the same curve scaled by [IndividualRun.autoScale]. A minute of a bolus's pulses is
         // [scale] lone doses of the pulse size, and a long bolus's full minutes, a minute apart, one run. An
         // isolated curve absorbs at the site's speed when its dose is given, its age factor rounded to 0.01
-        // ([PdModel.siteSpeed]) so that a new site's first 48 h need some 50 curves per amount, not one per minute.
+        // ([PdModel.siteSpeed]) so that a new site's ramp needs some 50 curves per amount, not one per minute.
         val individualRuns = ArrayList<IndividualRun>()
         val openRuns = arrayOfNulls<IndividualRun>(Category.entries.size)
         val curvesByAmount = HashMap<Pair<Double, Double>, PdModel.IsolatedCurve>()
         fun addIndividual(timestamp: Long, siteStart: Long?, cat: Category, amount: Double, autoScale: Double = 0.0, scale: Double = 1.0) {
-            val speed = PdModel.siteSpeed(speedFactor, siteStartSpeed, siteStart, timestamp)
+            val speed = PdModel.siteSpeed(speedFactor, siteStartSpeed, siteRampMs, siteStart, timestamp)
             val curve = curvesByAmount.getOrPut(Pair(amount, speed)) { PdModel.isolatedCurve(amount, speed, kc) }
             val open = openRuns[cat.ordinal]
             if (open != null && open.curve === curve && open.autoScale == autoScale && open.scale == scale && open.last + 60000L == timestamp) open.count++
@@ -443,7 +445,8 @@ class TsunamiIobEngineImpl @Inject constructor(
                     val tSnoozeElapsed = ((tTarget - b.timestamp) * divisor) / 60000.0
                     if (tSnoozeElapsed in 0.0..<DIA_HORIZON_MINUTES) {
                         // Snooze reflects this bolus's own isolated pool, not shared crowding, at its site's speed.
-                        val speed = PdModel.siteSpeed(speedFactor, siteStartSpeed, siteStart(siteGenerationFor(b.timestamp, siteChangeBoundaries)), b.timestamp)
+                        val bolusSiteStart = siteStart(siteGenerationFor(b.timestamp, siteChangeBoundaries))
+                        val speed = PdModel.siteSpeed(speedFactor, siteStartSpeed, siteRampMs, bolusSiteStart, b.timestamp)
                         bSnooze += b.amount * PdModel.isolatedIobFraction(tSnoozeElapsed, b.amount, speed, kc)
                     }
                 }
@@ -559,8 +562,8 @@ class TsunamiIobEngineImpl @Inject constructor(
             // projection included), so no rate is then held for more than a minute while its depot
             // empties. Where no profile exists, only boluses create events and the rates are held
             // between them. Every live generation too, since an old site's depot keeps emptying
-            // after dosing has moved to the new one. A new site's age factor changes slowly (over 48 h),
-            // so holding it with the rate between events is exact to well within a minute's change.
+            // after dosing has moved to the new one. A new site's age factor is held with the rate between events
+            // too; it changes little in a minute (a site ramp is an hour at the shortest).
             for (s in sites.values) s.refreshRates(lastTime)
         }
 
@@ -885,12 +888,12 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         /**
          * The absorption speed of the isolated curve of a dose given at [time] on a site put in at [siteStart] (null: at
-         * full speed by then): [speedFactor] times the site's age factor at [time], rounded to 0.01 - a new site's age
-         * factor changes every minute, and an isolated curve is tabulated per speed.
+         * full speed by then) with a site ramp of [siteRampMs]: [speedFactor] times the site's age factor at [time],
+         * rounded to 0.01 - a new site's age factor changes every minute, and an isolated curve is tabulated per speed.
          */
-        fun siteSpeed(speedFactor: Double, siteStartSpeed: Double, siteStart: Long?, time: Long): Double {
+        fun siteSpeed(speedFactor: Double, siteStartSpeed: Double, siteRampMs: Long, siteStart: Long?, time: Long): Double {
             if (siteStart == null) return speedFactor
-            val factor = TrafficJamChain.siteFactor(siteStartSpeed, time - siteStart)
+            val factor = TrafficJamChain.siteFactor(siteStartSpeed, siteRampMs, time - siteStart)
             return if (factor >= 1.0) speedFactor else speedFactor * (Math.round(factor * 100.0) / 100.0)
         }
 

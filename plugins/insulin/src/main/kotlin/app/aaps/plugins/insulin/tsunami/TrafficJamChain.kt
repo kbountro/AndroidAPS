@@ -4,6 +4,7 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.roundToLong
 import kotlin.math.sinh
 
 /**
@@ -39,7 +40,8 @@ import kotlin.math.sinh
  * with the absorption above, its site age, dose interaction 1 and an 8-minute CGM lag (scanned from 2 to 32 min).
  *
  * The site: a new infusion site absorbs at the start speed (DoubleKey.InsulinTrafficJamSiteStartSpeed, default 0.47, the
- * pump study's day 1 against its day 3), rising linearly to full speed 48 hours after the change (day 1 to day 3).
+ * pump study's day 1 against its day 3), rising linearly to full speed over the site ramp ([siteRampMs]:
+ * DoubleKey.InsulinTrafficJamSiteRamp, default 48 hours, day 1 to day 3).
  *
  * A 0.5 U SMB on a day-3 site at speed 1, given on a 1 U/h basal, no CGM lag: share of it still on board after 30 min
  * 0.84, 1 h 0.58, 2 h 0.26, 3 h 0.12, activity peak at 35 min; on a new site (start speed 0.47) 0.91, 0.67, 0.31, 0.14,
@@ -75,8 +77,11 @@ internal object TrafficJamChain {
     /** Never feed a literal zero into the negative-exponent power law. */
     private const val MASS_FLOOR = 1e-6
 
-    /** A new site reaches full speed this long after the change: the pump study's day 1 to its day 3. */
-    const val SITE_RAMP_MS = 48L * 60 * 60 * 1000
+    /** By default a new site reaches full speed this long after the change: the pump study's day 1 to its day 3. */
+    const val SITE_RAMP_HOURS = 48.0
+
+    /** The longest site ramp the setting allows, a week: a site change this long before a window still matters. */
+    const val MAX_SITE_RAMP_MS = 168L * 60 * 60 * 1000
 
     /** Two scaled rates closer than this: their divided difference by exp(-c) sinh(h) / h instead. */
     private const val PAIR_CLOSE = 0.01
@@ -98,11 +103,14 @@ internal object TrafficJamChain {
     /** The depot rate at [absorptionSpeed] (speed setting times [siteFactor]) with [depotMass] U in the depot. */
     fun rate(absorptionSpeed: Double, depotMass: Double): Double = absorptionSpeed * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
 
-    /** A site's speed [ageMs] after its change, relative to a settled site: [startSpeed] rising linearly to 1 at [SITE_RAMP_MS]. */
-    fun siteFactor(startSpeed: Double, ageMs: Long): Double = when {
-        ageMs >= SITE_RAMP_MS -> 1.0
-        ageMs <= 0L           -> startSpeed
-        else                  -> startSpeed + (1.0 - startSpeed) * ageMs / SITE_RAMP_MS.toDouble()
+    /** The site ramp in ms for the setting's [hours] (DoubleKey.InsulinTrafficJamSiteRamp), kept within an hour and a week. */
+    fun siteRampMs(hours: Double): Long = (hours.coerceIn(1.0, 168.0) * 3_600_000.0).roundToLong()
+
+    /** A site's speed [ageMs] after its change, relative to a settled site: [startSpeed] rising linearly to 1 at [rampMs]. */
+    fun siteFactor(startSpeed: Double, rampMs: Long, ageMs: Long): Double = when {
+        ageMs >= rampMs -> 1.0
+        ageMs <= 0L     -> startSpeed
+        else            -> startSpeed + (1.0 - startSpeed) * ageMs / rampMs.toDouble()
     }
 
     /**
