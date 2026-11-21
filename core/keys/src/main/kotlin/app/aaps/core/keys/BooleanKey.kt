@@ -147,10 +147,4 @@ enum class BooleanKey(
     ExportCsvLocalEnabled("export_csv_local_enabled", defaultValue = true),
     ExportCsvCloudEnabled("export_csv_cloud_enabled", defaultValue = false),
 
-    // Traffic Jam micro-doses (BolusPulses in plugins/insulin): every bolus and SMB modelled the way the pump delivers it,
-    // in pulses of DoubleKey.InsulinTrafficJamPulseSize at DoubleKey.InsulinTrafficJamBolusSpeed, each minute's pulses
-    // entering the shared depot together and each pulse's individual share absorbing as a lone dose of the pulse size.
-    // Off (default): every bolus enters whole at its timestamp, exactly as before.
-    InsulinTrafficJamMicroDoses("insulin_traffic_jam_micro_doses", false, hideParentScreenIfHidden = true),
-
 }

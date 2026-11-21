@@ -10,7 +10,6 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
-import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.shared.tests.TestBase
@@ -109,7 +108,7 @@ class InsulinOrefBasePluginTest : TestBase() {
 
     @Test
     fun trafficJamCgmLagDelaysTheActivityButKeepsItsTotal() {
-        whenever(preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)).thenReturn(1.0)
+        pulses()
         val bolus = BS(timestamp = 0, amount = 1.0, type = BS.Type.NORMAL)
         fun curve(lagMinutes: Double) = run {
             whenever(preferences.get(DoubleKey.InsulinTrafficJamCgmLag)).thenReturn(lagMinutes)
@@ -129,22 +128,24 @@ class InsulinOrefBasePluginTest : TestBase() {
         assertThat(lagged[60].iobContrib).isGreaterThan(plain[60].iobContrib)
     }
 
-    private fun microDoses(on: Boolean, mixing: Double = 1.0) {
+    /** The pump study's pulses, 0.05 U at 1.5 U/min, at speed 1 and dose interaction [mixing]. */
+    private fun pulses(mixing: Double = 1.0) {
         whenever(preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)).thenReturn(1.0)
         whenever(preferences.get(DoubleKey.InsulinTrafficJamPulseSize)).thenReturn(0.05)
         whenever(preferences.get(DoubleKey.InsulinTrafficJamBolusSpeed)).thenReturn(1.5)
         whenever(preferences.get(DoubleKey.InsulinTrafficJamMixing)).thenReturn(mixing)
-        whenever(preferences.get(BooleanKey.InsulinTrafficJamMicroDoses)).thenReturn(on)
     }
 
     @Test
-    fun trafficJamMicroDosesLeaveABolusOfOnePulseAsItWas() {
-        // One pulse is one dose at the bolus's timestamp, at any dose interaction.
+    fun trafficJamABolusOfOnePulseIsOneDose() {
+        // One pulse is one dose at the bolus's timestamp, at any dose interaction: the same as a basal part of its
+        // amount, which is never pulsed.
         val pulse = BS(timestamp = 0, amount = 0.05, type = BS.Type.SMB)
-        microDoses(false)
-        val whole = (0 until 480).map { sut.trafficJamPdModelIobCalculation(pulse, it + 0.37) }
+        val part = BS(timestamp = 0, amount = 0.05, type = BS.Type.NORMAL, isBasalInsulin = true)
+        pulses()
+        val whole = (0 until 480).map { sut.trafficJamPdModelIobCalculation(part, it + 0.37) }
         for (mixing in listOf(0.0, 0.4, 1.0)) {
-            microDoses(true, mixing)
+            pulses(mixing)
             for (i in 0 until 480) {
                 val pulsed = sut.trafficJamPdModelIobCalculation(pulse, i + 0.37)
                 assertThat(pulsed.iobContrib).isWithin(1e-12).of(whole[i].iobContrib)
@@ -154,37 +155,41 @@ class InsulinOrefBasePluginTest : TestBase() {
     }
 
     @Test
-    fun trafficJamMicroDosesAbsorbABolusAsLonePulsesBelowFullInteraction() {
+    fun trafficJamABolusAbsorbsAsLonePulsesBelowFullInteraction() {
         val bolus = BS(timestamp = 0, amount = 3.0, type = BS.Type.NORMAL) // 60 pulses, at 29 and 89 s
         fun curve(mixing: Double) = run {
-            microDoses(true, mixing)
+            pulses(mixing)
             (0 until 480).map { sut.trafficJamPdModelIobCalculation(bolus, it.toDouble()) }
         }
         val pooled = curve(1.0)
-        val pulses = curve(0.0)
+        val lone = curve(0.0)
         // Each pulse alone absorbs faster than the whole bolus in one pool (the plasma and effect stages after the depot
         // are the same for both)...
-        assertThat(pulses.indices.maxBy { pulses[it].activityContrib }).isLessThan(pooled.indices.maxBy { pooled[it].activityContrib } - 6)
-        assertThat(pulses[60].iobContrib).isLessThan(pooled[60].iobContrib - 0.1)
+        assertThat(lone.indices.maxBy { lone[it].activityContrib }).isLessThan(pooled.indices.maxBy { pooled[it].activityContrib } - 6)
+        assertThat(lone[60].iobContrib).isLessThan(pooled[60].iobContrib - 0.1)
         // ...with the same total effect; and the whole bolus is on board from its timestamp, given yet or not (less what
         // is still on board at the 480-min horizon, which the preview subtracts).
-        assertThat(pulses.sumOf { it.activityContrib }).isWithin(0.01).of(pooled.sumOf { it.activityContrib })
+        assertThat(lone.sumOf { it.activityContrib }).isWithin(0.01).of(pooled.sumOf { it.activityContrib })
         assertThat(pooled[0].iobContrib).isWithin(1e-2).of(3.0)
-        assertThat(pulses[0].iobContrib).isWithin(1e-2).of(3.0)
+        assertThat(lone[0].iobContrib).isWithin(1e-2).of(3.0)
         assertThat(pooled[0].activityContrib).isEqualTo(0.0)
     }
 
     @Test
-    fun trafficJamMicroDosesLeaveBasalPartsAsOneDose() {
-        // The stock calculator's basal, temp basal and extended bolus parts are never pulsed.
+    fun trafficJamBasalPartsStayOneDose() {
+        // The stock calculator's basal, temp basal and extended bolus parts are never pulsed: one dose, the same at every
+        // dose interaction, while a bolus of the same amount absorbs faster as lone pulses below full interaction.
         val part = BS(timestamp = 0, amount = 0.4, type = BS.Type.NORMAL, isBasalInsulin = true)
-        microDoses(true, 0.3)
-        val on = (0 until 480).map { sut.trafficJamPdModelIobCalculation(part, it + 0.5) }
-        microDoses(false, 0.3)
-        val off = (0 until 480).map { sut.trafficJamPdModelIobCalculation(part, it + 0.5) }
+        val bolus = BS(timestamp = 0, amount = 0.4, type = BS.Type.NORMAL)
+        pulses(0.0)
+        val alone = (0 until 480).map { sut.trafficJamPdModelIobCalculation(part, it + 0.5) }
+        val lonePulses = (0 until 480).map { sut.trafficJamPdModelIobCalculation(bolus, it + 0.5) }
+        pulses(1.0)
+        val pooled = (0 until 480).map { sut.trafficJamPdModelIobCalculation(part, it + 0.5) }
         for (i in 0 until 480) {
-            assertThat(on[i].iobContrib).isEqualTo(off[i].iobContrib)
-            assertThat(on[i].activityContrib).isEqualTo(off[i].activityContrib)
+            assertThat(pooled[i].iobContrib).isEqualTo(alone[i].iobContrib)
+            assertThat(pooled[i].activityContrib).isEqualTo(alone[i].activityContrib)
         }
+        assertThat(lonePulses[30].iobContrib).isLessThan(alone[30].iobContrib)
     }
 }

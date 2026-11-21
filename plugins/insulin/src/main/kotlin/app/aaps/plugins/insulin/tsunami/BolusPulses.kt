@@ -6,9 +6,9 @@ import kotlin.math.min
 import kotlin.math.roundToLong
 
 /**
- * A bolus or SMB the way the pump delivers it, for the Traffic Jam model's micro-doses
- * (BooleanKey.InsulinTrafficJamMicroDoses): pulses of [pulseSize] U, the first at the bolus's timestamp and one every
- * pulseSize / bolusSpeed minutes after it, the last one smaller when the amount is not a whole number of pulses.
+ * A bolus or SMB the way the pump delivers it, as the Traffic Jam model gives every bolus and SMB (micro-doses, as its
+ * absorption fit replays the pump study's boluses): pulses of [pulseSize] U, the first at the bolus's timestamp and one
+ * every pulseSize / bolusSpeed minutes after it, the last one smaller when the amount is not a whole number of pulses.
  *
  * The model takes each minute of pulses together, as a [Chunk] at the pulses' average time. A chunk enters the shared
  * depot at once, and its individual branch is that many lone pulses, each absorbing as a dose of the pulse size

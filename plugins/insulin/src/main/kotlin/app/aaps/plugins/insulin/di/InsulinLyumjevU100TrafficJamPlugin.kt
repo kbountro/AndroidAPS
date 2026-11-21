@@ -13,13 +13,11 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
-import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.put
 import app.aaps.core.objects.extensions.store
 import app.aaps.core.validators.preferences.AdaptiveDoublePreference
-import app.aaps.core.validators.preferences.AdaptiveSwitchPreference
 import org.json.JSONObject
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -45,7 +43,6 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
             .put(DoubleKey.InsulinTrafficJamSiteStartSpeed, preferences)
             .put(DoubleKey.InsulinTrafficJamMixing, preferences)
             .put(DoubleKey.InsulinTrafficJamCgmLag, preferences)
-            .put(BooleanKey.InsulinTrafficJamMicroDoses, preferences)
             .put(DoubleKey.InsulinTrafficJamPulseSize, preferences)
             .put(DoubleKey.InsulinTrafficJamBolusSpeed, preferences)
 
@@ -55,7 +52,6 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
             .store(DoubleKey.InsulinTrafficJamSiteStartSpeed, preferences)
             .store(DoubleKey.InsulinTrafficJamMixing, preferences)
             .store(DoubleKey.InsulinTrafficJamCgmLag, preferences)
-            .store(BooleanKey.InsulinTrafficJamMicroDoses, preferences)
             .store(DoubleKey.InsulinTrafficJamPulseSize, preferences)
             .store(DoubleKey.InsulinTrafficJamBolusSpeed, preferences)
     }
@@ -104,13 +100,6 @@ class InsulinLyumjevU100TrafficJamPlugin @Inject constructor(
                     dialogMessage = R.string.insulin_traffic_jam_cgm_lag_summary, title = R.string.insulin_traffic_jam_cgm_lag_title
                 )
             )
-            addPreference(
-                AdaptiveSwitchPreference(
-                    ctx = context, booleanKey = BooleanKey.InsulinTrafficJamMicroDoses,
-                    summary = R.string.insulin_traffic_jam_micro_doses_summary, title = R.string.insulin_traffic_jam_micro_doses_title
-                )
-            )
-            // Shown only with micro-doses on (their keys depend on it; the screen is rebuilt when it changes).
             addPreference(
                 AdaptiveDoublePreference(
                     ctx = context, doubleKey = DoubleKey.InsulinTrafficJamPulseSize,

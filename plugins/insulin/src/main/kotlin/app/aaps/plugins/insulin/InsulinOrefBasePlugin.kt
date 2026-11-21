@@ -17,7 +17,6 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.HardLimits
-import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.plugins.insulin.tsunami.BolusPulses
@@ -204,20 +203,19 @@ abstract class InsulinOrefBasePlugin(
         if (bolus.amount <= 0.0) return result
 
         // Per-patient absorption speed knob (DoubleKey.InsulinTrafficJamSpeedMultiplier, applied to the
-        // depot's rate only, as in the engine). The dose interaction does not apply here: a dose alone is
-        // the same at every value, unless given in micro-doses (below). The CGM lag
+        // depot's rate only, as in the engine). The dose interaction does not apply here, except to a bolus's
+        // pulses (below): a dose alone is the same at every value. The CGM lag
         // (DoubleKey.InsulinTrafficJamCgmLag, as in the engine: a stage C after the effect stage at 1/lag,
         // reporting kc*C as the activity) does.
         val speedFactor = preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)
         val lagMinutes = preferences.get(DoubleKey.InsulinTrafficJamCgmLag).coerceIn(0.0, 30.0)
         val kc = if (lagMinutes > 0.0) 1.0 / lagMinutes else 0.0
 
-        // Micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, as in the engine): the bolus in the pump's pulses
-        // ([BolusPulses]), the dose interaction's share of them absorbing as one pool, filled a minute of pulses at a
-        // time, and the rest as lone pulses, so a lone bolus then depends on the dose interaction. Never for the stock
-        // calculator's basal, temp basal and extended bolus parts (isBasalInsulin), which the engine gives one dose a
-        // minute either way.
-        if (!bolus.isBasalInsulin && preferences.get(BooleanKey.InsulinTrafficJamMicroDoses)) {
+        // As in the engine, the bolus in the pump's pulses ([BolusPulses]), the dose interaction's share of them
+        // absorbing as one pool, filled a minute of pulses at a time, and the rest as lone pulses, so a lone bolus
+        // depends on the dose interaction. Never for the stock calculator's basal, temp basal and extended bolus parts
+        // (isBasalInsulin), which the engine gives one dose a minute.
+        if (!bolus.isBasalInsulin) {
             val pulses = BolusPulses(
                 preferences.get(DoubleKey.InsulinTrafficJamPulseSize).coerceIn(0.01, 1.0),
                 preferences.get(DoubleKey.InsulinTrafficJamBolusSpeed).coerceIn(0.1, 10.0)

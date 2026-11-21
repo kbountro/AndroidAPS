@@ -17,7 +17,6 @@ import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventNewHistoryData
 import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.utils.DateUtil
-import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.convertedToAbsolute
@@ -309,15 +308,13 @@ class TsunamiIobEngineImpl @Inject constructor(
         val pumpInterface = activePlugin.activePump
         val isFakingTemps = pumpInterface.isFakingTempsByExtendedBoluses
 
-        // Micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, see [BolusPulses]): every bolus and SMB as the pump gives
-        // it, in pulses of the pulse size at the bolus speed, a minute of pulses at a time; off (default), each enters
-        // whole at its timestamp. Basal, temp basals and extended boluses stay one dose a minute either way.
-        val pulses = if (preferences.get(BooleanKey.InsulinTrafficJamMicroDoses))
-            BolusPulses(
-                preferences.get(DoubleKey.InsulinTrafficJamPulseSize).coerceIn(0.01, 1.0),
-                preferences.get(DoubleKey.InsulinTrafficJamBolusSpeed).coerceIn(0.1, 10.0)
-            )
-        else null
+        // Every bolus and SMB as the pump gives it ([BolusPulses]), as the absorption fit replays the pump study's
+        // boluses: in pulses of the pulse size at the bolus speed, a minute of pulses at a time. Basal, temp basals and
+        // extended boluses stay one dose a minute.
+        val pulses = BolusPulses(
+            preferences.get(DoubleKey.InsulinTrafficJamPulseSize).coerceIn(0.01, 1.0),
+            preferences.get(DoubleKey.InsulinTrafficJamBolusSpeed).coerceIn(0.1, 10.0)
+        )
 
         val timeline = buildDoseEventTimeline(startTime, horizonTime, sensitivityRatio, boluses, records, isFakingTemps, assumeZeroTempAfter, now, pulses)
 
@@ -391,10 +388,10 @@ class TsunamiIobEngineImpl @Inject constructor(
         // in each category ([IndividualRun]). A basal rate is one dose every minute, so a stretch at one
         // rate is a single run, summed in a few steps ([PdModel.runState]) instead of dose by dose. A
         // profile-basal dose also carries its autoProfileBasal twin, which moves at the profile basal's
-        // rate and so is the same curve scaled by [IndividualRun.autoScale]. With micro-doses, a minute of a
-        // bolus's pulses is [scale] lone doses of the pulse size, and a long bolus's full minutes, a minute
-        // apart, one run. An isolated curve absorbs at the site's speed when its dose is given, its age factor rounded to
-        // 0.01 ([PdModel.siteSpeed]) so that a new site's first 48 h need some 50 curves per amount, not one per minute.
+        // rate and so is the same curve scaled by [IndividualRun.autoScale]. A minute of a bolus's pulses is
+        // [scale] lone doses of the pulse size, and a long bolus's full minutes, a minute apart, one run. An
+        // isolated curve absorbs at the site's speed when its dose is given, its age factor rounded to 0.01
+        // ([PdModel.siteSpeed]) so that a new site's first 48 h need some 50 curves per amount, not one per minute.
         val individualRuns = ArrayList<IndividualRun>()
         val openRuns = arrayOfNulls<IndividualRun>(Category.entries.size)
         val curvesByAmount = HashMap<Pair<Double, Double>, PdModel.IsolatedCurve>()
@@ -485,18 +482,16 @@ class TsunamiIobEngineImpl @Inject constructor(
                 }
             }
 
-            // With micro-doses, the pulses of a bolus that are still to come at tTarget (in the chunks after it) are on
-            // board but not yet active: the bolus counts whole from its timestamp, as without micro-doses and in the stock
-            // calculators. Some drivers record a bolus as it starts (Medtrum's, with its full amount), so a loop run
-            // during a long bolus would otherwise miss the part not yet given.
-            if (pulses != null) {
-                var notGivenYet = 0.0
-                for (idx in 0 until bolusValidIdx) {
-                    val b = sortedBoluses[idx]
-                    if (b.amount > 0.0) notGivenYet += pulses.notGivenYet(b.amount, tTarget - b.timestamp)
-                }
-                iob[Category.BOLUS.ordinal] += notGivenYet
+            // The pulses of a bolus that are still to come at tTarget (in the chunks after it) are on board but not yet
+            // active: the bolus counts whole from its timestamp, as in the stock calculators. Some drivers record a bolus
+            // as it starts (Medtrum's, with its full amount), so a loop run during a long bolus would otherwise miss the
+            // part not yet given.
+            var notGivenYet = 0.0
+            for (idx in 0 until bolusValidIdx) {
+                val b = sortedBoluses[idx]
+                if (b.amount > 0.0) notGivenYet += pulses.notGivenYet(b.amount, tTarget - b.timestamp)
             }
+            iob[Category.BOLUS.ordinal] += notGivenYet
 
             val bolus = Category.BOLUS.ordinal
             val extBolus = Category.EXT_BOLUS.ordinal
@@ -543,16 +538,12 @@ class TsunamiIobEngineImpl @Inject constructor(
                 if (dose.autoProfileBasalAmt > 0.0) site.pools[Category.AUTO_PROFILE_BASAL.ordinal].D += dose.autoProfileBasalAmt
             }
 
-            // Individual branches, below m = 1. With micro-doses, a chunk's are its lone pulses: that many doses of the
-            // pulse size, and the smaller last pulse.
+            // Individual branches, below m = 1. A bolus chunk's are its lone pulses: that many doses of the pulse size,
+            // and the smaller last pulse.
             if (mixing < 1.0) {
-                if (dose.bolusAmt > 0.0) {
-                    val chunks = dose.bolusChunks
-                    if (chunks == null || pulses == null) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, dose.bolusAmt)
-                    else for (chunk in chunks) {
-                        if (chunk.pulses > 0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, pulses.pulseSize, scale = chunk.pulses.toDouble())
-                        if (chunk.extra > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, chunk.extra)
-                    }
+                dose.bolusChunks?.forEach { chunk ->
+                    if (chunk.pulses > 0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, pulses.pulseSize, scale = chunk.pulses.toDouble())
+                    if (chunk.extra > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.BOLUS, chunk.extra)
                 }
                 if (dose.extBolusAmt > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.EXT_BOLUS, dose.extBolusAmt)
                 if (dose.basalAbsAmt > 0.0) addIndividual(dose.timestamp, doseSiteStart, Category.BASAL_ABS, dose.basalAbsAmt)
@@ -644,7 +635,7 @@ class TsunamiIobEngineImpl @Inject constructor(
         isFakingTemps: Boolean,
         assumeZeroTempAfter: Long,
         currentNow: Long,
-        pulses: BolusPulses?
+        pulses: BolusPulses
     ): List<DoseEvent> {
 
         val capacity = ((toTime - fromTime) / 60000L).toInt() + 10
@@ -661,8 +652,7 @@ class TsunamiIobEngineImpl @Inject constructor(
 
         for (b in boluses) {
             if (b.isValid && b.timestamp in fromTime..toTime) {
-                if (pulses == null) getOrCreate(b.timestamp).bolusAmt += b.amount
-                else for (chunk in pulses.chunks(b.amount)) {
+                for (chunk in pulses.chunks(b.amount)) {
                     // A minute of pulses at a time, at their average time ([BolusPulses]); the chunks after toTime are
                     // after the requested time, and count as not given yet there (evaluatePools).
                     val time = b.timestamp + chunk.offsetMs
@@ -782,9 +772,9 @@ class TsunamiIobEngineImpl @Inject constructor(
     /**
      * Which pools crowd each other, and how much: the dose interaction m
      * (DoubleKey.InsulinTrafficJamMixing, 0 to 1; the absorption is fitted at 1, with all of the pump study's
-     * insulin in one depot - see [TrafficJamChain]). Every delivery is one dose: each bolus/SMB, and each event's
-     * (each minute's) delivered basal, extended bolus and profile basal. Each dose is split into two branches, each a
-     * depot -> plasma -> effect chain:
+     * insulin in one depot - see [TrafficJamChain]). Every delivery is one dose: each pulse of a bolus/SMB (below),
+     * and each event's (each minute's) delivered basal, extended bolus and profile basal. Each dose is split into two
+     * branches, each a depot -> plasma -> effect chain:
      *  - a shared branch, m of the dose, absorbing together with the shared branches of all the other
      *    doses of its group. Its rate follows the group's whole depot mass as if all of that insulin
      *    were in the shared branches, so together they are m times the one pooled (D, X, A) per group
@@ -797,7 +787,7 @@ class TsunamiIobEngineImpl @Inject constructor(
      * doses' isolated curves, and a dose with no other insulin on board follows the fitted curve at
      * every m. At m = 1 (default) all insulin follows the same path. At m = 0 no dose interacts with
      * any other: each absorbs as an isolated dose of its own size (a basal minute as a dose of rate/60
-     * U), so a cascade is exactly the sum of its SMBs' isolated curves, on any basal rate. The groups:
+     * U), so a cascade is exactly the sum of its SMBs' pulses' isolated curves, on any basal rate. The groups:
      *  - [DELIVERED]: all insulin actually delivered - boluses, SMBs, extended boluses and basal
      *    (profile rate, temp basals, zero temps and temps faked by extended boluses alike) - so an
      *    SMB cascade jams and a basal rate slows the doses given on top of it.
@@ -815,13 +805,12 @@ class TsunamiIobEngineImpl @Inject constructor(
      *    in the depot (and its lower activity) is part of that total, and shows under net basal IOB
      *    even with no temp running.
      *
-     * With micro-doses (BooleanKey.InsulinTrafficJamMicroDoses, off by default), a bolus or SMB is not one
-     * dose but the pump's pulses ([BolusPulses]), taken a minute at a time: each minute's pulses enter the
-     * shared branch together, and each pulse's individual branch absorbs as a lone dose of the pulse size.
-     * At m = 1 a bolus then enters over its delivery time and otherwise absorbs as before. Below 1 the
-     * individual share of every bolus absorbs as fast as a lone pulse, whatever the bolus's size, so a lone
-     * bolus no longer follows the fitted curve at every m: at 0 it is the sum of its pulses' isolated curves.
-     * Basal, temp basals and extended boluses stay one dose a minute.
+     * A bolus or SMB is not one dose but the pump's pulses ([BolusPulses]), as the absorption fit replays the
+     * pump study's boluses, taken a minute at a time: each minute's pulses enter the shared branch together,
+     * and each pulse's individual branch absorbs as a lone dose of the pulse size. At m = 1 a bolus enters
+     * over its delivery time. Below 1 the individual share of every bolus absorbs as fast as a lone pulse,
+     * whatever the bolus's size, so a lone bolus does not follow the same curve at every m: at 0 it is the sum
+     * of its pulses' isolated curves. Basal, temp basals and extended boluses stay one dose a minute.
      */
     private enum class CrowdingGroup { DELIVERED, PROFILE }
 
@@ -859,8 +848,8 @@ class TsunamiIobEngineImpl @Inject constructor(
 
     /**
      * [count] doses' individual branches in [cat], at a dose interaction below 1: doses of the same amount
-     * ([curve], see [PdModel.IsolatedCurve]) a minute apart, from [first] on, each [scale] times over (with
-     * micro-doses, a minute of a bolus's pulses; otherwise 1). For profile basal, [autoScale] is the matching
+     * ([curve], see [PdModel.IsolatedCurve]) a minute apart, from [first] on, each [scale] times over (for a
+     * bolus, a minute of its pulses; otherwise 1). For profile basal, [autoScale] is the matching
      * autoProfileBasal amount over the profile amount (its twin moves at the profile basal's rate, so its
      * curve is the same scaled), otherwise 0.
      */
@@ -873,7 +862,7 @@ class TsunamiIobEngineImpl @Inject constructor(
     private data class DoseEvent(
         val timestamp: Long,
         var bolusAmt: Double = 0.0,
-        /** With micro-doses, the bolus chunks [bolusAmt] is made of ([BolusPulses]), for their individual branches. */
+        /** The bolus chunks [bolusAmt] is made of ([BolusPulses]), for their individual branches; null without a bolus. */
         var bolusChunks: ArrayList<BolusPulses.Chunk>? = null,
         var extBolusAmt: Double = 0.0,
         var basalAbsAmt: Double = 0.0,
