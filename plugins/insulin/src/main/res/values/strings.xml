@@ -25,7 +25,7 @@
     <string name="description_insulin_lyumjev_U100_Traffic_Jam">Experimental Traffic Jam Glucodynamic model. Uses a unified 8-hour analytic depot pool to calculate dynamic Subcutaneous accumulation.</string>
     <string name="insulin_traffic_jam_speed_settings">Absorption Speed, New Site Speed and Ramp, Dose Interaction, CGM Lag, Pulse Size and Bolus Speed</string>
     <string name="insulin_traffic_jam_speed_multiplier_title">Absorption Speed [x]</string>
-    <string name="insulin_traffic_jam_speed_multiplier_summary">How fast your infusion site absorbs insulin once it has settled. 1 is standard, 2 is twice as fast, 0.5 half as fast. Only absorption from the site changes, not how long insulin acts in the body. Default 1.</string>
+    <string name="insulin_traffic_jam_speed_multiplier_summary">How fast your infusion site absorbs insulin once it has settled. 1 is standard, 2 is twice as fast, 0.5 half as fast. Only absorption from the site changes, not how long insulin acts in serum. Default 1.</string>
     <string name="insulin_traffic_jam_site_start_speed_title">New Site Speed [x]</string>
     <string name="insulin_traffic_jam_site_start_speed_summary">How fast a new site absorbs right after a site change, compared with a settled site. It rises to full speed over New Site Ramp. Default 0.47, from the pump study the model is fitted to. 1 turns it off.</string>
     <string name="insulin_traffic_jam_site_ramp_title">New Site Ramp [h]</string>
