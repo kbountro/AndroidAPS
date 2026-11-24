@@ -122,9 +122,9 @@ class InsulinOrefBasePluginTest : TestBase() {
         assertThat(laggedPeak).isGreaterThan(plainPeak + 3)
         assertThat(laggedPeak).isLessThan(plainPeak + 13)
         assertThat(lagged.sumOf { it.activityContrib }).isWithin(1e-3).of(plain.sumOf { it.activityContrib })
-        // The whole dose is on board at once (less the 0.23% still on board at the 480-min horizon, which the preview
+        // The whole dose is on board at once (less the 0.32% still on board at the 480-min horizon, which the preview
         // subtracts so that IOB ends at 0 there), and the effect still on its way to the CGM counts as on board.
-        assertThat(lagged[0].iobContrib).isWithin(3e-3).of(1.0)
+        assertThat(lagged[0].iobContrib).isWithin(5e-3).of(1.0)
         assertThat(lagged[60].iobContrib).isGreaterThan(plain[60].iobContrib)
     }
 
@@ -170,8 +170,8 @@ class InsulinOrefBasePluginTest : TestBase() {
         // ...with the same total effect; and the whole bolus is on board from its timestamp, given yet or not (less what
         // is still on board at the 480-min horizon, which the preview subtracts).
         assertThat(lone.sumOf { it.activityContrib }).isWithin(0.01).of(pooled.sumOf { it.activityContrib })
-        assertThat(pooled[0].iobContrib).isWithin(1e-2).of(3.0)
-        assertThat(lone[0].iobContrib).isWithin(1e-2).of(3.0)
+        assertThat(pooled[0].iobContrib).isWithin(2e-2).of(3.0)
+        assertThat(lone[0].iobContrib).isWithin(2e-2).of(3.0)
         assertThat(pooled[0].activityContrib).isEqualTo(0.0)
     }
 

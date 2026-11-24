@@ -17,7 +17,7 @@ class TrafficJamChainTest {
     @Test
     fun matchesA60DigitMatrixExponentialForAnyRates() {
         // Coinciding rates are the hard cases: the depot rate varies continuously and crosses the plasma, effect and CGM
-        // rates, and a CGM lag of 1/K_EFFECT (11.5 min) puts the CGM rate on the effect rate.
+        // rates, and a CGM lag of 1/K_EFFECT (28.9 min) puts the CGM rate on the effect rate.
         val depotRates = listOf(
             1e-4, 0.02, kPlasma, kPlasma * (1 + 1e-9), kPlasma * (1 + 1e-6), kPlasma * (1 + 0.004), kEffect, kEffect * (1 - 1e-8),
             kEffect * (1 + 3e-3), 0.125, 0.2, 2.99

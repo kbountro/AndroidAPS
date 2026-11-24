@@ -32,22 +32,26 @@ import kotlin.math.sinh
  * report does not give the bolus size; with 10 U assumed (6 / 15 U: K1_B1 -0.36 / -0.28, day 1 0.49 / 0.44, plasma
  * 51-52 min).
  *
- * The effect stage is the delay from insulin in the blood to its effect. In the report's studies that measured serum
- * insulin and the glucose infusion rate in the same people, the infusion rate trails serum by a half-life of 24 min in
- * young adults with type 1 diabetes (ITRR, 15 U) and 34-45 min in healthy subjects (ITSH 7/15/30 U, ITRT), where it
- * also saturates. The clamp's infusion rate is itself set by an algorithm reacting to measured glucose, so it trails the
- * insulin's effect. The 8 min is the half-life that explained a month of real-world closed-loop pump and CGM data best,
- * with the absorption above, its site age, dose interaction 1 and an 8-minute CGM lag (scanned from 2 to 32 min).
+ * The effect stage is the delay from insulin in the blood to its effect: the same for every insulin lispro product and
+ * every route once the insulin is in the blood. Fitted from measured serum insulin to the measured glucose infusion
+ * rate in the same people (no absorption model), it is a half-life of 23.5 min (Lyumjev) and 30 min (Humalog) in
+ * younger adults with type 1 diabetes (ITRR, 15 U; Linnebjerg et al., Clin Pharmacokinet 2020), 27 min in adults with
+ * type 1 diabetes at 0.3 U/kg once the response's saturation is allowed for (PDY12704, Humalog and Insulin lispro
+ * Sanofi; FDA review of Admelog), 29 min (Lyumjev) and 27.5 min (Humalog) in type 2 diabetes (ITRU, 15 U; Leohr et al.,
+ * Clin Pharmacokinet 2020) and 39 min, also saturating, in healthy subjects (IOPY, 20 U; EMA report on Humalog 200
+ * U/mL). Lilly's population PK/PD model, built on pump users and used for injections too, puts the lispro effect
+ * compartment at 2.1 /h (FDA review of Lyumjev's pediatric and pump use, 2022): a half-life of 19.8 min.
+ * EFFECT_HALF_LIFE_MINUTES is that, rounded. On a month of real-world closed-loop pump and CGM data, the fast glucose
+ * fluctuations (slow drifts, basal-profile mismatch and the ISF scale removed) were explained best by 16-25 min at
+ * absorption speed 1 with an 8-minute CGM lag.
  *
  * The site: a new infusion site absorbs at the start speed (DoubleKey.InsulinTrafficJamSiteStartSpeed, default 0.47, the
  * pump study's day 1 against its day 3), rising linearly to full speed over the site ramp ([siteRampMs]:
  * DoubleKey.InsulinTrafficJamSiteRamp, default 48 hours, day 1 to day 3).
  *
  * A 0.5 U SMB on a day-3 site at speed 1, given on a 1 U/h basal, no CGM lag: share of it still on board after 30 min
- * 0.84, 1 h 0.58, 2 h 0.26, 3 h 0.12, activity peak at 35 min; on a new site (start speed 0.47) 0.91, 0.67, 0.31, 0.14,
- * peak at 50 min. A 10 U bolus on a day-3 site: 0.67 after 1 h, 0.30 after 2 h, 0.13 after 3 h, peak at 50 min. With a
- * 24-min effect stage instead, that bolus would leave 0.80 / 0.43 / 0.20, as the study's measured day-3 serum does
- * through the same plasma and effect stages (0.81 / 0.44 / 0.19): the absorption fit carries the measured serum over.
+ * 0.91, 1 h 0.70, 2 h 0.35, 3 h 0.16, activity peak at 53 min; on a new site (start speed 0.47) 0.95, 0.78, 0.41, 0.19,
+ * peak at 68 min. A 10 U bolus on a day-3 site: 0.78 after 1 h, 0.40 after 2 h, 0.18 after 3 h, peak at 66 min.
  *
  * [propagate] advances the chain exactly for constant rates, any of them coinciding: k1 varies continuously and crosses
  * the others. Each term is a divided difference of exp(-x) at the scaled rates: two rates closer than PAIR_CLOSE by
@@ -66,7 +70,7 @@ internal object TrafficJamChain {
     const val K1_B1 = -0.32231826
 
     const val PLASMA_HALF_LIFE_MINUTES = 51.5
-    const val EFFECT_HALF_LIFE_MINUTES = 8.0
+    const val EFFECT_HALF_LIFE_MINUTES = 20.0
 
     /** X's exit rate (insulin leaving the blood), 1/min. */
     const val K_PLASMA = LN2 / PLASMA_HALF_LIFE_MINUTES

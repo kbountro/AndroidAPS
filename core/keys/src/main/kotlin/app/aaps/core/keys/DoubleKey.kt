@@ -64,7 +64,7 @@ enum class DoubleKey(
 
     // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on the depot's
     // rate (K1_B0, TrafficJamChain in plugins/insulin), the absorption from the infusion site, applied
-    // as-is. The plasma and effect stages are the body's and stay as fitted, so 2.0 speeds up the
+    // as-is. The plasma and effect stages are the body's and stay as they are, so 2.0 speeds up the
     // absorption only, not the whole curve. Default 1.0: a settled (day-3) pump site, as fitted to the
     // EMA report's pump study.
     InsulinTrafficJamSpeedMultiplier("insulin_traffic_jam_speed_multiplier", 1.0, 0.2, 5.0, hideParentScreenIfHidden = true),
@@ -95,8 +95,7 @@ enum class DoubleKey(
     // effect stage, at rate 1/lag, so the reported activity is the insulin's effect as the CGM sees it -
     // interstitial glucose and the sensor's own processing trail the blood. Delays and smooths every dose's
     // activity by about this much, and counts the effect still on its way to the CGM as insulin on board. Not
-    // scaled by the speed setting. Default 8: the effect stage's 8 minutes were fitted with this 8-minute lag.
-    // 0: no lag stage.
+    // scaled by the speed setting. Default 8: a typical sensor delay plus smoothing. 0: no lag stage.
     InsulinTrafficJamCgmLag("insulin_traffic_jam_cgm_lag", 8.0, 0.0, 30.0, hideParentScreenIfHidden = true),
 
     // Traffic Jam micro-doses (BolusPulses in plugins/insulin): every bolus and SMB is modelled the way the pump gives it,
