@@ -1,11 +1,11 @@
 # Traffic Jam insulin model (this fork: Pool Compartment)
 
-This is the "Lyumjev U100 (Tsunami Traffic Jam)" insulin model, built around one idea: insulin sitting under the skin doesn't all absorb at the same fixed speed. The more of it there is, the slower it is absorbed, and a new dose slows the absorption of all insulin still waiting, not just its own. Fitted to serum insulin from two pump studies, that happens above about 5U under the skin: below that the site absorbs at one top speed whatever it holds, so SMBs and basal don't slow each other.
+This is the "Lyumjev U100 (Tsunami Traffic Jam)" insulin model, built around one idea: insulin sitting under the skin doesn't all absorb at the same fixed speed. The more of it there is, the slower it is absorbed, and a new dose slows the absorption of all insulin still waiting, not just its own. Fitted to serum insulin from two pump studies, that happens while more than about 5U in all waits under the skin: below that the site absorbs at one top speed however much it holds, so doses slow each other only when together they keep more than 5U there. A large bolus does; SMBs and basal on their own rarely add up to that much.
 
 There's another implementation of this idea on branch `AAPS_dev_TsunamiMods` (one curve
 per dose, rather than the shared tanks below) — see its own README. The present method tackles the problem of activity curve's discontinuity: here activity never jumps, neither when a dose is given nor when the rates are re-evaluated (see below).
 
-Traffic Jam is inspired by piecycle's Tsunami PD model (https://github.com/piecycle/tsunami), which adapts the absorption rate based solely on the individual dose. This branch started as an expansion of that model, but the target curve itself has since changed: the absorption constants are fitted to serum insulin from two pump studies, not to clamp activity curves, and the effect stage comes from a study that measured serum insulin and blood glucose together after correction boluses (see "Absorption rates and the fit"). On a settled pump site the depot's half-life is 10.2 minutes with up to 5U in it, so most of a dose's timing comes from its time in the blood (half-life 50.9 minutes); the delay to its effect is short (2.5 minutes), and crowding slows only boluses of more than 5U, by minutes. A lone 1U bolus's activity peaks at 44 minutes with the default 8-minute CGM lag (34 without), and 1 - IOB/dose reaches 0.9 after 198 minutes (189 without).
+Traffic Jam is inspired by piecycle's Tsunami PD model (https://github.com/piecycle/tsunami), which adapts the absorption rate based solely on the individual dose. This branch started as an expansion of that model, but the target curve itself has since changed: the absorption constants are fitted to serum insulin from two pump studies, not to clamp activity curves, and the effect stage comes from a study that measured serum insulin and blood glucose together after correction boluses (see "Absorption rates and the fit"). On a settled pump site the depot's half-life is 10.2 minutes with up to 5U in it, so most of a dose's timing comes from its time in the blood (half-life 50.9 minutes); the delay to its effect is short (2.5 minutes), and crowding acts only while more than 5U waits at the site, adding minutes. A lone 1U bolus's activity peaks at 44 minutes with the default 8-minute CGM lag (34 without), and 1 - IOB/dose reaches 0.9 after 198 minutes (189 without).
 
 ## How it works
 
@@ -27,9 +27,11 @@ one infusion site: insulin given before a cannula/site change never crowds insul
 strongly doses crowd each other is a setting, the dose interaction (see "Dose interaction" below); at
 its default of 1 they all share one rate, as described here. With the fitted constants (below) the
 depot's rate on a settled site is 0.0683 per minute (half-life 10.2 minutes) with anything up to 5.0U
-in the depot, 0.0471 with 10U (14.7 minutes) and 0.0323 with 20U (21.5 minutes). SMBs and basal alone
-seldom bring it near 5U (the 12-SMB cascade further below holds at most 2.1U), so they absorb at the
-top rate and slow nothing.
+in the depot, 0.0471 with 10U (14.7 minutes) and 0.0323 with 20U (21.5 minutes). The 5U is all the
+insulin in the depot together, however many doses it came from, but the depot empties fast enough that
+SMBs and basal alone seldom get there: the 12-SMB cascade further below holds at most 2.1U, and
+keeping 5U in the depot takes more than about 20 U/h for a while on a settled site (10 U/h on a new
+one). Below it they absorb at the top rate and slow nothing.
 
 A new infusion site absorbs more slowly: at the new-site speed (0.48 by default) right after the
 change, rising to full speed over the new-site ramp, 48 hours by default (see "Site age" below).
@@ -299,10 +301,12 @@ minutes and 1.75%, with the 8-minute one 0.13 / 3.80 minutes and 1.92%, and with
 minutes 0.19 / 5.19 minutes and 2.75%, with the same pulses; the clamp fit, with depot and transit
 crowded, gave 46.5 / 68.9 minutes and 23.2% against the same SMBs taken whole, one at a time.
 
-Crowding, and with it the dose interaction, matters for boluses of more than 5U. A single bolus,
-minutes until 1 - (its own IOB)/dose reaches 0.5 / 0.9, and its activity peak (DI: dose interaction;
-Python replica, default 8-minute CGM lag, settled site, the bolus in 0.05U pulses at 1.5 U/min, no
-basal unless stated):
+Crowding, and with it the dose interaction, matters only while more than 5U is in the depot, which in
+practice takes a bolus of more than 5U, alone or on top of insulin still there; smaller doses together
+seldom stay above 5U for long (3U and 3U given at once reach 5.8U and add at most 0.006U to IOB). A
+single bolus, minutes until 1 - (its own IOB)/dose reaches 0.5 / 0.9, and its activity peak (DI: dose
+interaction; Python replica, default 8-minute CGM lag, settled site, the bolus in 0.05U pulses at 1.5
+U/min, no basal unless stated):
 
 | Dose | DI 1 (default) | DI 0.5 | DI 0 | DI 1, on 1 U/h | Previous constants, DI 1 |
 |---|---|---|---|---|---|
@@ -313,8 +317,8 @@ basal unless stated):
 | 20U | 91 / 210, peak 59 | 88 / 207, peak 55 | 86 / 204, peak 51 | 91 / 210, peak 60 | 88 / 208, peak 57 |
 
 At DI 0 the larger boluses still come later, by the time the pump takes to give them (20U: 13
-minutes). Smaller boluses are the same at every dose interaction and on any basal rate (1U: 79 / 198,
-peak 44).
+minutes). A smaller bolus on its own is the same at every dose interaction and on any basal rate (1U:
+79 / 198, peak 44).
 
 A basal rate started with no insulin on board (rate/60 U delivered at the end of every minute) reaches
 50% / 90% of its steady-state activity after 80 / 199 minutes, at 0.5 and 1 U/h alike.
