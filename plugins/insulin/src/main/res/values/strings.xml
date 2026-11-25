@@ -27,11 +27,11 @@
     <string name="insulin_traffic_jam_speed_multiplier_title">Absorption Speed [x]</string>
     <string name="insulin_traffic_jam_speed_multiplier_summary">How fast your infusion site absorbs insulin once it has settled. 1 is standard, 2 is twice as fast, 0.5 half as fast. Only absorption from the site changes, not how long insulin acts in serum. Default 1.</string>
     <string name="insulin_traffic_jam_site_start_speed_title">New Site Speed [x]</string>
-    <string name="insulin_traffic_jam_site_start_speed_summary">How fast a new site absorbs right after a site change, compared with a settled site. It rises to full speed over New Site Ramp. Default 0.47, from the pump study the model is fitted to. 1 turns it off.</string>
+    <string name="insulin_traffic_jam_site_start_speed_summary">How fast a new site absorbs right after a site change, compared with a settled site. It rises to full speed over New Site Ramp. Default 0.48, from the pump study the model is fitted to. 1 turns it off.</string>
     <string name="insulin_traffic_jam_site_ramp_title">New Site Ramp [h]</string>
     <string name="insulin_traffic_jam_site_ramp_summary">How many hours a new site takes to reach full speed, rising linearly from New Site Speed. Default 48 hours: day 1 to day 3 of the pump study.</string>
     <string name="insulin_traffic_jam_mixing_title">Dose Interaction [0-1]</string>
-    <string name="insulin_traffic_jam_mixing_summary">How much doses slow each other down when they accumulate at the site. 1: all insulin at the site absorbs together, more slowly the more there is. 0: every dose absorbs on its own. Values in between mix the two. Default 1.</string>
+    <string name="insulin_traffic_jam_mixing_summary">How much doses slow each other down when more than 5 U accumulate at the site. 1: all insulin at the site absorbs together, more slowly the more there is. 0: every dose absorbs on its own. Values in between mix the two. Default 1.</string>
     <string name="insulin_traffic_jam_cgm_lag_title">CGM Lag [min]</string>
     <string name="insulin_traffic_jam_pulse_size_title">Pulse Size [U]</string>
     <string name="insulin_traffic_jam_pulse_size_summary">How much insulin your pump gives in one pulse during a bolus. Default 0.05 U.</string>

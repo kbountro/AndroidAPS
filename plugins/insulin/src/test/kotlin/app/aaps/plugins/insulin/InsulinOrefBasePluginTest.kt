@@ -122,7 +122,7 @@ class InsulinOrefBasePluginTest : TestBase() {
         assertThat(laggedPeak).isGreaterThan(plainPeak + 3)
         assertThat(laggedPeak).isLessThan(plainPeak + 13)
         assertThat(lagged.sumOf { it.activityContrib }).isWithin(1e-3).of(plain.sumOf { it.activityContrib })
-        // The whole dose is on board at once (less the 0.20% still on board at the 480-min horizon, which the preview
+        // The whole dose is on board at once (less the 0.22% still on board at the 480-min horizon, which the preview
         // subtracts so that IOB ends at 0 there), and the effect still on its way to the CGM counts as on board.
         assertThat(lagged[0].iobContrib).isWithin(5e-3).of(1.0)
         assertThat(lagged[60].iobContrib).isGreaterThan(plain[60].iobContrib)
@@ -156,40 +156,58 @@ class InsulinOrefBasePluginTest : TestBase() {
 
     @Test
     fun trafficJamABolusAbsorbsAsLonePulsesBelowFullInteraction() {
-        val bolus = BS(timestamp = 0, amount = 3.0, type = BS.Type.NORMAL) // 60 pulses, at 29 and 89 s
+        val dose = 20.0 // 400 pulses over 13.3 minutes
+        val bolus = BS(timestamp = 0, amount = dose, type = BS.Type.NORMAL)
         fun curve(mixing: Double) = run {
             pulses(mixing)
             (0 until 480).map { sut.trafficJamPdModelIobCalculation(bolus, it.toDouble()) }
         }
         val pooled = curve(1.0)
         val lone = curve(0.0)
-        // Each pulse alone absorbs faster than the whole bolus in one pool (the plasma and effect stages after the depot
-        // are the same for both)...
+        // With more than about 5 U in one pool the depot crowds, so each pulse alone absorbs faster than the whole bolus
+        // in one pool (the plasma and effect stages after the depot are the same for both)...
         assertThat(lone.indices.maxBy { lone[it].activityContrib }).isLessThan(pooled.indices.maxBy { pooled[it].activityContrib } - 6)
-        assertThat(lone[60].iobContrib).isLessThan(pooled[60].iobContrib - 0.1)
+        assertThat(lone[60].iobContrib).isLessThan(pooled[60].iobContrib - 0.5)
         // ...with the same total effect; and the whole bolus is on board from its timestamp, given yet or not (less what
         // is still on board at the 480-min horizon, which the preview subtracts).
         assertThat(lone.sumOf { it.activityContrib }).isWithin(0.01).of(pooled.sumOf { it.activityContrib })
-        assertThat(pooled[0].iobContrib).isWithin(2e-2).of(3.0)
-        assertThat(lone[0].iobContrib).isWithin(2e-2).of(3.0)
+        assertThat(pooled[0].iobContrib).isWithin(5e-3 * dose).of(dose)
+        assertThat(lone[0].iobContrib).isWithin(5e-3 * dose).of(dose)
         assertThat(pooled[0].activityContrib).isEqualTo(0.0)
+    }
+
+    @Test
+    fun trafficJamBelowFiveUnitsTheDoseInteractionChangesNothing() {
+        // A 3 U bolus never has more than 5 U in the depot, where the depot empties at its top rate whatever it holds:
+        // pooled or as lone pulses, the same curve.
+        val bolus = BS(timestamp = 0, amount = 3.0, type = BS.Type.NORMAL)
+        pulses(1.0)
+        val pooled = (0 until 480).map { sut.trafficJamPdModelIobCalculation(bolus, it + 0.37) }
+        pulses(0.0)
+        for (i in 0 until 480) {
+            val lone = sut.trafficJamPdModelIobCalculation(bolus, i + 0.37)
+            assertThat(lone.iobContrib).isWithin(1e-9).of(pooled[i].iobContrib)
+            assertThat(lone.activityContrib).isWithin(1e-9).of(pooled[i].activityContrib)
+        }
     }
 
     @Test
     fun trafficJamBasalPartsStayOneDose() {
         // The stock calculator's basal, temp basal and extended bolus parts are never pulsed: one dose, the same at every
-        // dose interaction, while a bolus of the same amount absorbs faster as lone pulses below full interaction.
-        val part = BS(timestamp = 0, amount = 0.4, type = BS.Type.NORMAL, isBasalInsulin = true)
-        val bolus = BS(timestamp = 0, amount = 0.4, type = BS.Type.NORMAL)
+        // dose interaction, while a bolus of the same amount is pulses, which above about 5 U absorb faster alone than
+        // pooled.
+        val part = BS(timestamp = 0, amount = 10.0, type = BS.Type.NORMAL, isBasalInsulin = true)
+        val bolus = BS(timestamp = 0, amount = 10.0, type = BS.Type.NORMAL)
         pulses(0.0)
         val alone = (0 until 480).map { sut.trafficJamPdModelIobCalculation(part, it + 0.5) }
         val lonePulses = (0 until 480).map { sut.trafficJamPdModelIobCalculation(bolus, it + 0.5) }
         pulses(1.0)
         val pooled = (0 until 480).map { sut.trafficJamPdModelIobCalculation(part, it + 0.5) }
+        val pooledPulses = (0 until 480).map { sut.trafficJamPdModelIobCalculation(bolus, it + 0.5) }
         for (i in 0 until 480) {
             assertThat(pooled[i].iobContrib).isEqualTo(alone[i].iobContrib)
             assertThat(pooled[i].activityContrib).isEqualTo(alone[i].activityContrib)
         }
-        assertThat(lonePulses[30].iobContrib).isLessThan(alone[30].iobContrib)
+        assertThat(lonePulses[60].iobContrib).isLessThan(pooledPulses[60].iobContrib - 0.05)
     }
 }

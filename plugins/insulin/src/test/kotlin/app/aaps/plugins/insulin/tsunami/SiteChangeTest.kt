@@ -41,7 +41,7 @@ class SiteChangeTest {
     private fun run(boluses: List<BS>, siteChanges: List<Long>, from: Long, mixing: Double = 1.0): List<Point> {
         val preferences = mock<Preferences>()
         whenever(preferences.get(DoubleKey.InsulinTrafficJamSpeedMultiplier)).thenReturn(1.0)
-        whenever(preferences.get(DoubleKey.InsulinTrafficJamSiteStartSpeed)).thenReturn(0.47)
+        whenever(preferences.get(DoubleKey.InsulinTrafficJamSiteStartSpeed)).thenReturn(0.48)
         whenever(preferences.get(DoubleKey.InsulinTrafficJamSiteRamp)).thenReturn(48.0)
         whenever(preferences.get(DoubleKey.InsulinTrafficJamMixing)).thenReturn(mixing)
         whenever(preferences.get(DoubleKey.InsulinTrafficJamCgmLag)).thenReturn(8.0)
@@ -93,9 +93,10 @@ class SiteChangeTest {
 
     @Test
     fun theOldAndTheNewSiteDoNotCrowdEachOther() {
-        // Ten minutes apart, the site changed in between (the first bolus's pulses take 2 minutes).
-        val atOldSite = bolus(change - 6 * minute, 3.0)
-        val atNewSite = bolus(change + 4 * minute, 4.0)
+        // Ten minutes apart, the site changed in between (the first bolus's pulses take 4 minutes), together more than the
+        // 5 U below which the depot doesn't crowd.
+        val atOldSite = bolus(change - 6 * minute, 6.0)
+        val atNewSite = bolus(change + 4 * minute, 6.0)
         val from = change - 10 * minute
         for (mixing in listOf(1.0, 0.4)) {
             // With a site change between them, the two boluses are the sum of each alone...
@@ -153,10 +154,10 @@ class SiteChangeTest {
 
     companion object {
 
-        /** Less than the extra IOB, U, that the two boluses ten minutes apart at one site show from crowding (0.08 U). */
+        /** Less than the extra IOB, U, that the two boluses ten minutes apart at one site show from crowding (0.09 U). */
         private const val CROWDING_SEEN = 0.02
 
-        /** Less than the extra IOB, U, a 3 U bolus on a brand-new site shows an hour after it against a settled site (0.25 U). */
+        /** Less than the extra IOB, U, a 3 U bolus on a brand-new site shows an hour after it against a settled site (0.29 U). */
         private const val RAMP_SEEN = 0.1
     }
 }

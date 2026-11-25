@@ -100,10 +100,17 @@ class TrafficJamChainTest {
 
     @Test
     fun theDepotRateFollowsTheFittedLaw() {
-        assertThat(TrafficJamChain.rate(1.0, 1.0)).isWithin(1e-15).of(TrafficJamChain.K1_B0)
+        // Below about 5 U the depot empties at its top rate whatever it holds, an empty one too...
+        assertThat(TrafficJamChain.rate(1.0, 1.0)).isEqualTo(TrafficJamChain.K1_MAX)
+        assertThat(TrafficJamChain.rate(1.0, 0.0)).isEqualTo(TrafficJamChain.K1_MAX)
+        assertThat(TrafficJamChain.rate(0.47, 4.9)).isWithin(1e-15).of(0.47 * TrafficJamChain.K1_MAX)
+        // ...and above it, the more it holds the slower; the speed scales both.
         assertThat(TrafficJamChain.rate(0.47, 10.0)).isWithin(1e-15).of(0.47 * TrafficJamChain.K1_B0 * 10.0.pow(TrafficJamChain.K1_B1))
-        // An empty depot is floored, not infinitely fast.
-        assertThat(TrafficJamChain.rate(1.0, 0.0)).isWithin(1e-12).of(TrafficJamChain.K1_B0 * 1e-6.pow(TrafficJamChain.K1_B1))
+        assertThat(TrafficJamChain.rate(1.0, 20.0)).isLessThan(TrafficJamChain.rate(1.0, 10.0))
+        // The two parts meet at 5.04 U, so the rate is continuous.
+        val meet = (TrafficJamChain.K1_MAX / TrafficJamChain.K1_B0).pow(1.0 / TrafficJamChain.K1_B1)
+        assertThat(meet).isWithin(0.01).of(5.04)
+        assertThat(TrafficJamChain.rate(1.0, meet * (1 + 1e-9))).isWithin(1e-9).of(TrafficJamChain.K1_MAX)
     }
 
     @Test

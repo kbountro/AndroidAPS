@@ -3,6 +3,7 @@ package app.aaps.plugins.insulin.tsunami
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToLong
 import kotlin.math.sinh
@@ -14,23 +15,30 @@ import kotlin.math.sinh
  *
  * D is insulin under the skin at the infusion site (the depot), X insulin in the blood (serum insulin is X over the
  * volume it spreads in), A insulin effect still to come, reported as activity = K_EFFECT * A, and C, with a CGM lag set
- * (DoubleKey.InsulinTrafficJamCgmLag, kc = 1 / lag), the effect the CGM has yet to show: activity is then kc * C. IOB is
- * D + X + A + C. Only the depot crowds: k1 = absorption speed * K1_B0 * D^K1_B1 ([rate]), which the callers
- * re-evaluate at every event from the live depot mass. The absorption speed is the speed setting
- * (DoubleKey.InsulinTrafficJamSpeedMultiplier) times the site's age factor ([siteFactor]): both are about the site.
- * Plasma and effect are the body's, and no setting scales them, so a dose's activity never jumps: a new dose only adds
- * to D.
+ * (DoubleKey.InsulinTrafficJamCgmLag, kc = 1 / lag), the effect the CGM has yet to show: activity is then kc * C. IOB
+ * is D + X + A + C. Only the depot crowds, and only above about 5 U: k1 = absorption speed * min(K1_B0 * D^K1_B1,
+ * K1_MAX) ([rate]), which the callers re-evaluate at every event from the live depot mass. The absorption speed is the
+ * speed setting (DoubleKey.InsulinTrafficJamSpeedMultiplier) times the site's age factor ([siteFactor]): both are about
+ * the site. Plasma and effect are the body's, and no setting scales them, so a dose's activity never jumps: a new dose
+ * only adds to D.
  *
- * Absorption is fitted to the EMA's Lyumjev assessment report (EMA/86760/2020) pump study ITSC alone: serum insulin
- * lispro (digitized, figures 17 and 18) after a breakfast bolus on a MiniMed 640G with the basal running, on day 1 and
- * day 3 of one 3-day infusion set, single wave (1.5 U/min) and dual wave (half at 1.5 U/min, half over 3 hours). The
- * pump delivery is replayed as given: the bolus in 0.05 U pulses a minute at a time, the basal and the square wave a
- * dose a minute, all of it in one depot (dose interaction 1), serum taken as proportional to X with one scale for all
- * four curves. Fitted: K1_B0 0.11391363 /min (a day-3 site with 1 U in the depot, half-life 6.1 min), K1_B1 -0.32231826,
- * the plasma half-life 51.5 min, and day 1 at 0.47 times day 3's speed; R^2 0.993 / 0.986 (day 1, single / dual wave),
- * 0.983 / 0.972 (day 3). Held at the published 44 min instead, the plasma stage fits day 3 worse (0.974 / 0.970). The
- * report does not give the bolus size; with 10 U assumed (6 / 15 U: K1_B1 -0.36 / -0.28, day 1 0.49 / 0.44, plasma
- * 51-52 min).
+ * Absorption is fitted to serum insulin lispro (digitized) from two pump studies of Lyumjev, all six curves together:
+ * the EMA's Lyumjev assessment report (EMA/86760/2020) pump study ITSC, figures 17 and 18 (a breakfast bolus on a
+ * MiniMed 640G with the basal running, on day 1 and day 3 of one 3-day infusion set, single wave (1.5 U/min) and dual
+ * wave (half at 1.5 U/min, half over 3 hours)), and Leohr et al. (Diabetes Obes Metab 2024;26:215): a 7.4 U pump bolus
+ * on day 1 of a treatment period, and serum insulin falling after the basal was suspended on day 2 (their site's speed
+ * fitted on its own: day 1 at 0.60, day 2 a day further along the ramp). The pump delivery is replayed as given:
+ * boluses in 0.05 U pulses a minute at a time, the basal and the square wave a dose a minute, all of it in one depot
+ * (dose interaction 1), serum taken as proportional to X with one scale per study. The doses the reports leave out come
+ * from their own numbers: ITSC's bolus, 9.8 U, from its serum area against the same report's serum area per unit (study
+ * ITRR), and its basal, 0.62 U/h, from its pre-dose serum the same way; Leohr's basal, 0.58 U/h, from the pre-bolus
+ * serum against the bolus's reported area above it. The suspension is plotted as the change from a level the paper
+ * doesn't give, so it counts by its shape. Fitted: K1_B0 0.16463769, K1_B1 -0.54393754, K1_MAX 0.06827318 /min (a depot
+ * half-life of 10.2 min whenever it holds less than 5.0 U), the plasma half-life 50.9 min, and day 1 at 0.48 times day
+ * 3's speed; R^2 0.993 / 0.988 (ITSC day 1, single / dual wave), 0.985 / 0.971 (day 3), 0.988 (Leohr's bolus), 0.984
+ * (the suspension). The previous law, K1_B0 * D^K1_B1 with no cap (0.11391363, -0.32231826, plasma 51.5 min, fitted to
+ * ITSC alone with a 10 U bolus assumed), fits these six curves worse: weighted error (squared residuals over each
+ * curve's range) 0.0089 against 0.0054, and refitted to them, still without a cap, 0.0063.
  *
  * The effect stage is the delay from insulin in the blood to its effect on blood glucose: the same for every insulin
  * lispro product and every route once the insulin is in the blood. It is fitted from measured serum insulin lispro to
@@ -49,13 +57,13 @@ import kotlin.math.sinh
  * model puts it at 2.1 /h, 19.8 min (FDA review of Lyumjev's pediatric and pump use, 2022). The loop predicts free
  * glucose, not a clamp's infusion rate.
  *
- * The site: a new infusion site absorbs at the start speed (DoubleKey.InsulinTrafficJamSiteStartSpeed, default 0.47, the
+ * The site: a new infusion site absorbs at the start speed (DoubleKey.InsulinTrafficJamSiteStartSpeed, default 0.48, the
  * pump study's day 1 against its day 3), rising linearly to full speed over the site ramp ([siteRampMs]:
  * DoubleKey.InsulinTrafficJamSiteRamp, default 48 hours, day 1 to day 3).
  *
  * A 0.5 U SMB on a day-3 site at speed 1, given on a 1 U/h basal, no CGM lag: share of it still on board after 30 min
- * 0.78, 1 h 0.52, 2 h 0.23, 3 h 0.10, activity peak at 24 min; on a new site (start speed 0.47) 0.86, 0.61, 0.28, 0.12,
- * peak at 40 min. A 10 U bolus on a day-3 site: 0.60 after 1 h, 0.27 after 2 h, 0.12 after 3 h, peak at 40 min.
+ * 0.83, 1 h 0.58, 2 h 0.26, 3 h 0.11, activity peak at 34 min; on a new site (start speed 0.48) 0.89, 0.68, 0.33, 0.15,
+ * peak at 50 min. A 10 U bolus on a day-3 site: 0.61 after 1 h, 0.27 after 2 h, 0.12 after 3 h, peak at 39 min.
  *
  * [propagate] advances the chain exactly for constant rates, any of them coinciding: k1 varies continuously and crosses
  * the others. Each term is a divided difference of exp(-x) at the scaled rates: two rates closer than PAIR_CLOSE by
@@ -67,13 +75,16 @@ internal object TrafficJamChain {
 
     private const val LN2 = 0.6931471805599453
 
-    /** Depot rate with 1 U in the depot on a settled (day-3) pump site at speed 1, 1/min. */
-    const val K1_B0 = 0.11391363
+    /** The crowded depot's rate K1_B0 * D^K1_B1, 1/min, D the depot mass in U (settled site, speed 1), where below K1_MAX. */
+    const val K1_B0 = 0.16463769
 
-    /** Crowding exponent: the depot rate is K1_B0 * D^K1_B1, D the depot mass in U. */
-    const val K1_B1 = -0.32231826
+    /** Crowding exponent of that rate. */
+    const val K1_B1 = -0.54393754
 
-    const val PLASMA_HALF_LIFE_MINUTES = 51.5
+    /** The depot's top rate, 1/min on a settled site at speed 1 (half-life 10.2 min), while it holds less than 5.0 U. */
+    const val K1_MAX = 0.06827318
+
+    const val PLASMA_HALF_LIFE_MINUTES = 50.9
     const val EFFECT_HALF_LIFE_MINUTES = 2.5
 
     /** X's exit rate (insulin leaving the blood), 1/min. */
@@ -109,7 +120,8 @@ internal object TrafficJamChain {
     }
 
     /** The depot rate at [absorptionSpeed] (speed setting times [siteFactor]) with [depotMass] U in the depot. */
-    fun rate(absorptionSpeed: Double, depotMass: Double): Double = absorptionSpeed * K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1)
+    fun rate(absorptionSpeed: Double, depotMass: Double): Double =
+        absorptionSpeed * min(K1_B0 * max(depotMass, MASS_FLOOR).pow(K1_B1), K1_MAX)
 
     /** The site ramp in ms for the setting's [hours] (DoubleKey.InsulinTrafficJamSiteRamp), kept within an hour and a week. */
     fun siteRampMs(hours: Double): Long = (hours.coerceIn(1.0, 168.0) * 3_600_000.0).roundToLong()

@@ -63,7 +63,7 @@ enum class DoubleKey(
     InactivityScaleFactor("inactivity_scale_factor", 1.0, 0.0, 1.5, defaultedBySM = true, dependency = BooleanKey.ActivityMonitorDetection),
 
     // Traffic Jam (Pool Compartment) per-patient absorption speed knob: a direct multiplier on the depot's
-    // rate (K1_B0, TrafficJamChain in plugins/insulin), the absorption from the infusion site, applied
+    // rate (TrafficJamChain.rate in plugins/insulin), the absorption from the infusion site, applied
     // as-is. The plasma and effect stages are the body's and stay as they are, so 2.0 speeds up the
     // absorption only, not the whole curve. Default 1.0: a settled (day-3) pump site, as fitted to the
     // EMA report's pump study.
@@ -71,9 +71,9 @@ enum class DoubleKey(
 
     // Traffic Jam new-site speed: a new infusion site's absorption speed, as a share of a settled site's
     // (TrafficJamChain.siteFactor in plugins/insulin). The site starts at this share of the speed setting
-    // at its cannula change and reaches the full setting linearly over InsulinTrafficJamSiteRamp. Default 0.47,
+    // at its cannula change and reaches the full setting linearly over InsulinTrafficJamSiteRamp. Default 0.48,
     // the EMA report's pump study's day 1 against its day 3; 1.0 turns it off.
-    InsulinTrafficJamSiteStartSpeed("insulin_traffic_jam_site_start_speed", 0.47, 0.2, 1.0, hideParentScreenIfHidden = true),
+    InsulinTrafficJamSiteStartSpeed("insulin_traffic_jam_site_start_speed", 0.48, 0.2, 1.0, hideParentScreenIfHidden = true),
 
     // Traffic Jam new-site ramp: how many hours a new infusion site takes to reach a settled site's speed, rising
     // linearly from InsulinTrafficJamSiteStartSpeed (TrafficJamChain.siteFactor in plugins/insulin). Default 48, the
