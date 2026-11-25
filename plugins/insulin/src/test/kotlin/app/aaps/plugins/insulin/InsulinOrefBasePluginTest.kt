@@ -122,7 +122,7 @@ class InsulinOrefBasePluginTest : TestBase() {
         assertThat(laggedPeak).isGreaterThan(plainPeak + 3)
         assertThat(laggedPeak).isLessThan(plainPeak + 13)
         assertThat(lagged.sumOf { it.activityContrib }).isWithin(1e-3).of(plain.sumOf { it.activityContrib })
-        // The whole dose is on board at once (less the 0.32% still on board at the 480-min horizon, which the preview
+        // The whole dose is on board at once (less the 0.20% still on board at the 480-min horizon, which the preview
         // subtracts so that IOB ends at 0 there), and the effect still on its way to the CGM counts as on board.
         assertThat(lagged[0].iobContrib).isWithin(5e-3).of(1.0)
         assertThat(lagged[60].iobContrib).isGreaterThan(plain[60].iobContrib)
