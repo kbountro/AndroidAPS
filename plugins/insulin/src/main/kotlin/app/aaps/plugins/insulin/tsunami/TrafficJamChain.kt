@@ -46,24 +46,24 @@ import kotlin.math.sinh
  * 2024;26:215): 0.2 U/kg of Lyumjev or Humalog injected in adults with type 1 diabetes on pumps once plasma glucose had
  * risen to 240 mg/dL during a basal suspension, glucose every 5 minutes, serum every 5 minutes for the first hour. The
  * glucose rise under way at the bolus continues at a constant rate and the insulin, one first-order stage from the
- * measured serum, bends it down, each arm with its own start, rise and scale. The Lyumjev arm alone fits best at 1.5
- * min, and EFFECT_HALF_LIFE_MINUTES is that, this being a model of Lyumjev (Humalog alone 3 min, one half-life shared
- * by both 2.5 min: the two arms' difference is within the noise of the mean curves; fitted only from 20 or 30 minutes
- * after the bolus, 3.5-8 min). Glucose turned down 10 minutes after the Lyumjev injection and 15-20 minutes after the
- * Humalog one, too soon for a stage of 20 minutes or more. Glucose clamps come out slower: fitted from measured serum
- * to the clamp's glucose infusion rate, 23.5-30 min for lispro in type 1 diabetes (ITRR, Linnebjerg et al., Clin
- * Pharmacokinet 2020; PDY12704, FDA review of Admelog), 23.5-30.5 min for aspart (EMA report on Fiasp, injection and
- * pump bolus), 27.5-29 min in type 2 diabetes (ITRU, Leohr et al., Clin Pharmacokinet 2020) and 39 min in healthy
- * subjects (IOPY, EMA report on Humalog 200 U/mL); Lilly's population PK/PD model puts it at 2.1 /h, 19.8 min (FDA
- * review of Lyumjev's pediatric and pump use, 2022). The loop predicts free glucose, not a clamp's infusion rate.
+ * measured serum, bends it down, each arm with its own start, rise and scale: one half-life shared by both insulins
+ * fits best at 2.5 min (about 1.5-3.5; Lyumjev alone 1 min, Humalog alone 3 min; fitted only from 20 or 30 minutes
+ * after the bolus, 4-8 min). Glucose turned down 10 minutes after the Lyumjev injection and 15-20 minutes after the
+ * Humalog one, too soon for a stage of 20 minutes or more. EFFECT_HALF_LIFE_MINUTES is that. Glucose clamps come out
+ * slower: fitted from measured serum to the clamp's glucose infusion rate, 23.5-30 min for lispro in type 1 diabetes
+ * (ITRR, Linnebjerg et al., Clin Pharmacokinet 2020; PDY12704, FDA review of Admelog), 23.5-30.5 min for aspart
+ * (EMA report on Fiasp, injection and pump bolus), 27.5-29 min in type 2 diabetes (ITRU, Leohr et al., Clin
+ * Pharmacokinet 2020) and 39 min in healthy subjects (IOPY, EMA report on Humalog 200 U/mL); Lilly's population PK/PD
+ * model puts it at 2.1 /h, 19.8 min (FDA review of Lyumjev's pediatric and pump use, 2022). The loop predicts free
+ * glucose, not a clamp's infusion rate.
  *
  * The site: a new infusion site absorbs at the start speed (DoubleKey.InsulinTrafficJamSiteStartSpeed, default 0.48, the
  * pump study's day 1 against its day 3), rising linearly to full speed over the site ramp ([siteRampMs]:
  * DoubleKey.InsulinTrafficJamSiteRamp, default 48 hours, day 1 to day 3).
  *
  * A 0.5 U SMB on a day-3 site at speed 1, given on a 1 U/h basal, no CGM lag: share of it still on board after 30 min
- * 0.82, 1 h 0.56, 2 h 0.25, 3 h 0.11, activity peak at 32 min; on a new site (start speed 0.48) 0.89, 0.67, 0.33, 0.15,
- * peak at 48 min. A 10 U bolus on a day-3 site: 0.60 after 1 h, 0.27 after 2 h, 0.12 after 3 h, peak at 37 min.
+ * 0.83, 1 h 0.58, 2 h 0.26, 3 h 0.11, activity peak at 34 min; on a new site (start speed 0.48) 0.89, 0.68, 0.33, 0.15,
+ * peak at 50 min. A 10 U bolus on a day-3 site: 0.61 after 1 h, 0.27 after 2 h, 0.12 after 3 h, peak at 39 min.
  *
  * [propagate] advances the chain exactly for constant rates, any of them coinciding: k1 varies continuously and crosses
  * the others. Each term is a divided difference of exp(-x) at the scaled rates: two rates closer than PAIR_CLOSE by
@@ -85,7 +85,7 @@ internal object TrafficJamChain {
     const val K1_MAX = 0.06827318
 
     const val PLASMA_HALF_LIFE_MINUTES = 50.9
-    const val EFFECT_HALF_LIFE_MINUTES = 1.5
+    const val EFFECT_HALF_LIFE_MINUTES = 2.5
 
     /** X's exit rate (insulin leaving the blood), 1/min. */
     const val K_PLASMA = LN2 / PLASMA_HALF_LIFE_MINUTES

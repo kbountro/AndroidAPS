@@ -157,7 +157,7 @@ class SiteChangeTest {
         /** Less than the extra IOB, U, that the two boluses ten minutes apart at one site show from crowding (0.09 U). */
         private const val CROWDING_SEEN = 0.02
 
-        /** Less than the extra IOB, U, a 3 U bolus on a brand-new site shows an hour after it against a settled site (0.30 U). */
+        /** Less than the extra IOB, U, a 3 U bolus on a brand-new site shows an hour after it against a settled site (0.29 U). */
         private const val RAMP_SEEN = 0.1
     }
 }
